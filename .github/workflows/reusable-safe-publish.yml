@@ -1,0 +1,87 @@
+name: safe-publish / gate
+
+on:
+  workflow_call:
+    inputs:
+      tool_ref:
+        description: "Immutable commit of AIALRA-0/agent-github-safe-publish"
+        required: true
+        type: string
+      shadow:
+        description: "Report failures without blocking the caller workflow"
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      SAFE_PUBLISH_POLICY_B64:
+        description: "Trimmed private policy encoded as Base64"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: safe-publish / gate
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the caller with complete history so a shallow clone cannot receive a pass.
+      - name: Check out publication candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          lfs: true
+          path: target
+          persist-credentials: false
+
+      # Check out the central scanner at the same immutable commit supplied by the caller.
+      - name: Check out safe-publish tool
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: AIALRA-0/agent-github-safe-publish
+          ref: ${{ inputs.tool_ref }}
+          path: tool
+          persist-credentials: false
+
+      # Untrusted events never receive the private policy and therefore cannot obtain a full pass.
+      - name: Run unified publication gate
+        id: gate
+        continue-on-error: ${{ inputs.shadow }}
+        env:
+          SAFE_PUBLISH_POLICY_B64: ${{ secrets.SAFE_PUBLISH_POLICY_B64 }}
+          SAFE_PUBLISH_UNTRUSTED: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || github.actor == 'dependabot[bot]' }}
+        shell: bash
+        run: |
+          # Select the fail-closed policy path without printing the Secret or decoded content.
+          if [[ "$SAFE_PUBLISH_UNTRUSTED" == "true" ]]; then
+            python tool/scripts/safe_publish.py gate --source target --repository "${{ github.repository }}" --generic-only --report "$RUNNER_TEMP/safe-publish-report.json"
+          else
+            python tool/scripts/safe_publish.py gate --source target --repository "${{ github.repository }}" --policy-b64-env SAFE_PUBLISH_POLICY_B64 --report "$RUNNER_TEMP/safe-publish-report.json"
+          fi
+
+      # Preserve an aggregate outcome in the job summary while the detailed report is discarded with the runner.
+      - name: Summarize shadow outcome
+        if: always()
+        shell: bash
+        run: |
+          # Parse only aggregate fields; matched values never exist in the machine report.
+          python - <<'PY'
+          import json  # Read the local redacted report without invoking a shell parser.
+          import os  # Locate the runner-owned temporary directory.
+          from pathlib import Path  # Build the report path without string concatenation risks.
+
+          report_path = Path(os.environ["RUNNER_TEMP"]) / "safe-publish-report.json"  # Use the discarded runner path.
+          if report_path.exists():  # A missing report means the gate stopped before coverage was established.
+              report = json.loads(report_path.read_text(encoding="utf-8"))  # Parse the redacted machine report.
+              summary = report.get("summary", {})  # Limit the published summary to aggregate counts.
+              lines = [  # Build a small Markdown summary without repository paths or identifiers.
+                  "## safe-publish shadow gate",
+                  f"- Decision: `{report.get('decision', 'incomplete')}`",
+                  f"- Findings: `{summary.get('finding_count', 0)}`",
+                  f"- Coverage gaps: `{summary.get('coverage_gap_count', 1)}`",
+              ]
+          else:  # Fail closed when no machine report was produced.
+              lines = ["## safe-publish shadow gate", "- Decision: `incomplete`", "- Coverage gaps: `1`"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:  # Append to GitHub's approved summary file.
+              handle.write("\n".join(lines) + "\n")  # Write aggregate values only.
+          PY

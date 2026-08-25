@@ -1,0 +1,85 @@
+{
+  "archived_count": 2,
+  "candidate_count": 347578,
+  "coverage_gap_counts_by_surface": {
+    "git-history": 5904,
+    "git-lfs": 2,
+    "release-assets": 140
+  },
+  "coverage_gap_reason_counts": {
+    "archive-member-limit": 61,
+    "binary-review-required": 3516,
+    "finding-limit-exceeded": 6,
+    "git-history-time-limit-exceeded": 3,
+    "git-lfs-enumeration-failed": 2,
+    "git-object-enumeration-failed": 2,
+    "invalid-tar": 90,
+    "invalid-zip": 1,
+    "opaque-binary": 2294,
+    "oversized-object": 49,
+    "oversized-release-asset": 7,
+    "shallow-history": 15
+  },
+  "coverage_status_counts": {
+    "git-history::checked": 73,
+    "git-history::tool_failed": 11,
+    "git-history::unreadable": 5893,
+    "git-lfs::not_present": 91,
+    "git-lfs::tool_failed": 2,
+    "git-refs::checked": 93,
+    "gitleaks::checked": 93,
+    "release-assets::checked": 9,
+    "release-assets::not_present": 84,
+    "release-assets::tool_failed": 61,
+    "release-assets::unreadable": 79,
+    "repository-metadata::checked": 91,
+    "repository-metadata::not_present": 2,
+    "submodules::checked": 3,
+    "submodules::not_present": 90
+  },
+  "decision_counts": {
+    "block": 2,
+    "incomplete": 91,
+    "pass": 0,
+    "review": 0
+  },
+  "finding_counts_by_rule": {
+    "credential.assignment": 22069,
+    "credential.database-uri": 1417,
+    "credential.private-key": 21,
+    "credential.signed-url": 97,
+    "data.database-artifact": 220,
+    "gitleaks.curl-auth-header": 5,
+    "gitleaks.generic-api-key": 67,
+    "gitleaks.jwt": 3,
+    "gitleaks.private-key": 3,
+    "gitleaks.sourcegraph-access-token": 3,
+    "identity.address-us": 338,
+    "identity.email": 44612,
+    "identity.phone": 4059,
+    "identity.uid": 4266,
+    "infrastructure.ipv4": 37506,
+    "infrastructure.unix-home": 3465,
+    "infrastructure.url": 496124,
+    "infrastructure.windows-path": 123,
+    "private.brand.aialra": 22707
+  },
+  "fork_count": 10,
+  "generated_at": "2026-08-25T20:04:04+00:00",
+  "legacy_local_inventory": {
+    "ci_security_workflow_repository_count": 18,
+    "env_ignored_repository_count": 42,
+    "gitleaks_config_repository_count": 13,
+    "synchronized_repository_count": 78
+  },
+  "owner_repository_count": 93,
+  "private_count": 22,
+  "public_count": 71,
+  "repository_security_setting_counts": {
+    "disabled::disabled": 7,
+    "enabled::enabled": 64,
+    "unavailable::unavailable": 22
+  },
+  "schema_version": 1,
+  "user_level_push_protection": "unknown"
+}

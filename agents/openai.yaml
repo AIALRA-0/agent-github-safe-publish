@@ -1,0 +1,7 @@
+interface:
+  display_name: "GitHub 安全发布"
+  short_description: "统一审计、脱敏并安全发布 GitHub 仓库内容"
+  default_prompt: "Use $github-safe-publish to audit and prepare this repository for an authorized GitHub publication."
+
+policy:
+  allow_implicit_invocation: true
