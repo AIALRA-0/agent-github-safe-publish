@@ -614,6 +614,11 @@ def scan_bytes(
         state.add_coverage(surface, "unreadable", f"oversized-object:{object_id}")
         return
     suffix = Path(display_path.split("!")[-1]).suffix.lower()
+    # Treat Git LFS pointers as text even when their tracked filename uses an opaque suffix.
+    pointer_text = decode_text(data)
+    if pointer_text is not None and pointer_text.startswith("version https://git-lfs.github.com/spec/v1\n"):
+        scan_text(state, pointer_text, surface=surface, object_id=object_id, display_path=display_path)
+        return
     if suffix in DATABASE_SUFFIXES:
         database_rule = Rule("data.database-artifact", "data", "block", re.compile(r"$^"))
         state.add_finding(
@@ -666,14 +671,31 @@ def iter_working_tree(source: Path) -> Iterable[tuple[str, Path]]:
         yield path.relative_to(source).as_posix(), path
 
 
+def indexed_gitlinks(source: Path) -> set[str]:
+    """Return submodule paths from the index without dereferencing their working directories."""
+    staged = run(["git", "ls-files", "--stage", "-z"], source, text=False)
+    if staged.returncode != 0:
+        return set()
+    gitlinks: set[str] = set()
+    for entry in staged.stdout.split(b"\x00"):
+        metadata, separator, raw_path = entry.partition(b"\t")
+        if separator and metadata.startswith(b"160000 "):
+            gitlinks.add(raw_path.decode("utf-8", errors="surrogateescape"))
+    return gitlinks
+
+
 def scan_working_tree(state: ScanState, source: Path) -> None:
     count = 0
+    gitlinks = indexed_gitlinks(source)
     for relative, path in iter_working_tree(source):
         count += 1
         object_id = f"working-tree:{relative}"
         if any(fnmatch.fnmatch(relative, pattern) for pattern in state.policy["blocked_paths"]):
             rule = Rule("policy.blocked-path", "data", "block", re.compile(r"$^"))
             state.add_finding(surface="working-tree", object_id=object_id, location=relative, rule=rule, raw_value=None, legal=is_legal_path(relative))
+        # The submodule scanner handles gitlinks and .gitmodules; reading the directory as a file is invalid.
+        if relative in gitlinks:
+            continue
         try:
             if path.is_symlink():
                 target = os.readlink(path)
@@ -1089,6 +1111,10 @@ def command_policy_candidates(args: argparse.Namespace) -> int:
     output = ensure_private_path(Path(args.output))
     state = ScanState(args.repository or source.name, empty_policy(), collect_raw=True)
     scan_working_tree(state, source)
+    # Candidate discovery covers deleted and renamed history plus non-working-tree Git surfaces.
+    scan_git_history(state, source)
+    scan_submodules(state, source)
+    scan_lfs(state, source)
     candidate_document = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -1117,8 +1143,9 @@ def apply_replacements(destination: Path, policy: dict[str, Any]) -> dict[str, A
     identifiers = {item["id"]: item for item in policy["identifiers"]}
     mappings = {item["identifier_id"]: item["replacement"] for item in policy["replacements"]}
     changed: list[dict[str, Any]] = []
+    gitlinks = indexed_gitlinks(destination)
     for relative, path in iter_working_tree(destination):
-        if is_legal_path(relative) or path.is_symlink():
+        if is_legal_path(relative) or path.is_symlink() or relative in gitlinks:
             continue
         try:
             data = path.read_bytes()
@@ -1143,6 +1170,52 @@ def apply_replacements(destination: Path, policy: dict[str, Any]) -> dict[str, A
     return {"changed_file_count": len(changed), "changed_files": changed}
 
 
+def restore_clean_root_gitlinks(source: Path, commit: str, destination: Path) -> int:
+    """Recreate submodule index entries omitted by git archive in a clean publication root."""
+    tree = run(["git", "ls-tree", "-r", "-z", commit], source, text=False)
+    if tree.returncode != 0:
+        raise RuntimeError("Unable to enumerate source tree modes")
+    restored = 0
+    for entry in tree.stdout.split(b"\x00"):
+        metadata, separator, raw_path = entry.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[0] != b"160000":
+            continue
+        oid = fields[2].decode("ascii", errors="strict")
+        path = raw_path.decode("utf-8", errors="surrogateescape")
+        updated = run(["git", "update-index", "--add", "--cacheinfo", f"160000,{oid},{path}"], destination)
+        if updated.returncode != 0:
+            raise RuntimeError("Unable to preserve a source submodule pointer")
+        restored += 1
+    return restored
+
+
+def prepare_failure_report(
+    *,
+    source: Path,
+    destination: Path,
+    report_path: Path,
+    commit: str | None,
+    mode: str,
+    policy: dict[str, Any] | None,
+    coverage: list[Coverage],
+    error_class: str,
+) -> None:
+    """Write a redacted machine report when preparation cannot establish complete coverage."""
+    document = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "decision": "incomplete",
+        "source_commit": commit,
+        "mode": mode,
+        "destination": str(destination),
+        "policy_fingerprint": policy_fingerprint(policy),
+        "coverage": consolidated_coverage(coverage),
+        "error": error_class,
+    }
+    write_json(report_path, document, private=True)
+
+
 def command_prepare(args: argparse.Namespace) -> int:
     source = Path(args.source).expanduser().resolve()
     destination = Path(args.destination).expanduser().resolve()
@@ -1154,28 +1227,60 @@ def command_prepare(args: argparse.Namespace) -> int:
         pass
     else:
         raise ValueError("Destination must be outside the private source directory")
-    policy = load_policy(Path(args.policy), source)
-    commit_check = run(["git", "rev-parse", "--verify", f"{args.commit}^{{commit}}"], source)
-    if commit_check.returncode != 0:
-        raise ValueError("Source commit is unavailable")
-    exact_commit = commit_check.stdout.strip()
-    if args.mode == "preserve-history":
-        cloned = run(["git", "clone", "--no-hardlinks", str(source), str(destination)])
-        if cloned.returncode != 0:
-            raise RuntimeError("Unable to create isolated publication clone")
-        checked_out = run(["git", "checkout", "--detach", exact_commit], destination)
-        if checked_out.returncode != 0:
-            raise RuntimeError("Unable to check out the exact source commit")
-    else:
-        destination.mkdir(parents=True)
-        archived = run(["git", "archive", "--format=tar", exact_commit], source, text=False)
-        if archived.returncode != 0:
-            raise RuntimeError("Unable to export the exact source commit")
-        safe_extract_git_archive(archived.stdout, destination)
-        initialized = run(["git", "init", "-b", "main"], destination)
-        if initialized.returncode != 0:
-            raise RuntimeError("Unable to initialize the clean publication root")
-    replacement_report = apply_replacements(destination, policy)
+    report_path = Path(args.report)
+    policy: dict[str, Any] | None = None
+    exact_commit: str | None = None
+    preparation_coverage: list[Coverage] = []
+    try:
+        policy = load_policy(Path(args.policy), source)
+        commit_check = run(["git", "rev-parse", "--verify", f"{args.commit}^{{commit}}"], source)
+        if commit_check.returncode != 0:
+            raise ValueError("Source commit is unavailable")
+        exact_commit = commit_check.stdout.strip()
+
+        # A publication copy cannot be complete when a referenced LFS entity is absent.
+        lfs_state = ScanState(source.name, empty_policy())
+        scan_lfs(lfs_state, source)
+        preparation_coverage.extend(lfs_state.coverage)
+        if any(item.status not in {"checked", "not_present"} for item in lfs_state.coverage):
+            raise RuntimeError("Required LFS entities are unavailable")
+
+        if args.mode == "preserve-history":
+            cloned = run(["git", "clone", "--no-hardlinks", str(source), str(destination)])
+            if cloned.returncode != 0:
+                raise RuntimeError("Unable to create isolated publication clone")
+            checked_out = run(["git", "checkout", "--detach", exact_commit], destination)
+            if checked_out.returncode != 0:
+                raise RuntimeError("Unable to check out the exact source commit")
+        else:
+            destination.mkdir(parents=True)
+            archived = run(["git", "archive", "--format=tar", exact_commit], source, text=False)
+            if archived.returncode != 0:
+                raise RuntimeError("Unable to export the exact source commit")
+            safe_extract_git_archive(archived.stdout, destination)
+            initialized = run(["git", "init", "-b", "main"], destination)
+            if initialized.returncode != 0:
+                raise RuntimeError("Unable to initialize the clean publication root")
+            restore_clean_root_gitlinks(source, exact_commit, destination)
+        replacement_report = apply_replacements(destination, policy)
+    except (OSError, RuntimeError, ValueError) as exc:
+        # Remove only the disposable destination created by this command after its path was validated above.
+        if destination.exists():
+            shutil.rmtree(destination)
+        if not preparation_coverage:
+            preparation_coverage.append(Coverage("prepare", "tool_failed", "preparation-failed"))
+        prepare_failure_report(
+            source=source,
+            destination=destination,
+            report_path=report_path,
+            commit=exact_commit,
+            mode=args.mode,
+            policy=policy,
+            coverage=preparation_coverage,
+            error_class=exc.__class__.__name__,
+        )
+        print(json.dumps({"decision": "incomplete", "error": exc.__class__.__name__}, sort_keys=True), file=sys.stderr)
+        return 4
     report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -1185,7 +1290,7 @@ def command_prepare(args: argparse.Namespace) -> int:
         "policy_fingerprint": policy_fingerprint(policy),
         **replacement_report,
     }
-    write_json(Path(args.report), report, private=True)
+    write_json(report_path, report, private=True)
     print(json.dumps({"source_commit": exact_commit, "mode": args.mode, "changed_file_count": replacement_report["changed_file_count"]}, sort_keys=True))
     return 0
 

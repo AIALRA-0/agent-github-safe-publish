@@ -195,6 +195,13 @@ class ArtifactTests(unittest.TestCase):
         state.add_coverage("working-tree", "checked", object_count=1)
         self.assertEqual("block", subject.decision_for(state))
 
+    def test_lfs_pointer_with_opaque_suffix_is_scanned_as_text(self) -> None:
+        # A pointer is text metadata, so a .bin filename must not create a binary-review coverage gap.
+        pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:" + (b"a" * 64) + b"\nsize 4\n"
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(state, pointer, surface="working-tree", object_id="working-tree:large.bin", display_path="large.bin")
+        self.assertFalse(any(item.reason.startswith("binary-review-required") for item in state.coverage))
+
 
 class RepositoryTests(unittest.TestCase):
     def test_full_history_submodule_and_missing_lfs_are_enumerated(self) -> None:
@@ -234,12 +241,30 @@ class RepositoryTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-m", "add missing lfs fixture"], cwd=repository, check=True, capture_output=True)
 
             state = subject.ScanState("synthetic", subject.empty_policy())
+            subject.scan_working_tree(state, repository)
             subject.scan_git_history(state, repository)
             subject.scan_submodules(state, repository)
             subject.scan_lfs(state, repository)
             self.assertTrue(any(item.rule_id == "credential.assignment" for item in state.findings))
             self.assertTrue(any(item.surface == "submodules" and item.object_count >= 1 for item in state.coverage))
             self.assertTrue(any(item.surface == "git-lfs" and item.status == "unreadable" for item in state.coverage))
+            self.assertFalse(any(item.reason.startswith("file-unreadable:working-tree:vendor/demo") for item in state.coverage))
+
+            # Private candidate generation includes deleted history rather than only the current working tree.
+            codex_home = Path(temporary) / "candidate-home"
+            candidate_output = codex_home / "private" / "github-safe-publish" / "candidates.private.json"
+            old_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                candidate_args = type("Args", (), {"source": str(repository), "repository": "synthetic", "output": str(candidate_output)})()
+                self.assertEqual(4, subject.command_policy_candidates(candidate_args))
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            candidate_document = json.loads(candidate_output.read_text(encoding="utf-8"))
+            self.assertTrue(any(item["rule_id"] == "credential.assignment" and "old.txt" in item["object"] for item in candidate_document["candidates"]))
 
             # Fleet auditing records a bounded failure instead of claiming unscanned history is clean.
             bounded_state = subject.ScanState("synthetic", subject.empty_policy())
@@ -278,6 +303,12 @@ class RepositoryTests(unittest.TestCase):
             (source / "sample.txt").write_text("AIALRA owner@private.test\n", encoding="utf-8")
             subprocess.run(["git", "add", "sample.txt"], cwd=source, check=True)
             subprocess.run(["git", "commit", "-m", "synthetic fixture"], cwd=source, check=True, capture_output=True)
+            # Add a synthetic gitlink so clean-root mode must preserve its exact tree semantics.
+            submodule_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+            (source / ".gitmodules").write_text('[submodule "vendor/demo"]\n\tpath = vendor/demo\n\turl = https://example.invalid/demo.git\n', encoding="utf-8")
+            subprocess.run(["git", "add", ".gitmodules"], cwd=source, check=True)
+            subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"160000,{submodule_commit},vendor/demo"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-m", "add synthetic gitlink"], cwd=source, check=True, capture_output=True)
             policy_path.parent.mkdir(parents=True)
             policy_path.write_text(json.dumps(synthetic_policy()), encoding="utf-8")
             commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
@@ -304,6 +335,41 @@ class RepositoryTests(unittest.TestCase):
                     os.environ["CODEX_HOME"] = old_codex_home
             self.assertEqual("AIALRA owner@private.test\n", (source / "sample.txt").read_text(encoding="utf-8"))
             self.assertEqual("ExampleOrg owner@example.invalid\n", (destination / "sample.txt").read_text(encoding="utf-8"))
+            staged = subprocess.run(["git", "ls-files", "--stage", "vendor/demo"], cwd=destination, check=True, capture_output=True, text=True).stdout
+            self.assertTrue(staged.startswith(f"160000 {submodule_commit} 0\tvendor/demo"))
+
+    def test_prepare_missing_lfs_writes_incomplete_report_and_removes_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            destination = root / "publication"
+            codex_home = root / "codex-home"
+            policy_path = codex_home / "private" / "github-safe-publish" / "policy.private.json"
+            report_path = codex_home / "private" / "github-safe-publish" / "prepare-report.json"
+            source.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=source, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=source, check=True)
+            (source / ".gitattributes").write_text("large.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+            (source / "large.bin").write_text("version https://git-lfs.github.com/spec/v1\n" + "oid sha256:" + ("a" * 64) + "\nsize 4\n", encoding="utf-8")
+            subprocess.run(["git", "add", ".gitattributes", "large.bin"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-m", "missing LFS fixture"], cwd=source, check=True, capture_output=True)
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(json.dumps(synthetic_policy()), encoding="utf-8")
+            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+            old_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                args = type("Args", (), {"source": str(source), "destination": str(destination), "policy": str(policy_path), "commit": commit, "mode": "clean-root", "report": str(report_path)})()
+                self.assertEqual(4, subject.command_prepare(args))
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual("incomplete", report["decision"])
+            self.assertFalse(destination.exists())
 
     def test_same_content_and_policy_produce_same_decision(self) -> None:
         policy = subject.validate_policy(synthetic_policy())
