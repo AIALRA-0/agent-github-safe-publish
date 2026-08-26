@@ -19,6 +19,8 @@ The JSON object uses `schema_version: 1` and contains all of these arrays:
 
 `approved_locations.object` and `exceptions.object` are exact object identifiers. Wildcards are rejected. Repository files cannot add or override these entries.
 
+Protected legal records require an exact `approved_locations` entry after information-owner review. The approval clears the review finding for that rule and object, but never authorizes replacement or modification of the legal record.
+
 ## 3 Candidate review
 
 The information owner reviews raw candidates locally. Convert only confirmed private values into `identifiers`, then assign stable synthetic replacements. Keep public third-party references out of the private identifier list.

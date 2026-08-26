@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="210" height="28" role="img" aria-label="trigger: every transfer">
+  <title>trigger: every transfer</title>
+  <clipPath id="r"><rect width="210" height="28" rx="6"/></clipPath>
+  <g clip-path="url(#r)"><rect width="72" height="28" fill="#24292f"/><rect x="72" width="138" height="28" fill="#0969da"/></g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Segoe UI,sans-serif" font-size="12" font-weight="600"><text x="36" y="18">trigger</text><text x="141" y="18">every transfer</text></g>
+</svg>

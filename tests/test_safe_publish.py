@@ -129,6 +129,41 @@ class PolicyTests(unittest.TestCase):
         private_findings = [item for item in state.findings if item.rule_id == "private.brand"]
         self.assertEqual("approved", private_findings[0].status)
 
+    def test_legal_record_requires_an_exact_information_owner_approval(self) -> None:
+        # Legal records stay in review until the information owner approves the exact rule and object location.
+        unapproved_state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
+        subject.scan_text(
+            unapproved_state,
+            "AIALRA",
+            surface="working-tree",
+            object_id="working-tree:LICENSE",
+            display_path="LICENSE",
+        )
+        unapproved_findings = [item for item in unapproved_state.findings if item.rule_id == "private.brand"]
+        self.assertEqual("review", unapproved_findings[0].status)
+
+        # An exact approval records completed human review without allowing a replacement or wildcard exception.
+        approved_policy = synthetic_policy()
+        approved_policy["approved_locations"] = [
+            {
+                "rule_id": "private.brand",
+                "object": "working-tree:LICENSE",
+                "approved_by": "information-owner",
+                "reason": "Preserve reviewed public legal provenance",
+            }
+        ]
+        approved_state = subject.ScanState("synthetic", subject.validate_policy(approved_policy))
+        subject.scan_text(
+            approved_state,
+            "AIALRA",
+            surface="working-tree",
+            object_id="working-tree:LICENSE",
+            display_path="LICENSE",
+        )
+        approved_findings = [item for item in approved_state.findings if item.rule_id == "private.brand"]
+        self.assertEqual("approved", approved_findings[0].status)
+        self.assertTrue(approved_findings[0].legal_protected)
+
     def test_wildcard_approval_is_rejected(self) -> None:
         policy = synthetic_policy()
         policy["approved_locations"] = [
@@ -202,6 +237,25 @@ class ArtifactTests(unittest.TestCase):
         subject.scan_bytes(state, pointer, surface="working-tree", object_id="working-tree:large.bin", display_path="large.bin")
         self.assertFalse(any(item.reason.startswith("binary-review-required") for item in state.coverage))
 
+    def test_svg_source_is_scanned_as_text(self) -> None:
+        # SVG attributes and text nodes can contain secrets even though the file is displayed as an image.
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>password=SYNTHETIC_SVG_SECRET</text></svg>'
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(state, svg, surface="working-tree", object_id="working-tree:diagram.svg", display_path="diagram.svg")
+        self.assertIn("credential.assignment", {finding.rule_id for finding in state.findings})
+        self.assertNotIn("infrastructure.url", {finding.rule_id for finding in state.findings})
+        self.assertFalse(any(item.reason.startswith("binary-review-required") for item in state.coverage))
+
+    def test_invalid_svg_and_embedded_raster_fail_closed(self) -> None:
+        # Invalid XML and embedded raster data both leave an explicit coverage gap.
+        invalid_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(invalid_state, b"<svg>", surface="working-tree", object_id="working-tree:invalid.svg", display_path="invalid.svg")
+        self.assertTrue(any(item.reason.startswith("invalid-svg") for item in invalid_state.coverage))
+        embedded_state = subject.ScanState("synthetic", subject.empty_policy())
+        embedded_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,c3ludGhldGlj"/></svg>'
+        subject.scan_bytes(embedded_state, embedded_svg, surface="working-tree", object_id="working-tree:embedded.svg", display_path="embedded.svg")
+        self.assertTrue(any(item.reason.startswith("binary-review-required") for item in embedded_state.coverage))
+
 
 class RepositoryTests(unittest.TestCase):
     def test_full_history_submodule_and_missing_lfs_are_enumerated(self) -> None:
@@ -264,7 +318,13 @@ class RepositoryTests(unittest.TestCase):
                 else:
                     os.environ["CODEX_HOME"] = old_codex_home
             candidate_document = json.loads(candidate_output.read_text(encoding="utf-8"))
-            self.assertTrue(any(item["rule_id"] == "credential.assignment" and "old.txt" in item["object"] for item in candidate_document["candidates"]))
+            historical_paths = ("old.txt", "renamed.txt")
+            self.assertTrue(
+                any(
+                    item["rule_id"] == "credential.assignment" and any(path in item["object"] for path in historical_paths)
+                    for item in candidate_document["candidates"]
+                )
+            )
 
             # Fleet auditing records a bounded failure instead of claiming unscanned history is clean.
             bounded_state = subject.ScanState("synthetic", subject.empty_policy())

@@ -3,5 +3,7 @@ __pycache__/
 .pytest_cache/
 .safe-publish/
 reports/
+output/playwright/
+.playwright-cli/
 policy.private.json
 candidates.private.json

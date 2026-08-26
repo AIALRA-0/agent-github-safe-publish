@@ -1,13 +1,23 @@
 ---
 name: github-safe-publish
-description: Audit, sanitize, and gate a repository before an authorized GitHub publication. Use when code, history, LFS objects, release assets, metadata, or generated artifacts may expose credentials, personal identifiers, private infrastructure, databases, or embedded document metadata.
+description: Audit, sanitize, and gate repository content before it is sent to GitHub. Use whenever a task may push, publish, upload, sync, mirror, open-source, or create or update a GitHub Release, even when the user does not mention privacy or redaction. Do not use for read-only GitHub inspection or a purely local commit with no planned remote transfer.
 ---
 
 # GitHub Safe Publish
 
 Use one policy and one fail-closed decision model for every repository publication. Keep detection, proposed edits, approval, and external writes as separate actions.
 
-## 1 Authorization boundary
+## 1 Mandatory invocation
+
+- Invoke this Skill as soon as a task may transfer repository content or artifacts to GitHub. The user does not need to say “sanitize,” “redact,” or the Skill name.
+- Treat “push this,” “publish the repository,” “upload to GitHub,” “sync the remote,” “mirror the project,” “make it open source,” and “create or update a Release” as publication intent.
+- Do not invoke it for read-only repository inspection or a purely local commit when no remote transfer is planned.
+- Loading the Skill never authorizes an external write. It only activates the audit and stopping rules below.
+- Stop before the write when the Skill, private policy, declared object coverage, or required scanner is unavailable. Record the decision as `incomplete` rather than silently falling back to a weaker upload path.
+- Only an explicit publication authorization and a `pass` decision for the exact publication copy allow the GitHub write to begin.
+- When installing or validating fleet-wide discovery, read [global-invocation-policy.md](references/global-invocation-policy.md).
+
+## 2 Authorization boundary
 
 - Read-only auditing does not authorize a push, release change, history rewrite, ruleset change, or secret rotation.
 - Confirm that the current task explicitly authorizes the exact GitHub write immediately before performing it.
@@ -15,7 +25,7 @@ Use one policy and one fail-closed decision model for every repository publicati
 - Treat a credential found in public history as an incident. Revoke or rotate it before considering repository cleanup.
 - Require repository-specific approval before history rewriting, force-pushing, cache cleanup, or replacing a Release asset.
 
-## 2 Required separation
+## 3 Required separation
 
 - Inspect the private source in place only with read-only operations.
 - Write raw candidates only below `CODEX_HOME/private/github-safe-publish/`. Never show raw candidates in chat, logs, public reports, or GitHub Actions artifacts.
@@ -23,7 +33,7 @@ Use one policy and one fail-closed decision model for every repository publicati
 - Create a disposable publication copy from an exact source commit. Apply approved replacements only in that copy.
 - Keep scanning credentials separate from publishing. Enable write credentials only after `gate` returns `pass`.
 
-## 3 Decision model
+## 4 Decision model
 
 Run `scripts/safe_publish.py gate` against the publication copy, its Git history, and any proposed Release assets.
 
@@ -34,15 +44,15 @@ Run `scripts/safe_publish.py gate` against the publication copy, its Git history
 
 The command exits successfully only for `pass`. Treat `review`, `block`, and `incomplete` as publication failures.
 
-## 4 Sensitive information
+## 5 Sensitive information
 
 Check credentials, account identifiers, names, aliases, email addresses, phone numbers, detailed addresses, personal sites, avatars, QR codes, contacts, UIDs, device IDs, URLs, domains, IP addresses, MAC addresses, hostnames, ports, cloud resource names, absolute local paths, remote addresses, deployment topology, databases, dumps, backups, real records, messages, calendars, locations, browser data, logs, HAR files, crash files, prompts, Agent transcripts, and full tool output.
 
 Also inspect image pixels and metadata, PDF and Office properties, Notebook outputs, archives, LFS objects, submodule URLs, repository metadata, and GitHub Release assets. Mark encrypted archives, oversized objects, missing LFS data, unreadable objects, and unsupported binary formats as `incomplete`.
 
-Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and provenance as protected legal records. Findings there require review and must never trigger automatic replacement.
+Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and provenance as protected legal records. Findings there remain `review` until the information owner approves the exact rule and object through `approved_locations`. Approval records completed review and must never trigger automatic replacement.
 
-## 5 Workflow
+## 6 Workflow
 
 - For a repository fleet audit, run `audit-fleet`. Read [fleet-audit.md](references/fleet-audit.md) before configuring the owner and private output locations.
 - To build a locally reviewable raw-candidate file, run `policy-candidates`. Read [private-policy.md](references/private-policy.md) before the information owner approves mappings and exceptions.
@@ -51,7 +61,7 @@ Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and pr
 
 Pin Gitleaks to v8.30.1. The helper downloads the official release artifact, verifies it against the release checksum file, and requests fully redacted output.
 
-## 6 Replacement rules
+## 7 Replacement rules
 
 - Replace approved private identities consistently with synthetic values such as `ExampleOrg`, `ExampleUser`, `example.invalid`, and stable synthetic IDs.
 - Store explicit synthetic mappings in the private policy. Never derive replacements by hashing private values.
@@ -59,7 +69,7 @@ Pin Gitleaks to v8.30.1. The helper downloads the official release artifact, ver
 - Preserve third-party attribution and legal provenance for manual review.
 - Delete private candidate files and detailed reports after the information owner confirms remediation. Keep only aggregate statistics without paths or identifiers.
 
-## 7 Continuous integration
+## 8 Continuous integration
 
 - Inject the trimmed private policy through the `SAFE_PUBLISH_POLICY_B64` GitHub Actions Secret.
 - Treat a missing Secret, invalid Base64, unknown policy version, or encoded value larger than 48 KB as `incomplete`.

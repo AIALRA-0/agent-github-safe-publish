@@ -31,6 +31,7 @@ import tempfile
 import time
 from typing import Any, Iterable
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 
 
@@ -45,10 +46,13 @@ MAX_FINDINGS = 50_000
 
 LEGAL_NAMES = {"license", "license.md", "license.txt", "notice", "notice.md", "notice.txt", "citation.cff"}
 OFFICE_SUFFIXES = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".ico"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".ico"}
 ARCHIVE_SUFFIXES = {".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"}
 DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".sql", ".dump", ".bak"}
 OPAQUE_SUFFIXES = {".exe", ".dll", ".so", ".dylib", ".bin", ".class", ".jar", ".wasm", ".pyc"}
+SVG_DATA_URI_PATTERN = re.compile(r'''(?:href|xlink:href)\s*=\s*["']data:([^;,"']+);base64,([^"']+)["']''', re.IGNORECASE)
+SVG_MIME_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+SAFE_STANDARD_URLS = {"http://www.w3.org/2000/svg", "http://www.w3.org/1999/xlink"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -346,11 +350,11 @@ class ScanState:
         self.coverage.append(Coverage(surface, status, reason, object_count))
 
     def _handling_status(self, rule_id: str, object_id: str, severity: str, legal: bool) -> tuple[str, str]:
-        if legal:
-            return "review", "review"
         for approval in self.policy["approved_locations"]:
             if approval["rule_id"] == rule_id and approval["object"] == object_id:
                 return severity, "approved"
+        if legal:
+            return "review", "review"
         now = dt.datetime.now(dt.timezone.utc)
         for exception in self.policy["exceptions"]:
             if exception["rule_id"] == rule_id and exception["object"] == object_id:
@@ -478,6 +482,8 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
             if rule.rule_id == "identity.email" and raw.lower().endswith("@example.invalid"):
                 continue
             if rule.rule_id == "infrastructure.url" and re.match(r"(?i)^https?://(?:[^/]+\.)?example\.invalid(?:[/:?#]|$)", raw):
+                continue
+            if rule.rule_id == "infrastructure.url" and raw.lower() in SAFE_STANDARD_URLS:
                 continue
             if newlines is None:
                 newlines = array("I", (newline.start() for newline in re.finditer("\n", text)))
@@ -644,6 +650,38 @@ def scan_bytes(
     if suffix in {".7z", ".rar"}:
         if not state.binary_is_approved(object_id, data):
             state.add_coverage(surface, "unreadable", f"unsupported-archive:{object_id}")
+        return
+    if suffix == ".svg":
+        # SVG is XML text, so scan its source instead of requiring binary approval.
+        svg_text = decode_text(data)
+        try:
+            root = ET.fromstring(svg_text) if svg_text is not None else None
+        except ET.ParseError:
+            root = None
+        if root is None or root.tag.rsplit("}", 1)[-1].lower() != "svg":
+            state.add_coverage(surface, "unreadable", f"invalid-svg:{object_id}")
+            if svg_text is not None:
+                scan_text(state, svg_text, surface=surface, object_id=object_id, display_path=display_path)
+            return
+        scan_text(state, svg_text, surface=surface, object_id=object_id, display_path=display_path)
+        # Embedded raster images remain binary artifacts and need the same review as standalone files.
+        for index, match in enumerate(SVG_DATA_URI_PATTERN.finditer(svg_text), start=1):
+            mime_type = match.group(1).lower()
+            encoded = re.sub(r"\s+", "", match.group(2))
+            try:
+                embedded = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                state.add_coverage(surface, "unreadable", f"invalid-svg-data-uri:{object_id}!embedded-{index}")
+                continue
+            embedded_suffix = SVG_MIME_SUFFIXES.get(mime_type, ".bin")
+            scan_bytes(
+                state,
+                embedded,
+                surface=surface,
+                object_id=f"{object_id}!embedded-{index}{embedded_suffix}",
+                display_path=f"{display_path}!embedded-{index}{embedded_suffix}",
+                depth=depth + 1,
+            )
         return
     if suffix in IMAGE_SUFFIXES | {".pdf"} | OPAQUE_SUFFIXES:
         if not state.binary_is_approved(object_id, data):
