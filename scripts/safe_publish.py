@@ -8,6 +8,7 @@ Raw candidates are written only by commands that enforce the private CODEX_HOME 
 from __future__ import annotations
 
 import argparse
+import atexit
 from array import array
 import base64
 import bisect
@@ -16,43 +17,124 @@ import dataclasses
 import datetime as dt
 import fnmatch
 import hashlib
+from html.parser import HTMLParser
+import importlib
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
 import platform
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 from typing import Any, Iterable
+import urllib.parse
 import urllib.request
+import urllib.error
+import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 
 
-SCHEMA_VERSION = 1
+# Pillow emits this advisory while converting some palette frames. It is not a
+# coverage failure, and allowing it through would expose host installation paths.
+warnings.filterwarnings(
+    "ignore",
+    message="Palette images with Transparency expressed in bytes should be converted to RGBA images",
+    category=UserWarning,
+    module=r"PIL\.Image",
+)
+
+
+SCHEMA_VERSION = 3
+SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
+DEFAULT_IMAGE_OCR_BUDGET_SECONDS = 300
+DEFAULT_LOCAL_FILE_BUDGET_SECONDS = 600
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_ARCHIVE_EXPANDED_BYTES = 250 * 1024 * 1024
 MAX_ARCHIVE_DEPTH = 3
+MAX_ARRAY_MEMBERS = 1_024
+MAX_ARRAY_ELEMENTS = 25_000_000
+MAX_ARRAY_BYTES = 128 * 1024 * 1024
+MAX_ARRAY_TEXT_BYTES = 5 * 1024 * 1024
 MAX_FINDINGS = 50_000
+MAX_RAW_CANDIDATES_PER_STATE = 100_000
+MAX_PRIVATE_CANDIDATE_ATTEMPTS = 250_000
+VERIFIED_GITLEAKS: set[str] = set()
+PACKAGE_CACHE: dict[str, tuple[list[dict[str, Any]], str | None]] = {}
+RAPID_OCR_ENGINE: Any | None = None
+IMAGE_EXTRACTION_CACHE: dict[str, tuple[list[tuple[str, str]], set[str], list[tuple[str, str]]]] = {}
+RESTRICTED_PRIVATE_PATHS: set[str] = set()
+
+
+class SameOriginLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        for field in ("src", "href"):
+            value = values.get(field)
+            if value:
+                self.links.append(value)
 
 LEGAL_NAMES = {"license", "license.md", "license.txt", "notice", "notice.md", "notice.txt", "citation.cff"}
-OFFICE_SUFFIXES = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}
+OFFICE_SUFFIXES = {
+    ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
+    ".docm", ".xlsm", ".pptm", ".dotm", ".xltm", ".potm", ".ppam",
+}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".ico"}
+MEDIA_SUFFIXES = {".mp3", ".wav", ".flac", ".m4a", ".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ARCHIVE_SUFFIXES = {".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"}
 DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".sql", ".dump", ".bak"}
 OPAQUE_SUFFIXES = {".exe", ".dll", ".so", ".dylib", ".bin", ".class", ".jar", ".wasm", ".pyc"}
+NUMPY_SUFFIXES = {".npy", ".npz"}
 SVG_DATA_URI_PATTERN = re.compile(r'''(?:href|xlink:href)\s*=\s*["']data:([^;,"']+);base64,([^"']+)["']''', re.IGNORECASE)
 SVG_MIME_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 SAFE_STANDARD_URLS = {"http://www.w3.org/2000/svg", "http://www.w3.org/1999/xlink"}
+RELEASE_PROFILES = {"permissive-noncritical", "strict"}
+NONCRITICAL_FINDING_RULES = {"infrastructure.url"}
+NONCRITICAL_COVERAGE_SURFACES = {
+    "actions-artifact-content",
+    "actions-job-summaries",
+    "actions-logs",
+    "deployment-statuses",
+    "discussion-comments",
+    "discussions",
+    "github-pages",
+    "github-pages-rendered",
+    "issues",
+    "packages",
+    "pull-comments",
+    "pull-requests",
+    "pull-reviews",
+    "wiki",
+}
+ZERO_WIDTH_TRANSLATION = str.maketrans("", "", "\u200b\u200c\u200d\u2060\ufeff")
+CONFUSABLE_TRANSLATION = str.maketrans({"Α": "A", "А": "A", "Ι": "I", "І": "I", "і": "i", "ⅼ": "l"})
+ENCODED_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9+/=])(?:(?:%[0-9A-Fa-f]{2}){6,}|[0-9A-Fa-f]{12,}|[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])")
+MIME_SIGNATURES = (
+    (b"%PDF-", "application/pdf"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF8", "image/gif"),
+    (b"PK\x03\x04", "application/zip"),
+    (b"SQLite format 3\x00", "application/x-sqlite3"),
+    (b"MZ", "application/x-dosexec"),
+    (b"\x7fELF", "application/x-elf"),
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -127,7 +209,12 @@ GENERIC_RULES = (
     Rule("identity.aialra", "identity", "review", re.compile(r"(?i)(?<![A-Za-z0-9])aialra(?![A-Za-z0-9])")),
     Rule("identity.aialra-confusable", "identity", "review", re.compile(r"(?i)(?<!\w)(?:a|[ΑА])(?:i|[ΙІі])(?:a|[ΑА])(?:l|[ΙІ])r(?:a|[ΑА])(?!\w)")),
     Rule("infrastructure.ipv4", "infrastructure", "block", re.compile(r"(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?!\d)")),
+    Rule("infrastructure.ipv6", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])")),
+    Rule("infrastructure.cidr", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f:.])(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{2,})/(?:\d|[1-9]\d|1[01]\d|12[0-8])(?!\d)")),
     Rule("infrastructure.mac", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])")),
+    Rule("infrastructure.hostname-port", "infrastructure", "review", re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:internal|local|lan|corp|home|test):\d{1,5}\b")),
+    Rule("infrastructure.cloud-resource", "infrastructure", "review", re.compile(r"(?i)\b(?:arn:aws:[^\s\"'<>]+|projects/[a-z0-9._-]+/(?:locations|zones)/[^\s\"'<>]+|/subscriptions/[0-9a-f-]{36}/resourcegroups/[^\s\"'<>]+)")),
+    Rule("identity.coordinates", "identity", "review", re.compile(r"(?i)\b(?:lat(?:itude)?|lng|lon(?:gitude)?)\s*[:=]\s*-?\d{1,3}\.\d{4,}\b")),
     Rule("infrastructure.windows-path", "infrastructure", "block", re.compile(r"(?i)\b[A-Z]:\\(?:Users|Documents and Settings)\\[^\s\"'<>|]+")),
     Rule("infrastructure.unix-home", "infrastructure", "block", re.compile(r"(?<![\w/])/(?:home|Users)/[^\s\"'<>]+")),
     Rule("infrastructure.url", "infrastructure", "review", re.compile(r"(?i)\bhttps?://[^\s\"'<>\])}]+")),
@@ -155,7 +242,15 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
-def run(command: list[str], cwd: Path | None = None, *, text: bool = True, input_data: bytes | str | None = None) -> subprocess.CompletedProcess[Any]:
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+    *,
+    text: bool = True,
+    input_data: bytes | str | None = None,
+    timeout_seconds: int | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[Any]:
     """Run a child process without inheriting output that could contain a match."""
     options: dict[str, Any] = {
         "cwd": str(cwd) if cwd else None,
@@ -164,6 +259,8 @@ def run(command: list[str], cwd: Path | None = None, *, text: bool = True, input
         "stderr": subprocess.PIPE,
         "text": text,
         "check": False,
+        "timeout": timeout_seconds,
+        "env": {**os.environ, **env} if env else None,
     }
     if text:
         options["encoding"] = "utf-8"
@@ -193,7 +290,28 @@ def ensure_private_path(path: Path) -> Path:
     except ValueError as exc:
         raise ValueError(f"Private output must be below {root}") from exc
     root.mkdir(parents=True, exist_ok=True)
+    restrict_private_path(root, directory=True)
     return resolved
+
+
+def restrict_private_path(path: Path, *, directory: bool = False) -> None:
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | (stat.S_IXUSR if directory else 0))
+    except OSError:
+        pass
+    if os.name == "nt":
+        cache_key = os.path.normcase(str(path.resolve()))
+        if cache_key in RESTRICTED_PRIVATE_PATHS:
+            return
+        current = run(["whoami"])
+        identity = current.stdout.strip() if current.returncode == 0 else ""
+        if not identity:
+            raise RuntimeError("Current Windows identity is unavailable")
+        grant = f"{identity}:(OI)(CI)F" if directory else f"{identity}:F"
+        result = run(["icacls", str(path), "/inheritance:r", "/grant:r", grant])
+        if result.returncode != 0:
+            raise RuntimeError("Private path ACL could not be restricted")
+        RESTRICTED_PRIVATE_PATHS.add(cache_key)
 
 
 def write_json(path: Path, data: Any, *, private: bool = False) -> None:
@@ -205,7 +323,7 @@ def write_json(path: Path, data: Any, *, private: bool = False) -> None:
         handle.write("\n")
     os.replace(temporary, resolved)
     if private:
-        os.chmod(resolved, stat.S_IRUSR | stat.S_IWUSR)
+        restrict_private_path(resolved)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -228,10 +346,32 @@ def empty_policy() -> dict[str, Any]:
         "blocked_paths": [],
         "binary_approvals": [],
         "exceptions": [],
+        "risk_acceptances": [],
     }
 
 
+def migrate_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade an older private policy in memory without modifying its source file."""
+    if not isinstance(policy, dict) or policy.get("schema_version") not in SUPPORTED_POLICY_VERSIONS:
+        raise ValueError("Private policy schema version is unknown")
+    migrated = json.loads(json.dumps(policy))
+    if migrated["schema_version"] == 1:
+        for item in migrated.get("identifiers", []):
+            item.setdefault("normalization", ["nfkc"])
+            item.setdefault("scopes", ["all"])
+        for item in migrated.get("binary_approvals", []):
+            item.setdefault("inspection_layers", ["manual"])
+            item.setdefault("tool_versions", {})
+            item.setdefault("review_trigger", "content-or-scanner-change")
+        migrated["schema_version"] = 2
+    if migrated["schema_version"] == 2:
+        migrated.setdefault("risk_acceptances", [])
+        migrated["schema_version"] = SCHEMA_VERSION
+    return migrated
+
+
 def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    policy = migrate_policy(policy)
     required = {
         "schema_version",
         "identifiers",
@@ -240,6 +380,7 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
         "blocked_paths",
         "binary_approvals",
         "exceptions",
+        "risk_acceptances",
     }
     if not isinstance(policy, dict) or not required.issubset(policy):
         raise ValueError("Private policy is missing required fields")
@@ -264,6 +405,11 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
             compiled = re.compile(item["value"])
             if compiled.match(""):
                 raise ValueError("Private identifier regex cannot match an empty string")
+        allowed_normalization = {"none", "nfkc", "casefold", "zero-width", "confusable"}
+        if not isinstance(item.get("normalization"), list) or not set(item["normalization"]).issubset(allowed_normalization):
+            raise ValueError("Identifier normalization is invalid")
+        if not isinstance(item.get("scopes"), list) or not item["scopes"] or not all(isinstance(value, str) for value in item["scopes"]):
+            raise ValueError("Identifier scopes must be a non-empty string list")
 
     for mapping in policy["replacements"]:
         if not isinstance(mapping, dict) or not {"identifier_id", "replacement"}.issubset(mapping):
@@ -278,10 +424,15 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Approved locations must be exact and cannot contain wildcards")
 
     for approval in policy["binary_approvals"]:
-        if not isinstance(approval, dict) or not {"object", "sha256", "approved_by", "reason"}.issubset(approval):
-            raise ValueError("Each binary approval requires object, sha256, approved_by, and reason")
+        required_binary = {"object", "sha256", "approved_by", "reason", "inspection_layers", "tool_versions", "review_trigger"}
+        if not isinstance(approval, dict) or not required_binary.issubset(approval):
+            raise ValueError("Each binary approval requires exact evidence and a review trigger")
         if not re.fullmatch(r"[0-9a-f]{64}", approval["sha256"]):
             raise ValueError("Binary approval SHA-256 is invalid")
+        if not isinstance(approval["inspection_layers"], list) or not approval["inspection_layers"]:
+            raise ValueError("Binary approval inspection layers are required")
+        if not isinstance(approval["tool_versions"], dict) or not isinstance(approval["review_trigger"], str) or not approval["review_trigger"]:
+            raise ValueError("Binary approval evidence is invalid")
 
     for exception in policy["exceptions"]:
         required_exception = {"rule_id", "object", "approved_by", "reason", "expires_at", "review_trigger"}
@@ -290,6 +441,34 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
         if any(symbol in exception["object"] for symbol in "*?["):
             raise ValueError("Exceptions must target an exact object")
         dt.datetime.fromisoformat(exception["expires_at"].replace("Z", "+00:00"))
+
+    for acceptance in policy["risk_acceptances"]:
+        required_acceptance = {
+            "repository",
+            "rule_id",
+            "object",
+            "object_sha256",
+            "scanner_sha256",
+            "approved_by",
+            "reason",
+            "expires_at",
+            "review_trigger",
+        }
+        if not isinstance(acceptance, dict) or not required_acceptance.issubset(acceptance):
+            raise ValueError("Each risk acceptance requires exact repository, object, evidence, approval, expiry, and review trigger")
+        if acceptance["rule_id"] not in NONCRITICAL_FINDING_RULES:
+            raise ValueError("Risk acceptances cannot override a critical finding rule")
+        if any(symbol in acceptance["object"] for symbol in "*?["):
+            raise ValueError("Risk acceptances must target an exact object")
+        if not all(isinstance(acceptance[field], str) and acceptance[field] for field in required_acceptance):
+            raise ValueError("Risk acceptance fields must be non-empty strings")
+        if not re.fullmatch(r"[0-9a-f]{64}", acceptance["object_sha256"]):
+            raise ValueError("Risk acceptance object SHA-256 is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", acceptance["scanner_sha256"]):
+            raise ValueError("Risk acceptance scanner SHA-256 is invalid")
+        if acceptance["review_trigger"] != "content-or-scanner-change":
+            raise ValueError("Risk acceptance review trigger must detect content or scanner changes")
+        dt.datetime.fromisoformat(acceptance["expires_at"].replace("Z", "+00:00"))
 
     if any(not isinstance(pattern, str) or not pattern for pattern in policy["blocked_paths"]):
         raise ValueError("Blocked paths must be non-empty glob strings")
@@ -334,15 +513,32 @@ class ScanState:
         self.coverage: list[Coverage] = []
         self._finding_keys: set[tuple[str, str, str, str]] = set()
         self._candidate_keys: set[tuple[str, str, str, str, str]] = set()
+        self._raw_candidate_total = 0
+        self._private_rule_config: dict[str, dict[str, Any]] = {}
+        self.object_sha256: dict[str, str] = {}
+        self.scanner_sha256 = sha256_bytes(Path(__file__).read_bytes())
+        try:
+            budget = int(os.environ.get("SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS", DEFAULT_IMAGE_OCR_BUDGET_SECONDS))
+        except ValueError:
+            budget = 0
+        self.image_ocr_budget_seconds = max(0, budget)
+        self.image_ocr_started_at: float | None = None
         self._private_rules = self._compile_private_rules()
+
+    def register_object(self, object_id: str, data: bytes) -> None:
+        """Keep an in-memory whole-object digest for exact private risk acceptance checks."""
+        self.object_sha256.setdefault(object_id, sha256_bytes(data))
 
     def _compile_private_rules(self) -> tuple[Rule, ...]:
         rules: list[Rule] = []
         for item in self.policy["identifiers"]:
+            self._private_rule_config[item["id"]] = item
+            flags = re.IGNORECASE if "casefold" in item.get("normalization", []) else 0
+            value = normalize_private_text(item["value"], item.get("normalization", []))
             if item["kind"] == "literal":
-                pattern = re.compile(re.escape(item["value"]))
+                pattern = re.compile(re.escape(value), flags)
             else:
-                pattern = re.compile(item["value"])
+                pattern = re.compile(value, flags)
             rules.append(Rule(item["id"], "private-identifier", item["severity"], pattern))
         return tuple(rules)
 
@@ -357,7 +553,12 @@ class ScanState:
             return "review", "review"
         now = dt.datetime.now(dt.timezone.utc)
         for exception in self.policy["exceptions"]:
-            if exception["rule_id"] == rule_id and exception["object"] == object_id:
+            if (
+                severity == "review"
+                and rule_id in NONCRITICAL_FINDING_RULES
+                and exception["rule_id"] == rule_id
+                and exception["object"] == object_id
+            ):
                 expires = dt.datetime.fromisoformat(exception["expires_at"].replace("Z", "+00:00"))
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=dt.timezone.utc)
@@ -375,21 +576,26 @@ class ScanState:
         raw_value: str | None,
         legal: bool,
     ) -> None:
+        severity, status = self._handling_status(rule.rule_id, object_id, rule.severity, legal)
         if len(self.findings) >= MAX_FINDINGS:
             if not any(item.reason == "finding-limit-exceeded" for item in self.coverage):
                 self.add_coverage(surface, "tool_failed", "finding-limit-exceeded")
-            return
-        severity, status = self._handling_status(rule.rule_id, object_id, rule.severity, legal)
-        key = (object_id, location, rule.rule_id, status)
-        if key not in self._finding_keys:
-            self._finding_keys.add(key)
-            self.findings.append(
-                Finding(self.repository, surface, object_id, location, rule.rule_id, rule.category, severity, status, legal)
-            )
+        else:
+            key = (object_id, location, rule.rule_id, status)
+            if key not in self._finding_keys:
+                self._finding_keys.add(key)
+                self.findings.append(
+                    Finding(self.repository, surface, object_id, location, rule.rule_id, rule.category, severity, status, legal)
+                )
         if self.collect_raw and raw_value is not None:
             candidate_key = (self.repository, surface, object_id, rule.rule_id, raw_value)
             if candidate_key not in self._candidate_keys:
+                if self._raw_candidate_total >= MAX_RAW_CANDIDATES_PER_STATE:
+                    if not any(item.reason == "raw-candidate-limit-exceeded" for item in self.coverage):
+                        self.add_coverage(surface, "tool_failed", "raw-candidate-limit-exceeded")
+                    return
                 self._candidate_keys.add(candidate_key)
+                self._raw_candidate_total += 1
                 self.raw_candidates.append(
                     {
                         "repository": self.repository,
@@ -398,6 +604,7 @@ class ScanState:
                         "location": location,
                         "rule_id": rule.rule_id,
                         "severity": severity,
+                        "object_sha256": self.object_sha256.get(object_id),
                         "raw_value": raw_value,
                     }
                 )
@@ -410,6 +617,47 @@ class ScanState:
 def is_legal_path(path: str) -> bool:
     name = Path(path.replace("\\", "/")).name.lower()
     return name in LEGAL_NAMES or name.startswith("license.") or name.startswith("notice.")
+
+
+def normalize_private_text(text: str, operations: Iterable[str]) -> str:
+    result = text
+    selected = set(operations)
+    if "nfkc" in selected:
+        result = unicodedata.normalize("NFKC", result)
+    if "zero-width" in selected:
+        result = result.translate(ZERO_WIDTH_TRANSLATION)
+    if "confusable" in selected:
+        result = result.translate(CONFUSABLE_TRANSLATION)
+    if "casefold" in selected:
+        result = result.casefold()
+    return result
+
+
+def bounded_decoded_variants(text: str) -> Iterable[tuple[str, str]]:
+    """Yield a small set of decoded views without recursively expanding attacker input."""
+    yielded = 0
+    for index, match in enumerate(ENCODED_TOKEN_PATTERN.finditer(text)):
+        if index >= 128:
+            break
+        token = match.group(0)
+        candidates: list[tuple[str, bytes | str]] = []
+        if token.startswith("%"):
+            candidates.append(("url", urllib.parse.unquote(token)))
+        elif re.fullmatch(r"[0-9A-Fa-f]{12,}", token) and len(token) % 2 == 0:
+            try:
+                candidates.append(("hex", bytes.fromhex(token)))
+            except ValueError:
+                pass
+        elif len(token) % 4 == 0:
+            try:
+                candidates.append(("base64", base64.b64decode(token, validate=True)))
+            except (binascii.Error, ValueError):
+                pass
+        for encoding, value in candidates:
+            decoded = value if isinstance(value, str) else decode_text(value)
+            if decoded and decoded != token and len(decoded) <= 8192:
+                yielded += 1
+                yield f"decoded-{encoding}-{yielded}", decoded
 
 
 def line_and_column(newlines: array[int], offset: int) -> tuple[int, int]:
@@ -453,8 +701,16 @@ def rule_can_match(rule_id: str, text: str, lowered: str) -> bool:
         return "aialra" in lowered or any(character in text for character in "ΑАΙІі")
     if rule_id == "infrastructure.ipv4":
         return "." in text and bool(re.search(r"[0-9]", text))
+    if rule_id in {"infrastructure.ipv6", "infrastructure.cidr"}:
+        return ":" in text or "/" in text
     if rule_id == "infrastructure.mac":
         return ":" in text or "-" in text
+    if rule_id == "infrastructure.hostname-port":
+        return ":" in text and any(token in lowered for token in (".internal", ".local", ".lan", ".corp", ".home", ".test"))
+    if rule_id == "infrastructure.cloud-resource":
+        return "arn:aws:" in lowered or "/subscriptions/" in lowered or "projects/" in lowered
+    if rule_id == "identity.coordinates":
+        return any(token in lowered for token in ("lat=", "lat:", "latitude", "lng=", "lng:", "lon=", "longitude"))
     if rule_id == "infrastructure.windows-path":
         return ":\\" in text
     if rule_id == "infrastructure.unix-home":
@@ -465,15 +721,24 @@ def rule_can_match(rule_id: str, text: str, lowered: str) -> bool:
 
 
 def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, display_path: str) -> None:
+    state.register_object(object_id, text.encode("utf-8"))
     legal = is_legal_path(display_path)
     newlines: array[int] | None = None
     lowered = text.lower()
     private_aialra = any(rule.rule_id != "identity.aialra" and rule.pattern.pattern == re.escape("AIALRA") for rule in state._private_rules)
     generic_rules = tuple(rule for rule in GENERIC_RULES if not (private_aialra and rule.rule_id == "identity.aialra"))
     for rule in (*generic_rules, *state._private_rules):
-        if not rule_can_match(rule.rule_id, text, lowered):
+        scan_value = text
+        if rule.category == "private-identifier":
+            config = state._private_rule_config[rule.rule_id]
+            scopes = set(config.get("scopes", ["all"]))
+            if "all" not in scopes and surface not in scopes:
+                continue
+            scan_value = normalize_private_text(text, config.get("normalization", []))
+        scan_lowered = scan_value.lower()
+        if not rule_can_match(rule.rule_id, scan_value, scan_lowered):
             continue
-        for match in rule.pattern.finditer(text):
+        for match in rule.pattern.finditer(scan_value):
             raw = match.group(rule.value_group)
             if rule.rule_id == "credential.assignment" and is_placeholder(raw):
                 continue
@@ -495,6 +760,15 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
                 rule=rule,
                 raw_value=raw,
                 legal=legal,
+            )
+    if not object_id.endswith(":decoded-view"):
+        for label, decoded in bounded_decoded_variants(text):
+            scan_text(
+                state,
+                decoded,
+                surface=surface,
+                object_id=f"{object_id}:decoded-view",
+                display_path=f"{display_path}!{label}",
             )
 
 
@@ -551,8 +825,6 @@ def scan_zip(
                 member_data = archive.read(info)
                 member_object = f"{object_id}!{member}"
                 member_display = f"{display_path}!{member}"
-                if office and not member.lower().endswith((".xml", ".rels", ".txt", ".csv", ".json")):
-                    continue
                 scan_bytes(
                     state,
                     member_data,
@@ -607,6 +879,419 @@ def scan_tar(
         state.add_coverage(surface, "unreadable", f"invalid-tar:{object_id}")
 
 
+def detected_mime(data: bytes, suffix: str) -> str:
+    for signature, mime in MIME_SIGNATURES:
+        if data.startswith(signature):
+            return mime
+    if data.startswith((b"RIFF", b"ID3", b"fLaC")) or b"ftyp" in data[:32]:
+        return "media/container"
+    if suffix == ".svg" or data.lstrip().startswith(b"<svg"):
+        return "image/svg+xml"
+    return "application/octet-stream"
+
+
+def rapid_ocr_engine() -> Any:
+    global RAPID_OCR_ENGINE
+    if RAPID_OCR_ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        RAPID_OCR_ENGINE = RapidOCR()
+    return RAPID_OCR_ENGINE
+
+
+def normalized_barcode_values(result: Any) -> list[str]:
+    """Normalize OpenCV barcode results without depending on one tuple ABI."""
+    if not isinstance(result, tuple):
+        raise ValueError("OpenCV barcode result is not a tuple")
+    if len(result) == 3:
+        decoded, _decoded_type, _points = result
+        detected = bool(decoded)
+    elif len(result) == 4:
+        detected, decoded, _decoded_type, _points = result
+    else:
+        raise ValueError("OpenCV barcode result length is unsupported")
+    if not detected or decoded is None:
+        return []
+    values = [decoded] if isinstance(decoded, str) else list(decoded)
+    return [value for value in values if isinstance(value, str) and value]
+
+
+def extract_image_layers(data: bytes, *, allow_ocr: bool = True) -> tuple[list[tuple[str, str]], set[str], list[tuple[str, str]]]:
+    digest = sha256_bytes(data)
+    cached = IMAGE_EXTRACTION_CACHE.get(digest)
+    if cached is not None:
+        return cached
+    extracted: list[tuple[str, str]] = []
+    layers: set[str] = set()
+    failures: list[tuple[str, str]] = []
+    try:
+        from PIL import Image, ImageSequence
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            image = Image.open(io.BytesIO(data))
+        with image:
+            metadata = {str(key): str(value) for key, value in image.info.items() if key not in {"icc_profile", "exif"}}
+            try:
+                metadata.update({str(key): str(value) for key, value in image.getexif().items()})
+            except Exception:
+                pass
+            if metadata:
+                extracted.append(("metadata", json.dumps(metadata, ensure_ascii=False)))
+            layers.add("metadata")
+            frame_count = int(getattr(image, "n_frames", 1))
+            if frame_count > 500:
+                failures.append(("unreadable", "image-frame-limit"))
+                result = (extracted, layers, failures)
+                IMAGE_EXTRACTION_CACHE[digest] = result
+                return result
+            # QR and barcode decoding are deterministic and local; scan decoded payloads without logging them.
+            try:
+                import cv2
+                import numpy as np
+
+                qr_detector = cv2.QRCodeDetector()
+                barcode_detector = cv2.barcode_BarcodeDetector()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    for index, frame in enumerate(ImageSequence.Iterator(image)):
+                        rgb = np.asarray(frame.convert("RGB"))
+                        decoded, _, _ = qr_detector.detectAndDecode(rgb)
+                        if decoded:
+                            extracted.append((f"qr:{index}", decoded))
+                        barcode_values = normalized_barcode_values(barcode_detector.detectAndDecode(rgb))
+                        for value_index, value in enumerate(barcode_values):
+                            extracted.append((f"barcode:{index}:{value_index}", value))
+                layers.update({"qr", "barcode"})
+            except Exception:
+                failures.append(("tool_failed", "image-code-parser-unavailable"))
+    except Exception:
+        result = ([], set(), [("unreadable", "invalid-image")])
+        IMAGE_EXTRACTION_CACHE[digest] = result
+        return result
+    # OCR is a required image-pixel layer. A bounded repository budget prevents unbounded gates.
+    if not allow_ocr:
+        failures.append(("unreadable", "image-ocr-budget-exceeded"))
+        return extracted, layers, failures
+    try:
+        from PIL import Image, ImageSequence
+        import numpy as np
+
+        engine = rapid_ocr_engine()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            image = Image.open(io.BytesIO(data))
+        with image:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                for frame_index, frame in enumerate(ImageSequence.Iterator(image)):
+                    result, _ = engine(np.asarray(frame.convert("RGB")))
+                    for text_index, row in enumerate(result or []):
+                        if len(row) >= 2 and isinstance(row[1], str):
+                            extracted.append((f"ocr:{frame_index}:{text_index}", row[1]))
+        layers.add("ocr")
+    except Exception:
+        failures.append(("tool_failed", "image-ocr-parser-unavailable"))
+    result = (extracted, layers, failures)
+    IMAGE_EXTRACTION_CACHE[digest] = result
+    return result
+
+
+def scan_image_content(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str) -> None:
+    if state.binary_is_approved(object_id, data):
+        return
+    cached = sha256_bytes(data) in IMAGE_EXTRACTION_CACHE
+    if not cached and state.image_ocr_started_at is None:
+        state.image_ocr_started_at = time.monotonic()
+    within_budget = bool(
+        state.image_ocr_started_at is not None
+        and time.monotonic() - state.image_ocr_started_at <= state.image_ocr_budget_seconds
+    )
+    extracted, layers, failures = extract_image_layers(
+        data,
+        allow_ocr=cached or within_budget,
+    )
+    for label, value in extracted:
+        scan_text(state, value, surface=surface, object_id=f"{object_id}:{label}", display_path=f"{display_path}!{label}")
+    for status, reason in failures:
+        state.add_coverage(surface, status, f"{reason}:{object_id}")
+    if {"metadata", "qr", "barcode", "ocr"}.issubset(layers):
+        state.add_coverage(surface, "checked", f"image-layers:{object_id}", 1)
+
+
+def scan_pdf_content(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str) -> None:
+    if state.binary_is_approved(object_id, data):
+        return
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            state.add_coverage(surface, "unreadable", f"encrypted-pdf:{object_id}")
+            return
+        if reader.metadata:
+            scan_text(state, json.dumps(dict(reader.metadata), ensure_ascii=False, default=str), surface=surface, object_id=f"{object_id}:metadata", display_path=f"{display_path}!metadata")
+        for index, page in enumerate(reader.pages):
+            try:
+                text = page.extract_text() or ""
+                if text:
+                    scan_text(state, text, surface=surface, object_id=f"{object_id}:page:{index + 1}", display_path=f"{display_path}!page:{index + 1}")
+            except Exception:
+                state.add_coverage(surface, "unreadable", f"pdf-page-unreadable:{object_id}:{index + 1}")
+        try:
+            import fitz
+            import numpy as np
+            if state.image_ocr_started_at is None:
+                state.image_ocr_started_at = time.monotonic()
+            engine: Any | None = None
+            ocr_page_count = 0
+            document = fitz.open(stream=data, filetype="pdf")
+            with document:
+                for index, page in enumerate(document):
+                    if time.monotonic() - state.image_ocr_started_at > state.image_ocr_budget_seconds:
+                        state.add_coverage(surface, "unreadable", f"pdf-page-image-ocr-budget-exceeded:{object_id}")
+                        break
+                    if engine is None:
+                        engine = rapid_ocr_engine()
+                    pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                    pixels = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)
+                    result, _ = engine(pixels)
+                    ocr_page_count += 1
+                    for text_index, row in enumerate(result or []):
+                        if len(row) >= 2 and isinstance(row[1], str):
+                            scan_text(state, row[1], surface=surface, object_id=f"{object_id}:page-image:{index + 1}:{text_index}", display_path=f"{display_path}!page-image:{index + 1}:{text_index}")
+            state.add_coverage(surface, "checked", f"pdf-page-image-ocr:{object_id}", ocr_page_count)
+        except Exception:
+            state.add_coverage(surface, "tool_failed", f"pdf-page-image-ocr-unavailable:{object_id}")
+        attachments = getattr(reader, "attachments", {}) or {}
+        for name, values in attachments.items():
+            for index, value in enumerate(values if isinstance(values, list) else [values]):
+                scan_bytes(state, value, surface=surface, object_id=f"{object_id}!attachment:{name}:{index}", display_path=f"{display_path}!{name}", depth=1)
+        state.add_coverage(surface, "checked", f"pdf-structure:{object_id}", len(reader.pages))
+    except Exception:
+        state.add_coverage(surface, "unreadable", f"invalid-or-unsupported-pdf:{object_id}")
+
+
+def scan_command_metadata(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str, command: list[str], layer: str) -> None:
+    if state.binary_is_approved(object_id, data):
+        return
+    with tempfile.TemporaryDirectory(prefix="safe-publish-binary-") as temporary:
+        target = Path(temporary) / Path(display_path).name
+        target.write_bytes(data)
+        result = run([*command, str(target)], text=False)
+        if result.returncode != 0:
+            state.add_coverage(surface, "tool_failed", f"{layer}-parser-unavailable:{object_id}")
+            return
+        output = decode_text(result.stdout)
+        if output:
+            scan_text(state, output, surface=surface, object_id=f"{object_id}:{layer}", display_path=f"{display_path}!{layer}")
+        state.add_coverage(surface, "checked", f"{layer}:{object_id}", 1)
+
+
+def numpy_dtype_depth(dtype: Any, depth: int = 0) -> int:
+    """Return the maximum nested structured dtype depth with a hard recursion bound."""
+    if depth > MAX_ARCHIVE_DEPTH:
+        raise ValueError("NumPy dtype nesting exceeds the supported depth")
+    fields = getattr(dtype, "fields", None) or {}
+    if not fields:
+        return depth
+    return max(numpy_dtype_depth(field[0], depth + 1) for field in fields.values())
+
+
+def scan_numpy_array(
+    state: ScanState,
+    value: Any,
+    *,
+    surface: str,
+    object_id: str,
+    display_path: str,
+) -> bool:
+    """Inspect one NumPy array without enabling pickle or emitting raw values."""
+    try:
+        import numpy as np
+
+        array_value = np.asarray(value)
+        numpy_dtype_depth(array_value.dtype)
+        if array_value.dtype.hasobject:
+            state.add_coverage(surface, "unreadable", f"numpy-object-dtype-forbidden:{object_id}")
+            return False
+        if int(array_value.size) > MAX_ARRAY_ELEMENTS or int(array_value.nbytes) > MAX_ARRAY_BYTES:
+            state.add_coverage(surface, "unreadable", f"numpy-array-limit:{object_id}")
+            return False
+        metadata = json.dumps(
+            {"dtype": str(array_value.dtype), "shape": [int(item) for item in array_value.shape]},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        scan_text(
+            state,
+            metadata,
+            surface=surface,
+            object_id=f"{object_id}:numpy-metadata",
+            display_path=f"{display_path}!numpy-metadata",
+        )
+        text_parts: list[str] = []
+        text_bytes = 0
+        candidates: list[Any] = []
+        if array_value.dtype.fields:
+            candidates.extend(array_value[name] for name in sorted(array_value.dtype.fields))
+        else:
+            candidates.append(array_value)
+        for candidate in candidates:
+            candidate_array = np.asarray(candidate)
+            if candidate_array.dtype.kind not in {"S", "U"}:
+                continue
+            for item in candidate_array.reshape(-1):
+                text = item.decode("utf-8", errors="replace") if isinstance(item, bytes) else str(item)
+                encoded_length = len(text.encode("utf-8"))
+                if text_bytes + encoded_length > MAX_ARRAY_TEXT_BYTES:
+                    state.add_coverage(surface, "unreadable", f"numpy-text-limit:{object_id}")
+                    return False
+                text_parts.append(text)
+                text_bytes += encoded_length
+        if text_parts:
+            scan_text(
+                state,
+                "\n".join(text_parts),
+                surface=surface,
+                object_id=f"{object_id}:numpy-text",
+                display_path=f"{display_path}!numpy-text",
+            )
+        state.add_coverage(surface, "checked", f"numpy-array:{object_id}", 1)
+        return True
+    except (MemoryError, OSError, TypeError, ValueError):
+        state.add_coverage(surface, "unreadable", f"invalid-or-unsupported-numpy-array:{object_id}")
+        return False
+
+
+def scan_numpy_content(
+    state: ScanState,
+    data: bytes,
+    *,
+    surface: str,
+    object_id: str,
+    display_path: str,
+) -> None:
+    """Inspect NPY and NPZ content with bounded expansion and pickle disabled."""
+    if state.binary_is_approved(object_id, data):
+        return
+    try:
+        import numpy as np
+
+        suffix = Path(display_path.split("!")[-1]).suffix.lower()
+        if suffix == ".npz":
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                infos = [item for item in archive.infolist() if not item.is_dir()]
+                if len(infos) > MAX_ARRAY_MEMBERS:
+                    state.add_coverage(surface, "tool_failed", f"numpy-member-limit:{object_id}")
+                    return
+                expanded = sum(int(item.file_size) for item in infos)
+                if expanded > MAX_ARCHIVE_EXPANDED_BYTES or any(item.file_size > MAX_ARRAY_BYTES for item in infos):
+                    state.add_coverage(surface, "tool_failed", f"numpy-expansion-limit:{object_id}")
+                    return
+                if any(item.flag_bits & 0x1 for item in infos):
+                    state.add_coverage(surface, "unreadable", f"encrypted-numpy-archive:{object_id}")
+                    return
+            with np.load(io.BytesIO(data), allow_pickle=False) as archive_data:
+                names = sorted(archive_data.files)
+                if len(names) > MAX_ARRAY_MEMBERS:
+                    state.add_coverage(surface, "tool_failed", f"numpy-member-limit:{object_id}")
+                    return
+                for name in names:
+                    try:
+                        value = archive_data[name]
+                    except (MemoryError, OSError, TypeError, ValueError):
+                        state.add_coverage(surface, "unreadable", f"numpy-pickle-forbidden-or-invalid:{object_id}!{name}")
+                        continue
+                    scan_numpy_array(
+                        state,
+                        value,
+                        surface=surface,
+                        object_id=f"{object_id}!{name}",
+                        display_path=f"{display_path}!{name}",
+                    )
+            return
+        value = np.load(io.BytesIO(data), allow_pickle=False)
+        scan_numpy_array(state, value, surface=surface, object_id=object_id, display_path=display_path)
+    except ImportError:
+        state.add_coverage(surface, "tool_failed", f"numpy-parser-unavailable:{object_id}")
+    except (MemoryError, OSError, TypeError, ValueError, zipfile.BadZipFile):
+        state.add_coverage(surface, "unreadable", f"numpy-pickle-forbidden-or-invalid:{object_id}")
+
+
+def scan_opaque_binary(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str, layer: str) -> None:
+    if state.binary_is_approved(object_id, data):
+        return
+    try:
+        import magic
+
+        description = str(magic.from_buffer(data))
+        if description:
+            scan_text(state, description, surface=surface, object_id=f"{object_id}:format", display_path=f"{display_path}!format")
+        state.add_coverage(surface, "checked", f"binary-format:{object_id}", 1)
+    except Exception:
+        state.add_coverage(surface, "tool_failed", f"binary-format-parser-unavailable:{object_id}")
+    scan_command_metadata(state, data, surface=surface, object_id=object_id, display_path=display_path, command=["strings", "-a", "-n", "6"], layer=layer)
+
+
+def scan_media_content(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str) -> None:
+    if state.binary_is_approved(object_id, data):
+        return
+    with tempfile.TemporaryDirectory(prefix="safe-publish-media-") as temporary:
+        temporary_path = Path(temporary)
+        target = temporary_path / (Path(display_path).name or "media.bin")
+        target.write_bytes(data)
+        probe = run(["ffprobe", "-v", "quiet", "-show_format", "-show_streams", "-of", "json", str(target)])
+        if probe.returncode != 0:
+            state.add_coverage(surface, "tool_failed", f"media-metadata-parser-unavailable:{object_id}")
+            return
+        try:
+            metadata = json.loads(probe.stdout)
+        except json.JSONDecodeError:
+            state.add_coverage(surface, "tool_failed", f"media-metadata-response-invalid:{object_id}")
+            return
+        scan_text(state, json.dumps(metadata, ensure_ascii=False), surface=surface, object_id=f"{object_id}:media-metadata", display_path=f"{display_path}!media-metadata")
+        state.add_coverage(surface, "checked", f"media-metadata:{object_id}", 1)
+
+        streams = metadata.get("streams") or []
+        subtitle_streams = [item for item in streams if item.get("codec_type") == "subtitle"]
+        if not subtitle_streams:
+            state.add_coverage("media-subtitles", "not_present")
+        for stream in subtitle_streams:
+            index = stream.get("index")
+            extracted = run(["ffmpeg", "-v", "error", "-i", str(target), "-map", f"0:{index}", "-f", "webvtt", "pipe:1"], text=False)
+            if extracted.returncode != 0:
+                state.add_coverage("media-subtitles", "unreadable", f"subtitle-extraction-failed:{object_id}:{index}")
+                continue
+            scan_bytes(state, extracted.stdout, surface="media-subtitles", object_id=f"{object_id}:subtitle:{index}", display_path=f"{display_path}!subtitle-{index}.vtt")
+            state.add_coverage("media-subtitles", "checked", object_count=1)
+
+        cover_streams = [item for item in streams if item.get("codec_type") == "video" and (item.get("disposition") or {}).get("attached_pic") == 1]
+        if not cover_streams:
+            state.add_coverage("media-cover-art", "not_present")
+        for stream in cover_streams:
+            index = stream.get("index")
+            extracted = run(["ffmpeg", "-v", "error", "-i", str(target), "-map", f"0:{index}", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"], text=False)
+            if extracted.returncode != 0:
+                state.add_coverage("media-cover-art", "unreadable", f"cover-extraction-failed:{object_id}:{index}")
+                continue
+            scan_bytes(state, extracted.stdout, surface="media-cover-art", object_id=f"{object_id}:cover:{index}", display_path=f"{display_path}!cover-{index}.png")
+            state.add_coverage("media-cover-art", "checked", object_count=1)
+
+        attachment_streams = [item for item in streams if item.get("codec_type") == "attachment"]
+        if not attachment_streams:
+            state.add_coverage("media-attachments", "not_present")
+        else:
+            dumped = run(["ffmpeg", "-v", "error", "-dump_attachment:t", "", "-i", str(target), "-f", "null", "-"], temporary_path)
+            attachments = [path for path in temporary_path.iterdir() if path != target]
+            if dumped.returncode != 0 or len(attachments) < len(attachment_streams):
+                state.add_coverage("media-attachments", "unreadable", f"attachment-extraction-failed:{object_id}")
+            for index, attachment in enumerate(attachments):
+                scan_bytes(state, attachment.read_bytes(), surface="media-attachments", object_id=f"{object_id}:attachment:{index}", display_path=f"{display_path}!{attachment.name}")
+            if attachments:
+                state.add_coverage("media-attachments", "checked", object_count=len(attachments))
+
+
 def scan_bytes(
     state: ScanState,
     data: bytes,
@@ -616,10 +1301,12 @@ def scan_bytes(
     display_path: str,
     depth: int = 0,
 ) -> None:
+    state.register_object(object_id, data)
     if len(data) > DEFAULT_MAX_FILE_BYTES:
         state.add_coverage(surface, "unreadable", f"oversized-object:{object_id}")
         return
     suffix = Path(display_path.split("!")[-1]).suffix.lower()
+    mime = detected_mime(data, suffix)
     # Treat Git LFS pointers as text even when their tracked filename uses an opaque suffix.
     pointer_text = decode_text(data)
     if pointer_text is not None and pointer_text.startswith("version https://git-lfs.github.com/spec/v1\n"):
@@ -638,10 +1325,13 @@ def scan_bytes(
     if depth > MAX_ARCHIVE_DEPTH:
         state.add_coverage(surface, "tool_failed", f"archive-depth-limit:{object_id}")
         return
-    if suffix in OFFICE_SUFFIXES:
+    if suffix in NUMPY_SUFFIXES:
+        scan_numpy_content(state, data, surface=surface, object_id=object_id, display_path=display_path)
+        return
+    if suffix in OFFICE_SUFFIXES or (mime == "application/zip" and suffix in OFFICE_SUFFIXES):
         scan_zip(state, data, surface=surface, object_id=object_id, display_path=display_path, depth=depth, office=True)
         return
-    if suffix == ".zip":
+    if suffix == ".zip" or (mime == "application/zip" and suffix not in OFFICE_SUFFIXES):
         scan_zip(state, data, surface=surface, object_id=object_id, display_path=display_path, depth=depth)
         return
     if suffix in {".tar", ".tgz", ".gz", ".bz2", ".xz"}:
@@ -651,7 +1341,7 @@ def scan_bytes(
         if not state.binary_is_approved(object_id, data):
             state.add_coverage(surface, "unreadable", f"unsupported-archive:{object_id}")
         return
-    if suffix == ".svg":
+    if suffix == ".svg" or mime == "image/svg+xml":
         # SVG is XML text, so scan its source instead of requiring binary approval.
         svg_text = decode_text(data)
         try:
@@ -683,14 +1373,21 @@ def scan_bytes(
                 depth=depth + 1,
             )
         return
-    if suffix in IMAGE_SUFFIXES | {".pdf"} | OPAQUE_SUFFIXES:
-        if not state.binary_is_approved(object_id, data):
-            state.add_coverage(surface, "unreadable", f"binary-review-required:{object_id}")
+    if suffix in IMAGE_SUFFIXES or mime.startswith("image/"):
+        scan_image_content(state, data, surface=surface, object_id=object_id, display_path=display_path)
+        return
+    if suffix == ".pdf" or mime == "application/pdf":
+        scan_pdf_content(state, data, surface=surface, object_id=object_id, display_path=display_path)
+        return
+    if suffix in MEDIA_SUFFIXES or mime == "media/container":
+        scan_media_content(state, data, surface=surface, object_id=object_id, display_path=display_path)
+        return
+    if suffix in OPAQUE_SUFFIXES or mime in {"application/x-dosexec", "application/x-elf"}:
+        scan_opaque_binary(state, data, surface=surface, object_id=object_id, display_path=display_path, layer="binary-strings")
         return
     text = decode_text(data)
     if text is None:
-        if not state.binary_is_approved(object_id, data):
-            state.add_coverage(surface, "unreadable", f"opaque-binary:{object_id}")
+        scan_opaque_binary(state, data, surface=surface, object_id=object_id, display_path=display_path, layer="opaque-binary-strings")
         return
     scan_text(state, text, surface=surface, object_id=object_id, display_path=display_path)
 
@@ -808,6 +1505,15 @@ def scan_git_history(state: ScanState, source: Path, *, time_limit_seconds: int 
                 continue
             content = process.stdout.read(size)
             process.stdout.read(1)
+            if object_type in {"commit", "tag"}:
+                scan_text(
+                    state,
+                    content.decode("utf-8", errors="replace"),
+                    surface="git-metadata",
+                    object_id=f"git-{object_type}:{oid}",
+                    display_path=f"git-{object_type}:{oid[:12]}",
+                )
+                continue
             if object_type != "blob":
                 continue
             blob_count += 1
@@ -859,8 +1565,32 @@ def scan_git_history(state: ScanState, source: Path, *, time_limit_seconds: int 
                         display_path=f"git-commit:{commit_id}:{field_name}",
                     )
         state.add_coverage("git-history", "checked", object_count=blob_count)
+        scan_git_refs(state, source)
     except (OSError, subprocess.SubprocessError, AssertionError):
         state.add_coverage("git-history", "tool_failed", "git-cat-file-failed")
+
+
+def scan_git_refs(state: ScanState, source: Path) -> None:
+    refs = run(["git", "for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(taggername)%00%(taggeremail)%00%(contents)%00%1e"], source, text=False)
+    if refs.returncode != 0:
+        state.add_coverage("git-metadata", "tool_failed", "git-ref-enumeration-failed")
+        return
+    count = 0
+    for record in refs.stdout.split(b"\x1e\n"):
+        fields = record.strip(b"\x00\r\n").split(b"\x00", 5)
+        if len(fields) != 6:
+            continue
+        refname, oid, object_type, tagger_name, tagger_email, contents = fields
+        ref_text = refname.decode("utf-8", errors="replace")
+        if not ref_text:
+            continue
+        count += 1
+        object_id = f"git-ref:{ref_text}"
+        for label, value in (("name", refname), ("tagger-name", tagger_name), ("tagger-email", tagger_email), ("contents", contents)):
+            decoded = value.decode("utf-8", errors="replace")
+            if decoded:
+                scan_text(state, decoded, surface="git-metadata", object_id=f"{object_id}:{label}", display_path=f"{ref_text}:{label}")
+    state.add_coverage("git-metadata", "checked" if count else "not_present", object_count=count)
 
 
 def scan_submodules(state: ScanState, source: Path) -> None:
@@ -979,29 +1709,74 @@ def ensure_gitleaks() -> Path:
     return executable
 
 
+def stable_gitleaks_object_id(source: Path, commit: str, path: str) -> str | None:
+    """Bind a Git finding to file content instead of transient candidate commit metadata."""
+    normalized_path = path.replace("\\", "/")
+    if re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        resolved = run(["git", "rev-parse", "--verify", f"{commit}:{normalized_path}"], source)
+        blob_oid = resolved.stdout.strip().lower()
+        if resolved.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", blob_oid):
+            return f"gitleaks-blob:{blob_oid}:{normalized_path}"
+    worktree_path = source / Path(normalized_path)
+    try:
+        if worktree_path.is_file():
+            return f"gitleaks-worktree:{sha256_bytes(worktree_path.read_bytes())}:{normalized_path}"
+    except OSError:
+        pass
+    return None
+
+
 def run_gitleaks(state: ScanState, source: Path, binary: Path | None = None) -> None:
     try:
         executable = binary or ensure_gitleaks()
     except Exception:
         state.add_coverage("gitleaks", "tool_failed", "gitleaks-install-or-verification-failed")
         return
+    executable_key = f"{executable.resolve()}:{sha256_bytes(executable.read_bytes())}"
+    if executable_key not in VERIFIED_GITLEAKS:
+        with tempfile.TemporaryDirectory(prefix="safe-publish-gitleaks-canary-") as canary_temporary:
+            canary_root = Path(canary_temporary)
+            marker = "gh" + "p_" + "7H4G2J9K5M8N3P6Q1R4S7T0V2W5X8Y6Z9B3C"
+            (canary_root / "canary.txt").write_text("GITHUB_TOKEN=" + marker + "\n", encoding="utf-8")
+            canary_report = canary_root / "report.json"
+            try:
+                canary = run([
+                    str(executable), "dir", "--no-banner", "--no-color", "--redact=100",
+                    "--report-format", "json", "--report-path", str(canary_report), str(canary_root),
+                ], timeout_seconds=60)
+            except subprocess.TimeoutExpired:
+                state.add_coverage("gitleaks", "tool_failed", "gitleaks-canary-timeout")
+                return
+            try:
+                canary_records = json.loads(canary_report.read_text(encoding="utf-8")) if canary_report.exists() else []
+            except (OSError, json.JSONDecodeError):
+                canary_records = []
+            if canary.returncode not in {0, 1} or not canary_records:
+                state.add_coverage("gitleaks", "tool_failed", "gitleaks-runtime-canary-not-detected")
+                return
+        VERIFIED_GITLEAKS.add(executable_key)
     with tempfile.TemporaryDirectory(prefix="safe-publish-gitleaks-") as temporary:
         report = Path(temporary) / "report.json"
-        result = run(
-            [
-                str(executable),
-                "git",
-                "--no-banner",
-                "--redact=100",
-                "--report-format",
-                "json",
-                "--report-path",
-                str(report),
-                "--timeout",
-                "300",
-                str(source),
-            ]
-        )
+        try:
+            result = run(
+                [
+                    str(executable),
+                    "git",
+                    "--no-banner",
+                    "--redact=100",
+                    "--report-format",
+                    "json",
+                    "--report-path",
+                    str(report),
+                    "--timeout",
+                    "300",
+                    str(source),
+                ],
+                timeout_seconds=330,
+            )
+        except subprocess.TimeoutExpired:
+            state.add_coverage("gitleaks", "tool_failed", "gitleaks-process-timeout")
+            return
         if result.returncode not in {0, 1}:
             state.add_coverage("gitleaks", "tool_failed", f"gitleaks-exit-{result.returncode}")
             return
@@ -1018,9 +1793,13 @@ def run_gitleaks(state: ScanState, source: Path, binary: Path | None = None) -> 
             rule_id = str(record.get("RuleID", "gitleaks.unknown"))
             line = int(record.get("StartLine", 0) or 0)
             rule = Rule(f"gitleaks.{rule_id}", "credential", "block", re.compile(r"$^"))
+            object_id = stable_gitleaks_object_id(source, commit, path)
+            if object_id is None:
+                state.add_coverage("gitleaks", "unreadable", "gitleaks-object-binding-failed")
+                object_id = f"gitleaks-unbound:{path}"
             state.add_finding(
                 surface="gitleaks",
-                object_id=f"gitleaks:{commit}:{path}",
+                object_id=object_id,
                 location=f"{path}:{line}",
                 rule=rule,
                 raw_value=None,
@@ -1045,8 +1824,19 @@ def scan_metadata(state: ScanState, metadata: dict[str, Any]) -> None:
     state.add_coverage("repository-metadata", "checked" if count else "not_present", object_count=count)
 
 
+def coverage_risk_level(item: Coverage) -> str:
+    if item.status in {"checked", "not_present"}:
+        return "none"
+    return "noncritical" if item.surface in NONCRITICAL_COVERAGE_SURFACES else "critical"
+
+
 def consolidated_coverage(coverage: list[Coverage]) -> list[dict[str, Any]]:
-    return [item.as_dict() for item in sorted(coverage, key=lambda value: (value.surface, value.status, value.reason))]
+    result: list[dict[str, Any]] = []
+    for item in sorted(coverage, key=lambda value: (value.surface, value.status, value.reason)):
+        record = item.as_dict()
+        record["risk_level"] = coverage_risk_level(item)
+        result.append(record)
+    return result
 
 
 def decision_for(state: ScanState, *, force_incomplete: bool = False) -> str:
@@ -1060,36 +1850,136 @@ def decision_for(state: ScanState, *, force_incomplete: bool = False) -> str:
     return "pass"
 
 
-def sorted_findings(state: ScanState) -> list[dict[str, Any]]:
-    return [
-        item.public_dict()
-        for item in sorted(
-            state.findings,
-            key=lambda value: (value.repository, value.surface, value.object, value.location, value.rule_id, value.status),
-        )
+def finding_risk_level(finding: Finding) -> str:
+    if finding.status in {"approved", "excepted"}:
+        return "none"
+    if finding.legal_protected or finding.rule_id not in NONCRITICAL_FINDING_RULES:
+        return "critical"
+    return "noncritical"
+
+
+def risk_acceptance_status(state: ScanState, finding: Finding) -> str:
+    if finding_risk_level(finding) != "noncritical":
+        return "not-eligible"
+    matches = [
+        item
+        for item in state.policy["risk_acceptances"]
+        if item["repository"] == state.repository and item["rule_id"] == finding.rule_id and item["object"] == finding.object
     ]
+    if not matches:
+        return "missing"
+    now = dt.datetime.now(dt.timezone.utc)
+    observed_digest = state.object_sha256.get(finding.object)
+    observed_statuses: set[str] = set()
+    for acceptance in matches:
+        expires = dt.datetime.fromisoformat(acceptance["expires_at"].replace("Z", "+00:00"))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=dt.timezone.utc)
+        if expires <= now:
+            observed_statuses.add("expired")
+            continue
+        if acceptance["scanner_sha256"] != state.scanner_sha256:
+            observed_statuses.add("scanner-changed")
+            continue
+        if observed_digest is None or acceptance["object_sha256"] != observed_digest:
+            observed_statuses.add("object-changed")
+            continue
+        return "active"
+    for status in ("expired", "scanner-changed", "object-changed"):
+        if status in observed_statuses:
+            return status
+    return "missing"
 
 
-def gate_report(state: ScanState, source: Path, policy: dict[str, Any] | None, *, force_incomplete: bool = False) -> dict[str, Any]:
+def publication_decision_for(
+    state: ScanState,
+    *,
+    release_profile: str = "permissive-noncritical",
+    force_incomplete: bool = False,
+) -> str:
+    if release_profile not in RELEASE_PROFILES:
+        raise ValueError("Release profile is unknown")
+    audit_decision = decision_for(state, force_incomplete=force_incomplete)
+    if release_profile == "strict":
+        return "allow" if audit_decision == "pass" else "deny"
+    if force_incomplete:
+        return "deny"
+    if any(coverage_risk_level(item) == "critical" for item in state.coverage):
+        return "deny"
+    unresolved = [item for item in state.findings if item.status not in {"approved", "excepted"}]
+    for finding in unresolved:
+        if finding_risk_level(finding) == "critical":
+            return "deny"
+        if risk_acceptance_status(state, finding) != "active":
+            return "deny"
+    return "allow" if audit_decision == "pass" else "allow_with_risk"
+
+
+def sorted_findings(state: ScanState) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in sorted(
+        state.findings,
+        key=lambda value: (value.repository, value.surface, value.object, value.location, value.rule_id, value.status),
+    ):
+        record = item.public_dict()
+        record["risk_level"] = finding_risk_level(item)
+        if record["risk_level"] == "noncritical":
+            record["risk_acceptance"] = risk_acceptance_status(state, item)
+        result.append(record)
+    return result
+
+
+def gate_report(
+    state: ScanState,
+    source: Path,
+    policy: dict[str, Any] | None,
+    *,
+    release_profile: str = "permissive-noncritical",
+    force_incomplete: bool = False,
+) -> dict[str, Any]:
     decision = decision_for(state, force_incomplete=force_incomplete)
-    return {
+    publication_decision = publication_decision_for(
+        state,
+        release_profile=release_profile,
+        force_incomplete=force_incomplete,
+    )
+    findings = sorted_findings(state)
+    coverage = consolidated_coverage(state.coverage)
+    report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
+        "mode": "exact-publication-gate",
         "decision": decision,
+        "publication_decision": publication_decision,
+        "release_profile": release_profile,
         "repository": state.repository,
         "source_commit": git_head(source),
-        "gitleaks_version": GITLEAKS_VERSION,
+        "scanner_versions": {
+            "safe_publish": "3",
+            "safe_publish_sha256": sha256_bytes(Path(__file__).read_bytes()),
+            "image_ocr_budget_seconds": state.image_ocr_budget_seconds,
+            "gitleaks": GITLEAKS_VERSION,
+            "python": platform.python_version(),
+        },
         "policy_fingerprint": policy_fingerprint(policy),
-        "coverage": consolidated_coverage(state.coverage),
-        "findings": sorted_findings(state),
+        "coverage": coverage,
+        "findings": findings,
         "summary": {
             "finding_count": len(state.findings),
             "block_count": sum(item.status == "block" for item in state.findings),
             "review_count": sum(item.status == "review" for item in state.findings),
             "approved_count": sum(item.status in {"approved", "excepted"} for item in state.findings),
             "coverage_gap_count": sum(item.status not in {"checked", "not_present"} for item in state.coverage),
+            "critical_finding_count": sum(item["risk_level"] == "critical" for item in findings),
+            "noncritical_finding_count": sum(item["risk_level"] == "noncritical" for item in findings),
+            "accepted_risk_count": sum(item.get("risk_acceptance") == "active" for item in findings),
+            "critical_coverage_gap_count": sum(item["risk_level"] == "critical" for item in coverage),
+            "noncritical_coverage_gap_count": sum(item["risk_level"] == "noncritical" for item in coverage),
         },
     }
+    stable = {key: value for key, value in report.items() if key not in {"generated_at", "report_fingerprint"}}
+    report["report_fingerprint"] = sha256_bytes(json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return report
 
 
 def scan_release_paths(state: ScanState, release_paths: list[Path]) -> None:
@@ -1138,10 +2028,431 @@ def command_gate(args: argparse.Namespace) -> int:
         scan_lfs(state, source)
         run_gitleaks(state, source, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
     scan_release_paths(state, [Path(item).expanduser().resolve() for item in args.release_asset])
-    report = gate_report(state, source, policy, force_incomplete=force_incomplete)
+    report = gate_report(
+        state,
+        source,
+        policy,
+        release_profile=args.release_profile,
+        force_incomplete=force_incomplete,
+    )
     write_json(Path(args.report), report)
-    print(json.dumps({"decision": report["decision"], **report["summary"]}, sort_keys=True))
-    return {"pass": 0, "review": 2, "block": 3, "incomplete": 4}[report["decision"]]
+    if args.public_summary:
+        write_json(
+            Path(args.public_summary),
+            {
+                "schema_version": SCHEMA_VERSION,
+                "mode": report["mode"],
+                "decision": report["decision"],
+                "publication_decision": report["publication_decision"],
+                "release_profile": report["release_profile"],
+                "source_commit": report["source_commit"],
+                "scanner_sha256": report["scanner_versions"]["safe_publish_sha256"],
+                "policy_fingerprint": report["policy_fingerprint"],
+                "report_fingerprint": report["report_fingerprint"],
+                "summary": report["summary"],
+            },
+        )
+    print(
+        json.dumps(
+            {
+                "decision": report["decision"],
+                "publication_decision": report["publication_decision"],
+                "release_profile": report["release_profile"],
+                **report["summary"],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if report["publication_decision"] in {"allow", "allow_with_risk"} else 3
+
+
+def probe_command(command: list[str]) -> tuple[bool, str | None]:
+    """Check one executable without exposing its installation path."""
+    if shutil.which(command[0]) is None:
+        return False, None
+    try:
+        result = run(command, timeout_seconds=30)
+    except (OSError, subprocess.SubprocessError):
+        return False, None
+    if result.returncode != 0:
+        return False, None
+    first_line = (result.stdout or result.stderr).strip().splitlines()
+    version = first_line[0][:160] if first_line else "available"
+    return True, version
+
+
+def probe_python_component(name: str) -> tuple[bool, str | None]:
+    """Import one parser in-process and return only a non-sensitive version string."""
+    try:
+        module = importlib.import_module(name)
+        return True, str(getattr(module, "__version__", "available"))[:80]
+    except Exception:
+        return False, None
+
+
+def cached_gitleaks_probe() -> tuple[bool, str | None]:
+    """Probe PATH or the verified-version cache without downloading anything."""
+    path_probe = probe_command(["gitleaks", "version"])
+    if path_probe[0]:
+        return path_probe
+    try:
+        _asset_name, executable_name = gitleaks_asset_name()
+    except RuntimeError:
+        return False, None
+    cached = get_codex_home() / "cache" / "github-safe-publish" / f"gitleaks-{GITLEAKS_VERSION}" / executable_name
+    if not cached.is_file():
+        return False, None
+    return probe_command([str(cached), "version"])
+
+
+def doctor_requirements(source: Path | None) -> set[str]:
+    """Map tracked object types to the parser layers required for a complete gate."""
+    required = {"git", "git-lfs", "gitleaks"}
+    if source is None or not source.is_dir():
+        return required
+    for relative, path in iter_working_tree(source):
+        if not path.is_file():
+            continue
+        suffix = Path(relative).suffix.lower()
+        if suffix in IMAGE_SUFFIXES:
+            required.update({"pillow", "opencv", "image-ocr"})
+        elif suffix in NUMPY_SUFFIXES:
+            required.add("numpy")
+        elif suffix == ".pdf":
+            required.update({"pdf", "image-ocr"})
+        elif suffix in MEDIA_SUFFIXES:
+            required.add("media")
+        elif suffix in OPAQUE_SUFFIXES:
+            required.update({"libmagic", "strings"})
+    return required
+
+
+def doctor_report(source: Path | None = None, *, require_all: bool = False) -> dict[str, Any]:
+    """Return a deterministic capability report for the current runtime."""
+    probes: dict[str, tuple[bool, str | None]] = {
+        "git": probe_command(["git", "--version"]),
+        "git-lfs": probe_command(["git", "lfs", "version"]),
+        "gitleaks": cached_gitleaks_probe(),
+        "strings": probe_command(["strings", "--version"]),
+        "media": probe_command(["ffprobe", "-version"]),
+        "pillow": probe_python_component("PIL"),
+        "numpy": probe_python_component("numpy"),
+        "pdf": probe_python_component("pypdf"),
+        "image-ocr": probe_python_component("rapidocr_onnxruntime"),
+    }
+    opencv_ok, opencv_version = probe_python_component("cv2")
+    if opencv_ok:
+        try:
+            import cv2
+            import numpy as np
+
+            detector = cv2.barcode_BarcodeDetector()
+            normalized_barcode_values(detector.detectAndDecode(np.zeros((32, 32, 3), dtype=np.uint8)))
+        except Exception:
+            opencv_ok = False
+    probes["opencv"] = (opencv_ok, opencv_version)
+    magic_ok, magic_version = probe_python_component("magic")
+    if magic_ok:
+        try:
+            import magic
+
+            magic.from_buffer(b"synthetic")
+        except Exception:
+            magic_ok = False
+    probes["libmagic"] = (magic_ok, magic_version)
+    required = set(probes) if require_all else doctor_requirements(source)
+    components = {
+        name: {"status": "available" if available else "unavailable", "required": name in required, "version": version}
+        for name, (available, version) in sorted(probes.items())
+    }
+    missing = sorted(name for name in required if not probes.get(name, (False, None))[0])
+    stable = {"schema_version": SCHEMA_VERSION, "components": components, "required": sorted(required), "missing_required": missing}
+    return {**stable, "decision": "pass" if not missing else "incomplete", "fingerprint": sha256_bytes(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8"))}
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    source = Path(args.source).expanduser().resolve() if args.source else None
+    report = doctor_report(source, require_all=bool(args.all))
+    if args.output:
+        write_json(Path(args.output), report)
+    print(json.dumps(report, sort_keys=True))
+    return 0 if report["decision"] == "pass" else 4
+
+
+def copy_worktree_candidate(source: Path, base_commit: str, destination: Path) -> tuple[str, str, str]:
+    """Create an isolated candidate that includes tracked edits, deletions, and untracked files."""
+    cloned = run(["git", "clone", "--no-hardlinks", str(source), str(destination)])
+    if cloned.returncode != 0:
+        raise RuntimeError("Unable to clone the publication candidate")
+    checked_out = run(["git", "checkout", "--detach", base_commit], destination)
+    if checked_out.returncode != 0:
+        raise RuntimeError("Unable to check out the requested base commit")
+    source_remote = run(["git", "remote", "get-url", "origin"], source)
+    if source_remote.returncode != 0 or not source_remote.stdout.strip():
+        raise RuntimeError("Source GitHub remote is unavailable")
+    remote_updated = run(["git", "remote", "set-url", "origin", source_remote.stdout.strip()], destination)
+    if remote_updated.returncode != 0:
+        raise RuntimeError("Unable to preserve the source GitHub remote")
+    base_files = run(["git", "ls-tree", "-r", "--name-only", "-z", base_commit], source, text=False)
+    if base_files.returncode != 0:
+        raise RuntimeError("Unable to enumerate base files")
+    for raw in base_files.stdout.split(b"\x00"):
+        if not raw:
+            continue
+        relative = raw.decode("utf-8", errors="surrogateescape")
+        source_path = source / relative
+        target = destination / relative
+        if not source_path.exists() and not source_path.is_symlink() and (target.exists() or target.is_symlink()):
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+    for relative, source_path in iter_working_tree(source):
+        if source_path.is_dir():
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source_path.is_symlink():
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            target.symlink_to(os.readlink(source_path))
+        else:
+            shutil.copy2(source_path, target)
+    staged = run(["git", "add", "-A"], destination)
+    if staged.returncode != 0:
+        raise RuntimeError("Unable to stage the isolated candidate")
+    tree = run(["git", "write-tree"], destination)
+    index = run(["git", "ls-files", "-s", "-z"], destination, text=False)
+    patch = run(["git", "diff", "--cached", "--binary", base_commit], destination, text=False)
+    if tree.returncode != 0 or index.returncode != 0 or patch.returncode != 0:
+        raise RuntimeError("Unable to fingerprint the isolated candidate")
+    return tree.stdout.strip(), sha256_bytes(index.stdout), sha256_bytes(patch.stdout)
+
+
+def run_validation_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
+    """Run a caller-approved validation while retaining only status and duration."""
+    started = time.monotonic()
+    shell_command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command] if os.name == "nt" else ["bash", "-lc", command]
+    try:
+        result = run(shell_command, cwd, timeout_seconds=timeout_seconds)
+        status = "pass" if result.returncode == 0 else "fail"
+        exit_code: int | None = int(result.returncode)
+    except subprocess.TimeoutExpired:
+        status = "timeout"
+        exit_code = None
+    return {"status": status, "exit_code": exit_code, "duration_seconds": round(time.monotonic() - started, 3)}
+
+
+def remote_default_branch(repository: str) -> str:
+    result = run(["gh", "repo", "view", repository, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"])
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError("GitHub default branch is unavailable")
+    return result.stdout.strip()
+
+
+def remote_branch_commit(repository: str, branch: str) -> str:
+    result = run(["gh", "api", f"repos/{repository}/commits/{branch}", "--jq", ".sha"])
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", result.stdout.strip()):
+        raise RuntimeError("GitHub branch commit is unavailable")
+    return result.stdout.strip()
+
+
+def repository_has_required_governance(repository: str, branch: str) -> bool:
+    protection = run(["gh", "api", f"repos/{repository}/branches/{branch}/protection"])
+    if protection.returncode == 0:
+        try:
+            document = json.loads(protection.stdout)
+            contexts = ((document.get("required_status_checks") or {}).get("contexts") or [])
+            checks = ((document.get("required_status_checks") or {}).get("checks") or [])
+            if contexts or checks:
+                return True
+        except json.JSONDecodeError:
+            pass
+    rulesets = run(["gh", "api", f"repos/{repository}/rulesets?includes_parents=true"])
+    if rulesets.returncode != 0:
+        return False
+    try:
+        return any(
+            item.get("enforcement") == "active"
+            and any(rule.get("type") == "required_status_checks" for rule in item.get("rules", []))
+            for item in json.loads(rulesets.stdout)
+        )
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def update_managed_public_summary(path: str | None, values: dict[str, Any]) -> None:
+    """Add orchestration state to a redacted public summary without private locations."""
+    if not path:
+        return
+    target = Path(path)
+    document: dict[str, Any] = {}
+    if target.is_file():
+        try:
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                document.update(loaded)
+        except (OSError, json.JSONDecodeError):
+            document = {}
+    document.update(values)
+    write_json(target, document)
+
+
+def command_managed_publish(args: argparse.Namespace) -> int:
+    """Gate one exact worktree candidate and optionally publish it through a PR."""
+    source = Path(args.source).expanduser().resolve()
+    output_dir = ensure_private_path(Path(args.private_output_dir))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    restrict_private_path(output_dir, directory=True)
+    checkpoint_path = ensure_private_path(Path(args.checkpoint) if args.checkpoint else output_dir / "checkpoint.private.json")
+    report_path = ensure_private_path(output_dir / "gate.private.json")
+    base_commit = run(["git", "rev-parse", "--verify", f"{args.base_commit}^{{commit}}"], source).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", base_commit) or git_head(source) != base_commit:
+        raise ValueError("Base commit must equal the current source HEAD")
+    policy = load_policy(Path(args.policy), source)
+    gitleaks_binary = Path(args.gitleaks_path).expanduser().resolve() if args.gitleaks_path else ensure_gitleaks()
+    default_branch = args.base_branch or remote_default_branch(args.repository)
+    if remote_branch_commit(args.repository, default_branch) != base_commit:
+        raise RuntimeError("Remote base changed before publication")
+    runtime = doctor_report(source)
+    candidate = output_dir / "candidate"
+    if candidate.exists() and not args.resume:
+        raise ValueError("Candidate already exists; use --resume or a new private output directory")
+    if not candidate.exists():
+        tree_oid, tree_sha256, patch_sha256 = copy_worktree_candidate(source, base_commit, candidate)
+    else:
+        staged = run(["git", "add", "-A"], candidate)
+        tree = run(["git", "write-tree"], candidate)
+        index = run(["git", "ls-files", "-s", "-z"], candidate, text=False)
+        patch = run(["git", "diff", "--cached", "--binary", base_commit], candidate, text=False)
+        if staged.returncode != 0 or tree.returncode != 0 or index.returncode != 0 or patch.returncode != 0:
+            raise RuntimeError("Unable to resume the isolated candidate")
+        tree_oid, tree_sha256, patch_sha256 = tree.stdout.strip(), sha256_bytes(index.stdout), sha256_bytes(patch.stdout)
+    validations = [run_validation_command(command, candidate, args.validation_timeout_seconds) for command in args.validation_command]
+    if args.readme_auditor:
+        auditor = Path(args.readme_auditor).expanduser().resolve()
+        validations.append(run_validation_command(f'python -X utf8 "{auditor}" "{candidate}" --scan-repository', candidate, args.validation_timeout_seconds))
+    validation_passed = all(item["status"] == "pass" for item in validations)
+    if runtime["decision"] != "pass" or not validation_passed:
+        checkpoint = {
+            "schema_version": SCHEMA_VERSION,
+            "state": "incomplete",
+            "base_commit": base_commit,
+            "candidate_tree_oid": tree_oid,
+            "candidate_tree_sha256": tree_sha256,
+            "patch_sha256": patch_sha256,
+            "scanner_sha256": sha256_bytes(Path(__file__).read_bytes()),
+            "policy_fingerprint": policy_fingerprint(policy),
+            "runtime_fingerprint": runtime["fingerprint"],
+            "validation": validations,
+        }
+        write_json(checkpoint_path, checkpoint, private=True)
+        if args.public_summary:
+            write_json(Path(args.public_summary), {key: checkpoint[key] for key in ("schema_version", "state", "base_commit", "candidate_tree_sha256", "patch_sha256", "scanner_sha256", "policy_fingerprint", "runtime_fingerprint")})
+        print(json.dumps({"publication_decision": "deny", "state": "incomplete"}, sort_keys=True))
+        return 4
+    candidate_head = git_head(candidate)
+    if candidate_head == base_commit:
+        base_timestamp = run(["git", "show", "-s", "--format=%cI", base_commit], candidate).stdout.strip()
+        if not base_timestamp:
+            raise RuntimeError("Base commit timestamp is unavailable")
+        committed = run(
+            [
+                "git", "-c", "user.name=GitHub Managed Publish", "-c", "user.email=managed-publish@example.invalid",
+                "commit", "-m", args.commit_message,
+            ],
+            candidate,
+            env={"GIT_AUTHOR_DATE": base_timestamp, "GIT_COMMITTER_DATE": base_timestamp},
+        )
+        if committed.returncode != 0:
+            raise RuntimeError("Publication candidate has no committable changes")
+    elif not args.resume:
+        raise RuntimeError("Unexpected commit exists in the isolated candidate")
+    gate_args = argparse.Namespace(
+        source=str(candidate), repository=args.repository, policy=args.policy, policy_b64_env=None,
+        generic_only=False, release_asset=args.release_asset, gitleaks_path=str(gitleaks_binary),
+        release_profile=args.release_profile, report=str(report_path), public_summary=args.public_summary,
+    )
+    gate_exit = command_gate(gate_args)
+    gate_document = json.loads(report_path.read_text(encoding="utf-8"))
+    publication_decision = gate_document["publication_decision"]
+    checkpoint = {
+        "schema_version": SCHEMA_VERSION,
+        "state": "gated",
+        "base_commit": base_commit,
+        "candidate_commit": git_head(candidate),
+        "candidate_tree_oid": tree_oid,
+        "candidate_tree_sha256": tree_sha256,
+        "patch_sha256": patch_sha256,
+        "scanner_sha256": gate_document["scanner_versions"]["safe_publish_sha256"],
+        "policy_fingerprint": gate_document["policy_fingerprint"],
+        "report_fingerprint": gate_document["report_fingerprint"],
+        "publication_decision": publication_decision,
+        "validation": validations,
+    }
+    write_json(checkpoint_path, checkpoint, private=True)
+    update_managed_public_summary(
+        args.public_summary,
+        {
+            "managed_state": checkpoint["state"],
+            "candidate_tree_sha256": tree_sha256,
+            "patch_sha256": patch_sha256,
+        },
+    )
+    if gate_exit != 0 or publication_decision not in {"allow", "allow_with_risk"} or args.intent == "audit":
+        print(json.dumps({"publication_decision": publication_decision, "state": "gated"}, sort_keys=True))
+        return gate_exit
+    if remote_branch_commit(args.repository, default_branch) != base_commit:
+        raise RuntimeError("Remote base changed after the gate")
+    branch = args.branch or f"codex/managed-publish-{tree_sha256[:12]}"
+    pushed = run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], candidate)
+    if pushed.returncode != 0:
+        raise RuntimeError("Candidate branch push failed")
+    remote_candidate = remote_branch_commit(args.repository, branch)
+    remote_tree = run(["gh", "api", f"repos/{args.repository}/git/commits/{remote_candidate}", "--jq", ".tree.sha"])
+    if remote_tree.returncode != 0 or remote_tree.stdout.strip() != tree_oid:
+        raise RuntimeError("Remote candidate tree differs from the gated tree")
+    existing = run(["gh", "pr", "list", "--repo", args.repository, "--head", branch, "--state", "open", "--json", "number", "--jq", ".[0].number"])
+    if existing.returncode == 0 and existing.stdout.strip().isdigit():
+        pr_number = existing.stdout.strip()
+    else:
+        created = run(["gh", "pr", "create", "--repo", args.repository, "--base", default_branch, "--head", branch, "--title", args.pr_title, "--body", args.pr_body])
+        if created.returncode != 0:
+            raise RuntimeError("Pull request creation failed")
+        lookup = run(["gh", "pr", "list", "--repo", args.repository, "--head", branch, "--state", "open", "--json", "number", "--jq", ".[0].number"])
+        if lookup.returncode != 0 or not lookup.stdout.strip().isdigit():
+            raise RuntimeError("Created pull request is unavailable")
+        pr_number = lookup.stdout.strip()
+    checkpoint.update({"state": "pr-created", "branch": branch, "pull_request": int(pr_number)})
+    if args.intent != "auto-merge" or publication_decision != "allow":
+        write_json(checkpoint_path, checkpoint, private=True)
+        update_managed_public_summary(args.public_summary, {"managed_state": "pr-created"})
+        print(json.dumps({"publication_decision": publication_decision, "state": "pr-created"}, sort_keys=True))
+        return 0
+    if not repository_has_required_governance(args.repository, default_branch):
+        checkpoint.update({"state": "review-required", "governance_issue": "BRANCH_PROTECTION_MISSING"})
+        write_json(checkpoint_path, checkpoint, private=True)
+        update_managed_public_summary(args.public_summary, {"managed_state": "review-required", "issue_codes": ["BRANCH_PROTECTION_MISSING"]})
+        print(json.dumps({"publication_decision": publication_decision, "state": "review-required", "issue_code": "BRANCH_PROTECTION_MISSING"}, sort_keys=True))
+        return 0
+    try:
+        checks = run(["gh", "pr", "checks", pr_number, "--repo", args.repository, "--required", "--watch", "--interval", "10"], timeout_seconds=args.checks_timeout_seconds)
+    except subprocess.TimeoutExpired:
+        checks = subprocess.CompletedProcess([], 1, "", "")
+    if checks.returncode != 0 or remote_branch_commit(args.repository, default_branch) != base_commit:
+        checkpoint["state"] = "review-required"
+        write_json(checkpoint_path, checkpoint, private=True)
+        update_managed_public_summary(args.public_summary, {"managed_state": "review-required"})
+        print(json.dumps({"publication_decision": publication_decision, "state": "review-required"}, sort_keys=True))
+        return 0
+    merged = run(["gh", "pr", "merge", pr_number, "--repo", args.repository, "--squash", "--delete-branch"])
+    if merged.returncode != 0:
+        raise RuntimeError("Pull request merge failed")
+    checkpoint["state"] = "merged"
+    write_json(checkpoint_path, checkpoint, private=True)
+    update_managed_public_summary(args.public_summary, {"managed_state": "merged"})
+    print(json.dumps({"publication_decision": publication_decision, "state": "merged"}, sort_keys=True))
+    return 0
 
 
 def command_policy_candidates(args: argparse.Namespace) -> int:
@@ -1337,7 +2648,12 @@ def gh_json(endpoint: str) -> tuple[Any | None, str | None]:
     result = run(["gh", "api", "--paginate", endpoint])
     if result.returncode != 0:
         lowered = result.stderr.lower()
-        reason = "permission_denied" if "403" in lowered or "resource not accessible" in lowered else "tool_failed"
+        if "403" in lowered or "resource not accessible" in lowered:
+            reason = "permission_denied"
+        elif "404" in lowered or "not found" in lowered:
+            reason = "not_present"
+        else:
+            reason = "tool_failed"
         return None, reason
     text = result.stdout.strip()
     try:
@@ -1355,6 +2671,367 @@ def gh_json(endpoint: str) -> tuple[Any | None, str | None]:
         return values, None
     except json.JSONDecodeError:
         return None, "tool_failed"
+
+
+def api_items(endpoint: str, field: str | None = None) -> tuple[list[dict[str, Any]], str | None]:
+    values, error = gh_json(endpoint)
+    if error:
+        return [], error
+    records: list[dict[str, Any]] = []
+    for value in values or []:
+        if field and isinstance(value, dict):
+            nested = value.get(field) or []
+            records.extend(item for item in nested if isinstance(item, dict))
+        elif isinstance(value, dict):
+            records.append(value)
+    return records, None
+
+
+def gh_download(endpoint: str, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> tuple[bytes | None, str | None]:
+    try:
+        process = subprocess.Popen(
+            ["gh", "api", endpoint, "-H", "Accept: application/octet-stream"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = process.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                process.kill()
+                process.wait(timeout=30)
+                return None, "unreadable"
+            chunks.append(chunk)
+        _, stderr = process.communicate(timeout=30)
+        if process.returncode != 0:
+            lowered = stderr.decode("utf-8", errors="ignore").lower()
+            if "403" in lowered or "resource not accessible" in lowered:
+                return None, "permission_denied"
+            if "404" in lowered or "not found" in lowered or "410" in lowered:
+                return None, "not_present"
+            return None, "tool_failed"
+        return b"".join(chunks), None
+    except (OSError, subprocess.SubprocessError, AssertionError):
+        return None, "tool_failed"
+
+
+def fetch_public_url(url: str, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> tuple[bytes | None, str | None, str]:
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "github-safe-publish/2"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            content_type = response.headers.get_content_type()
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    return None, "unreadable", content_type
+                chunks.append(chunk)
+            return b"".join(chunks), None, content_type
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return None, "permission_denied", ""
+        if exc.code in {404, 410}:
+            return None, "unreadable", ""
+        return None, "tool_failed", ""
+    except (OSError, urllib.error.URLError, ValueError):
+        return None, "tool_failed", ""
+
+
+def audit_rendered_pages(state: ScanState, root_url: str) -> None:
+    parsed_root = urllib.parse.urlparse(root_url)
+    if parsed_root.scheme not in {"http", "https"} or not parsed_root.netloc:
+        state.add_coverage("github-pages-rendered", "unreadable", "invalid-pages-url")
+        return
+    queue = [root_url]
+    seen: set[str] = set()
+    checked = 0
+    while queue and len(seen) < 100:
+        current = queue.pop(0)
+        normalized = urllib.parse.urldefrag(current).url
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        data, error, content_type = fetch_public_url(normalized)
+        if error or data is None:
+            state.add_coverage("github-pages-rendered", error or "tool_failed", "pages-resource-download-failed")
+            continue
+        path = urllib.parse.urlparse(normalized).path or "/"
+        display_path = path if Path(path).suffix else f"{path.rstrip('/')}/index.html"
+        scan_bytes(state, data, surface="github-pages-rendered", object_id=f"pages:{normalized}", display_path=display_path)
+        checked += 1
+        if content_type in {"text/html", "application/xhtml+xml"}:
+            parser = SameOriginLinkParser()
+            try:
+                parser.feed(data.decode("utf-8", errors="replace"))
+            except Exception:
+                state.add_coverage("github-pages-rendered", "unreadable", "pages-html-parse-failed")
+                continue
+            for link in parser.links:
+                candidate = urllib.parse.urljoin(normalized, link)
+                parsed = urllib.parse.urlparse(candidate)
+                if parsed.scheme in {"http", "https"} and parsed.netloc == parsed_root.netloc:
+                    queue.append(candidate)
+    if queue:
+        state.add_coverage("github-pages-rendered", "unreadable", "pages-resource-limit")
+    state.add_coverage("github-pages-rendered", "checked" if checked else "unreadable", object_count=checked)
+
+
+def scan_remote_records(state: ScanState, records: list[dict[str, Any]], *, surface: str, prefix: str, fields: Iterable[str]) -> None:
+    count = 0
+    for index, record in enumerate(records):
+        stable = record.get("id") or record.get("node_id") or record.get("number") or index
+        for field in fields:
+            value: Any = record
+            for part in field.split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+            if isinstance(value, str) and value:
+                count += 1
+                scan_text(state, value, surface=surface, object_id=f"{prefix}:{stable}:{field}", display_path=f"{prefix}:{stable}:{field}")
+            elif isinstance(value, list):
+                for list_index, item in enumerate(value):
+                    if isinstance(item, str):
+                        count += 1
+                        scan_text(state, item, surface=surface, object_id=f"{prefix}:{stable}:{field}:{list_index}", display_path=f"{prefix}:{stable}:{field}:{list_index}")
+                    elif isinstance(item, dict):
+                        text_value = item.get("name") or item.get("description")
+                        if isinstance(text_value, str) and text_value:
+                            count += 1
+                            scan_text(state, text_value, surface=surface, object_id=f"{prefix}:{stable}:{field}:{list_index}", display_path=f"{prefix}:{stable}:{field}:{list_index}")
+    state.add_coverage(surface, "checked" if records else "not_present", object_count=count)
+
+
+def audit_repository_associated_surfaces(state: ScanState, owner: str, repository: str, repo_metadata: dict[str, Any]) -> None:
+    base = f"repos/{owner}/{repository}"
+    endpoints = (
+        ("issues", f"{base}/issues?state=all&per_page=100", None, ("title", "body", "labels", "milestone.title", "milestone.description")),
+        ("issue-comments", f"{base}/issues/comments?per_page=100", None, ("body",)),
+        ("pull-requests", f"{base}/pulls?state=all&per_page=100", None, ("title", "body", "head.label", "base.label")),
+        ("pull-comments", f"{base}/pulls/comments?per_page=100", None, ("body", "path")),
+        ("labels", f"{base}/labels?per_page=100", None, ("name", "description")),
+        ("milestones", f"{base}/milestones?state=all&per_page=100", None, ("title", "description")),
+        ("deployments", f"{base}/deployments?per_page=100", None, ("environment", "description", "original_environment")),
+        ("environments", f"{base}/environments?per_page=100", "environments", ("name",)),
+        ("actions-variables", f"{base}/actions/variables?per_page=100", "variables", ("name", "value")),
+        ("actions-artifacts", f"{base}/actions/artifacts?per_page=100", "artifacts", ("name", "workflow_run.head_branch")),
+    )
+    for surface, endpoint, field, fields in endpoints:
+        records, error = api_items(endpoint, field)
+        if error:
+            state.add_coverage(surface, error, f"{surface}-enumeration-failed")
+        else:
+            scan_remote_records(state, records, surface=surface, prefix=surface, fields=fields)
+
+    deployments, deployments_error = api_items(f"{base}/deployments?per_page=100")
+    if deployments_error:
+        state.add_coverage("deployment-statuses", deployments_error, "deployment-status-enumeration-failed")
+    elif not deployments:
+        state.add_coverage("deployment-statuses", "not_present")
+    else:
+        status_count = 0
+        for deployment in deployments:
+            deployment_id = deployment.get("id")
+            statuses, error = api_items(f"{base}/deployments/{deployment_id}/statuses?per_page=100")
+            if error:
+                state.add_coverage("deployment-statuses", error, "deployment-status-page-failed")
+                continue
+            status_count += len(statuses)
+            scan_remote_records(state, statuses, surface="deployment-statuses", prefix=f"deployment:{deployment_id}:status", fields=("description", "environment_url", "log_url"))
+        state.add_coverage("deployment-statuses", "checked", object_count=status_count)
+
+    artifacts, artifacts_error = api_items(f"{base}/actions/artifacts?per_page=100", "artifacts")
+    if artifacts_error:
+        state.add_coverage("actions-artifact-content", artifacts_error, "artifact-enumeration-failed")
+    elif not artifacts:
+        state.add_coverage("actions-artifact-content", "not_present")
+    else:
+        checked_artifacts = 0
+        for artifact in artifacts:
+            artifact_id = artifact.get("id")
+            size = int(artifact.get("size_in_bytes") or 0)
+            if size > DEFAULT_MAX_FILE_BYTES:
+                state.add_coverage("actions-artifact-content", "unreadable", "oversized-actions-artifact")
+                continue
+            artifact_data, download_error = gh_download(f"{base}/actions/artifacts/{artifact_id}/zip")
+            if download_error or artifact_data is None:
+                status = "unreadable" if download_error == "not_present" else download_error or "tool_failed"
+                state.add_coverage("actions-artifact-content", status, "artifact-download-failed")
+                continue
+            scan_bytes(state, artifact_data, surface="actions-artifact-content", object_id=f"actions-artifact:{artifact_id}", display_path=f"actions-artifact-{artifact_id}.zip")
+            checked_artifacts += 1
+        state.add_coverage("actions-artifact-content", "checked", object_count=checked_artifacts)
+
+    pulls, pulls_error = api_items(f"{base}/pulls?state=all&per_page=100")
+    if pulls_error:
+        state.add_coverage("pull-reviews", pulls_error, "pull-review-enumeration-failed")
+    else:
+        review_count = 0
+        for pull in pulls:
+            number = pull.get("number")
+            reviews, error = api_items(f"{base}/pulls/{number}/reviews?per_page=100")
+            if error:
+                state.add_coverage("pull-reviews", error, "pull-review-page-failed")
+                continue
+            review_count += len(reviews)
+            scan_remote_records(state, reviews, surface="pull-reviews", prefix=f"pull:{number}:review", fields=("body",))
+        if not pulls:
+            state.add_coverage("pull-reviews", "not_present")
+        elif review_count == 0 and not any(item.surface == "pull-reviews" and item.status not in {"checked", "not_present"} for item in state.coverage):
+            state.add_coverage("pull-reviews", "not_present")
+
+    # Discussions use GraphQL because no repository REST endpoint provides their bodies and comments.
+    query = "query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){discussions(first:100,after:$endCursor){nodes{id title body comments(first:100){nodes{id body}pageInfo{hasNextPage endCursor}}}pageInfo{hasNextPage endCursor}}}}"
+    discussion_result = run(["gh", "api", "graphql", "--paginate", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={repository}"])
+    if discussion_result.returncode != 0:
+        reason = "permission_denied" if "403" in discussion_result.stderr or "not accessible" in discussion_result.stderr.lower() else "tool_failed"
+        state.add_coverage("discussions", reason, "discussion-enumeration-failed")
+    else:
+        try:
+            decoder = json.JSONDecoder()
+            index = 0
+            discussion_count = 0
+            while index < len(discussion_result.stdout):
+                page, index = decoder.raw_decode(discussion_result.stdout, index)
+                while index < len(discussion_result.stdout) and discussion_result.stdout[index].isspace():
+                    index += 1
+                nodes = (((page.get("data") or {}).get("repository") or {}).get("discussions") or {}).get("nodes") or []
+                for discussion in nodes:
+                    discussion_count += 1
+                    scan_remote_records(state, [discussion], surface="discussions", prefix="discussion", fields=("title", "body"))
+                    scan_remote_records(state, ((discussion.get("comments") or {}).get("nodes") or []), surface="discussion-comments", prefix=f"discussion:{discussion.get('id')}:comment", fields=("body",))
+                    if ((discussion.get("comments") or {}).get("pageInfo") or {}).get("hasNextPage"):
+                        state.add_coverage("discussion-comments", "unreadable", "discussion-comment-pagination-not-expanded")
+            if discussion_count == 0:
+                state.add_coverage("discussions", "not_present")
+                state.add_coverage("discussion-comments", "not_present")
+        except (json.JSONDecodeError, AttributeError):
+            state.add_coverage("discussions", "tool_failed", "discussion-response-invalid")
+
+    pages, pages_error = gh_json(f"{base}/pages")
+    if pages_error:
+        status = "not_present" if pages_error == "tool_failed" and not repo_metadata.get("has_pages") else pages_error
+        state.add_coverage("github-pages", status, "pages-metadata-unavailable" if status != "not_present" else "")
+        state.add_coverage("github-pages-rendered", "not_present" if status == "not_present" else status, "pages-rendered-unavailable" if status != "not_present" else "")
+    else:
+        page_record = pages[0] if isinstance(pages, list) and pages else pages
+        scan_remote_records(state, [page_record] if isinstance(page_record, dict) else [], surface="github-pages", prefix="pages", fields=("url", "html_url", "source.branch", "source.path"))
+        rendered_url = page_record.get("html_url") if isinstance(page_record, dict) else None
+        if isinstance(rendered_url, str) and rendered_url:
+            audit_rendered_pages(state, rendered_url)
+        else:
+            state.add_coverage("github-pages-rendered", "unreadable", "pages-rendered-url-unavailable")
+
+    # Wiki is a separate Git repository. A failed clone is not treated as absence when the repository advertises Wiki support.
+    if repo_metadata.get("has_wiki"):
+        with tempfile.TemporaryDirectory(prefix="safe-publish-wiki-") as temporary:
+            wiki = Path(temporary) / "wiki.git"
+            cloned = run(["git", "clone", "--mirror", f"https://github.com/{owner}/{repository}.wiki.git", str(wiki)])
+            if cloned.returncode == 0:
+                scan_git_history(state, wiki)
+                state.add_coverage("wiki", "checked")
+            elif "not found" in cloned.stderr.lower() or "repository not found" in cloned.stderr.lower():
+                state.add_coverage("wiki", "not_present")
+            else:
+                state.add_coverage("wiki", "permission_denied" if "authentication" in cloned.stderr.lower() else "tool_failed", "wiki-clone-failed")
+    else:
+        state.add_coverage("wiki", "not_present")
+
+    runs, runs_error = api_items(f"{base}/actions/runs?per_page=100", "workflow_runs")
+    if runs_error:
+        state.add_coverage("actions-logs", runs_error, "workflow-run-enumeration-failed")
+    elif not runs:
+        state.add_coverage("actions-logs", "not_present")
+        state.add_coverage("actions-job-summaries", "not_present")
+    else:
+        checked = 0
+        for workflow_run in runs:
+            run_id = workflow_run.get("id")
+            log_data, download_error = gh_download(f"{base}/actions/runs/{run_id}/logs")
+            if download_error or log_data is None:
+                status = "unreadable" if download_error == "not_present" else download_error or "tool_failed"
+                state.add_coverage("actions-logs", status, "workflow-log-download-failed")
+                continue
+            scan_bytes(state, log_data, surface="actions-logs", object_id=f"actions-log:{run_id}", display_path=f"actions-log-{run_id}.zip")
+            checked += 1
+        state.add_coverage("actions-logs", "checked", object_count=checked)
+        state.add_coverage("actions-job-summaries", "unreadable", "job-summary-api-unavailable", len(runs))
+
+    # Cache contents are not downloadable through a stable repository API; metadata remains auditable.
+    caches, caches_error = api_items(f"{base}/actions/caches?per_page=100", "actions_caches")
+    if caches_error:
+        state.add_coverage("actions-caches", caches_error, "cache-metadata-enumeration-failed")
+    else:
+        scan_remote_records(state, caches, surface="actions-cache-metadata", prefix="cache", fields=("key", "ref"))
+        state.add_coverage("actions-cache-content", "unreadable" if caches else "not_present", "cache-content-api-unavailable" if caches else "", len(caches))
+
+    # Secrets are intentionally unreadable; names and selected settings are the only declared surface.
+    secrets, secrets_error = api_items(f"{base}/actions/secrets?per_page=100", "secrets")
+    if secrets_error:
+        state.add_coverage("actions-secret-metadata", secrets_error, "secret-metadata-enumeration-failed")
+    else:
+        scan_remote_records(state, secrets, surface="actions-secret-metadata", prefix="actions-secret", fields=("name",))
+
+    rulesets, rulesets_error = api_items(f"{base}/rulesets?per_page=100")
+    if rulesets_error:
+        state.add_coverage("rulesets", rulesets_error, "ruleset-enumeration-failed")
+    else:
+        scan_remote_records(state, rulesets, surface="rulesets", prefix="ruleset", fields=("name", "target", "enforcement"))
+
+    actions_permissions, permissions_error = gh_json(f"{base}/actions/permissions")
+    if permissions_error:
+        state.add_coverage("actions-permissions", permissions_error, "actions-permission-read-failed")
+    else:
+        state.add_coverage("actions-permissions", "checked", object_count=1)
+
+    retention, retention_error = gh_json(f"{base}/actions/permissions/artifact-and-log-retention")
+    state.add_coverage("actions-retention", retention_error or "checked", "actions-retention-read-failed" if retention_error else "", 0 if retention_error else 1)
+
+    immutable, immutable_error = gh_json(f"{base}/immutable-releases")
+    if immutable_error:
+        # The endpoint returns not found when immutability is disabled; preserve the API ambiguity as a setting state, not content coverage.
+        state.add_coverage("immutable-releases-setting", "not_present" if immutable_error == "tool_failed" else immutable_error)
+    else:
+        state.add_coverage("immutable-releases-setting", "checked", object_count=1)
+
+    default_branch = repo_metadata.get("default_branch")
+    if default_branch:
+        protection, protection_error = gh_json(f"{base}/branches/{urllib.parse.quote(str(default_branch), safe='')}/protection")
+        if protection_error:
+            state.add_coverage("branch-protection", "not_present" if protection_error == "tool_failed" else protection_error)
+        else:
+            state.add_coverage("branch-protection", "checked", object_count=1)
+    else:
+        state.add_coverage("branch-protection", "not_present")
+
+    package_count = 0
+    package_error: str | None = None
+    for package_type in ("container", "npm", "maven", "rubygems", "nuget"):
+        if package_type not in PACKAGE_CACHE:
+            PACKAGE_CACHE[package_type] = api_items(f"user/packages?package_type={package_type}&per_page=100")
+        packages, error = PACKAGE_CACHE[package_type]
+        if error:
+            package_error = error
+            continue
+        associated = [item for item in packages if ((item.get("repository") or {}).get("full_name") or "").lower() == f"{owner}/{repository}".lower()]
+        package_count += len(associated)
+        scan_remote_records(state, associated, surface="package-metadata", prefix=f"package:{package_type}", fields=("name", "package_type", "visibility"))
+    if package_error and package_count == 0:
+        state.add_coverage("packages", package_error, "repository-package-enumeration-failed")
+    elif package_count == 0:
+        state.add_coverage("packages", "not_present")
+        state.add_coverage("container-images", "not_present")
+    else:
+        state.add_coverage("packages", "checked", object_count=package_count)
+        state.add_coverage("package-content", "unreadable", "package-download-and-integrity-layer-not-established", package_count)
+        state.add_coverage("container-images", "unreadable", "container-manifest-and-layer-inspection-not-established", package_count)
 
 
 def prepare_mirror(owner: str, repository: str, local_source: Path | None, mirror: Path) -> tuple[Path | None, str | None]:
@@ -1385,8 +3062,13 @@ def download_release_assets(owner: str, repository: str, state: ScanState, downl
     assets: list[tuple[int, str, str, int]] = []
     for release in releases or []:
         release_id = int(release.get("id", 0))
+        for field in ("name", "body", "tag_name", "target_commitish"):
+            value = release.get(field)
+            if isinstance(value, str) and value:
+                scan_text(state, value, surface="release-metadata", object_id=f"release:{release_id}:{field}", display_path=f"release:{release_id}:{field}")
         for asset in release.get("assets", []):
             assets.append((release_id, str(asset.get("name", "asset")), str(asset.get("url", "")), int(asset.get("size", 0))))
+    state.add_coverage("release-metadata", "checked" if releases else "not_present", object_count=len(releases or []))
     if not assets:
         state.add_coverage("release-assets", "not_present")
         return
@@ -1396,14 +3078,15 @@ def download_release_assets(owner: str, repository: str, state: ScanState, downl
         if size > DEFAULT_MAX_FILE_BYTES:
             state.add_coverage("release-assets", "unreadable", f"oversized-release-asset:{object_id}")
             continue
-        result = run(["gh", "api", url, "-H", "Accept: application/octet-stream"], text=False)
-        if result.returncode != 0:
-            state.add_coverage("release-assets", "permission_denied", f"release-asset-download-failed:{object_id}")
+        asset_data, download_error = gh_download(url)
+        if download_error or asset_data is None:
+            status = "unreadable" if download_error == "not_present" else download_error or "tool_failed"
+            state.add_coverage("release-assets", status, f"release-asset-download-failed:{object_id}")
             continue
         destination = download_root / str(release_id) / name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(result.stdout)
-        scan_bytes(state, result.stdout, surface="release-assets", object_id=object_id, display_path=name)
+        destination.write_bytes(asset_data)
+        scan_bytes(state, asset_data, surface="release-assets", object_id=object_id, display_path=name)
         checked += 1
     state.add_coverage("release-assets", "checked", object_count=checked)
 
@@ -1457,30 +3140,483 @@ def aggregate_local_inventory(local_map: dict[str, Path]) -> dict[str, int]:
     }
 
 
+def remote_full_name(repository: Path) -> str | None:
+    result = run(["git", "remote", "get-url", "origin"], repository)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip().rstrip("/")
+    match = re.search(r"github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$", value, re.IGNORECASE)
+    return f"{match.group(1)}/{match.group(2)}" if match else None
+
+
+def discover_git_repositories(local_roots: Iterable[Path]) -> dict[str, Path]:
+    discovered: dict[str, Path] = {}
+    visited: set[str] = set()
+    excluded = {".git", ".pnpm", ".venv", "venv", "node_modules", "dist", "build", "target", ".cache", "cache", "downloads", "__pycache__"}
+    for local_root in local_roots:
+        if not local_root.exists():
+            continue
+        for current, directories, _ in os.walk(local_root, topdown=True, followlinks=False):
+            directories[:] = sorted(name for name in directories if name.lower() not in excluded and not (Path(current) / name).is_symlink())
+            repository = Path(current)
+            if not (repository / ".git").exists():
+                continue
+            try:
+                real = repository.resolve(strict=True)
+            except OSError:
+                continue
+            key = os.path.normcase(str(real))
+            if key in visited:
+                continue
+            visited.add(key)
+            full_name = remote_full_name(real)
+            if full_name:
+                discovered.setdefault(full_name.lower(), real)
+    return discovered
+
+
+def extract_text_values(value: Any, prefix: str = "payload") -> Iterable[tuple[str, str]]:
+    if isinstance(value, str):
+        yield prefix, value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            yield from extract_text_values(child, f"{prefix}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from extract_text_values(child, f"{prefix}[{index}]")
+
+
+class PrivateCandidateStore:
+    def __init__(self, path: Path) -> None:
+        self.path = ensure_private_path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(self.path)
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS candidates (rule_id TEXT, severity TEXT, raw_value TEXT, source_kind TEXT, source_count INTEGER, PRIMARY KEY(rule_id, raw_value, source_kind))"
+        )
+        self.attempted_count = int(self.connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
+        self.limit_exceeded = False
+        restrict_private_path(self.path)
+
+    def add(self, candidates: Iterable[dict[str, Any]], source_kind: str) -> bool:
+        rows: list[tuple[str, str, str, str, int]] = []
+        for item in candidates:
+            if self.attempted_count >= MAX_PRIVATE_CANDIDATE_ATTEMPTS:
+                self.limit_exceeded = True
+                break
+            rows.append((item["rule_id"], item["severity"], item["raw_value"], source_kind, 1))
+            self.attempted_count += 1
+        self.connection.executemany(
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?) ON CONFLICT(rule_id, raw_value, source_kind) DO UPDATE SET source_count=source_count+1",
+            rows,
+        )
+        return self.limit_exceeded
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def restore_document(self, document: dict[str, Any]) -> None:
+        rows = []
+        for item in document.get("candidates", []):
+            if not isinstance(item, dict) or not {"rule_id", "severity", "raw_value", "source_kind"}.issubset(item):
+                continue
+            rows.append((item["rule_id"], item["severity"], item["raw_value"], item["source_kind"], int(item.get("source_count", 1))))
+        self.connection.executemany(
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?) ON CONFLICT(rule_id, raw_value, source_kind) DO UPDATE SET source_count=MAX(source_count, excluded.source_count)",
+            rows,
+        )
+
+    def write_document(self, output: Path) -> int:
+        resolved = ensure_private_path(output)
+        count = int(self.connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
+        temporary = resolved.with_name(f".{resolved.name}.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(f'{{\n  "schema_version": {SCHEMA_VERSION},\n  "candidates": [\n')
+            first = True
+            for rule_id, severity, raw_value, source_kind, source_count in self.connection.execute(
+                "SELECT rule_id, severity, raw_value, source_kind, source_count FROM candidates ORDER BY rule_id, source_kind, raw_value"
+            ):
+                if not first:
+                    handle.write(",\n")
+                first = False
+                handle.write("    " + json.dumps({"rule_id": rule_id, "severity": severity, "raw_value": raw_value, "source_kind": source_kind, "source_count": source_count}, ensure_ascii=False, sort_keys=True))
+            handle.write(f'\n  ],\n  "candidate_count": {count}\n}}\n')
+        os.replace(temporary, resolved)
+        restrict_private_path(resolved)
+        return count
+
+    def close(self) -> None:
+        self.connection.commit()
+        self.connection.close()
+
+    def remove_database(self) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(self.path) + suffix)
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def discover_saved_project_roots(codex_home: Path) -> tuple[list[Path], str | None]:
+    state_path = codex_home / ".codex-global-state.json"
+    try:
+        document = json.loads(state_path.read_text(encoding="utf-8"))
+        values: list[str] = []
+        values.extend(document.get("electron-saved-workspace-roots") or [])
+        for project in (document.get("local-projects") or {}).values():
+            values.extend(project.get("rootPaths") or [])
+        unique: dict[str, Path] = {}
+        for value in values:
+            path = Path(value).expanduser()
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                continue
+            unique[os.path.normcase(str(resolved))] = resolved
+        return [unique[key] for key in sorted(unique)], None
+    except (OSError, ValueError, json.JSONDecodeError, AttributeError):
+        return [], "saved-project-state-unreadable"
+
+
+def iter_project_files(root: Path) -> Iterable[tuple[str, Path]]:
+    excluded = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", ".cache", "cache", "downloads", "__pycache__"}
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        directories[:] = sorted(name for name in directories if name.lower() not in excluded and not (Path(current) / name).is_symlink())
+        for name in sorted(files):
+            path = Path(current) / name
+            if path.is_symlink():
+                continue
+            yield path.relative_to(root).as_posix(), path
+
+
+def scan_local_session_file(path: Path, source_kind: str, policy: dict[str, Any], *, collect_raw: bool = True) -> dict[str, Any]:
+    initial_stat = path.stat()
+    state = ScanState("local-codex-history", policy, collect_raw=collect_raw)
+    session_ids: set[str] = set()
+    record_count = 0
+    status = "checked"
+    candidates: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="strict") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                record_count += 1
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    state.add_coverage(source_kind, "unreadable", "truncated-or-invalid-jsonl-record")
+                    status = "unreadable"
+                    continue
+                if record.get("type") == "session_meta" and isinstance(record.get("payload"), dict):
+                    candidate_id = record["payload"].get("id")
+                    if isinstance(candidate_id, str):
+                        session_ids.add(candidate_id)
+                for field, text_value in extract_text_values(record):
+                    state.raw_candidates.clear()
+                    state._candidate_keys.clear()
+                    scan_text(state, text_value, surface=source_kind, object_id=f"session:{min(session_ids, default='unknown')}:{line_number}:{field}", display_path=f"session-record:{line_number}:{field}")
+                    candidates.extend(state.raw_candidates)
+    except (OSError, UnicodeError):
+        status = "permission_denied"
+    try:
+        final_stat = path.stat()
+        if final_stat.st_size != initial_stat.st_size or final_stat.st_mtime_ns != initial_stat.st_mtime_ns:
+            state.add_coverage(source_kind, "unreadable", "session-file-changed-during-scan")
+            status = "unreadable"
+    except OSError:
+        state.add_coverage(source_kind, "permission_denied", "session-file-restat-failed")
+        status = "permission_denied"
+    if any(item.status not in {"checked", "not_present"} for item in state.coverage):
+        status = "unreadable"
+    return {
+        "session_ids": sorted(session_ids),
+        "record_count": record_count,
+        "status": status,
+        "finding_count": len(state.findings),
+        "candidates": candidates,
+        "candidate_limit_exceeded": any(item.reason == "raw-candidate-limit-exceeded" for item in state.coverage),
+    }
+
+
+def command_audit_local_session_worker(args: argparse.Namespace) -> int:
+    policy = load_policy(Path(args.policy)) if args.policy else empty_policy()
+    result = scan_local_session_file(Path(args.session_file), args.source_kind, policy, collect_raw=not args.no_raw)
+    write_json(ensure_private_path(Path(args.result)), result, private=True)
+    return 0
+
+
+def command_audit_local(args: argparse.Namespace) -> int:
+    codex_home = get_codex_home()
+    output = ensure_private_path(Path(args.output))
+    candidates_output = ensure_private_path(Path(args.candidates_output))
+    checkpoint = ensure_private_path(Path(args.checkpoint))
+    policy = load_policy(Path(args.policy)) if args.policy else empty_policy()
+    current_scanner_hash = sha256_bytes(Path(__file__).read_bytes())
+    current_policy_fingerprint = policy_fingerprint(policy)
+    database_path = candidates_output.with_suffix(".sqlite")
+    database_preexisting = database_path.exists()
+    if not (args.resume and checkpoint.exists()):
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(database_path) + suffix).unlink(missing_ok=True)
+        database_preexisting = False
+    store = PrivateCandidateStore(database_path)
+    processed: set[str] = set()
+    checkpoint_document: dict[str, Any] = {}
+    if args.resume and checkpoint.exists():
+        try:
+            checkpoint_document = json.loads(checkpoint.read_text(encoding="utf-8"))
+            processed = set(checkpoint_document.get("processed", []))
+        except (OSError, json.JSONDecodeError):
+            processed = set()
+    checkpoint_compatible = bool(checkpoint_document) and not (
+        checkpoint_document.get("schema_version") != 3
+        or
+        checkpoint_document.get("scanner_sha256") != current_scanner_hash
+        or checkpoint_document.get("policy_fingerprint") != current_policy_fingerprint
+    )
+    if checkpoint_document and not checkpoint_compatible:
+        checkpoint_document = {}
+        processed = set()
+        store.close()
+        store.remove_database()
+        store = PrivateCandidateStore(candidates_output.with_suffix(".sqlite"))
+        database_preexisting = False
+    if args.resume and checkpoint_compatible and candidates_output.exists() and not database_preexisting:
+        try:
+            store.restore_document(json.loads(candidates_output.read_text(encoding="utf-8")))
+            store.commit()
+        except (OSError, json.JSONDecodeError):
+            pass
+    if checkpoint_compatible:
+        store.attempted_count = max(store.attempted_count, int(checkpoint_document.get("candidate_attempt_count", 0)))
+        store.limit_exceeded = bool(checkpoint_document.get("candidate_store_limit_exceeded", False))
+    sessions: dict[str, dict[str, Any]] = {
+        item["session_id"]: item
+        for item in checkpoint_document.get("sessions", [])
+        if isinstance(item, dict) and "session_id" in item
+    }
+    if args.resume and output.exists():
+        try:
+            previous_report = json.loads(output.read_text(encoding="utf-8"))
+            sessions = {item["session_id"]: item for item in previous_report.get("sessions", []) if isinstance(item, dict) and "session_id" in item}
+        except (OSError, json.JSONDecodeError):
+            sessions = {}
+    if processed and not sessions:
+        processed = set()
+    coverage: list[dict[str, Any]] = []
+    total_findings = int(checkpoint_document.get("finding_count", 0))
+    project_results: list[dict[str, Any]] = [
+        item for item in checkpoint_document.get("projects", []) if isinstance(item, dict) and isinstance(item.get("project_id"), str)
+    ]
+    processed_projects = {item["project_id"] for item in project_results}
+    for source_kind, folder in (("active-session", codex_home / "sessions"), ("archived-session", codex_home / "archived_sessions")):
+        if not folder.exists():
+            coverage.append({"surface": source_kind, "status": "not_present", "object_count": 0})
+            continue
+        for path in sorted(folder.rglob("*.jsonl")):
+            try:
+                initial_stat = path.stat()
+            except OSError:
+                coverage.append({"surface": source_kind, "status": "permission_denied", "reason": "session-file-stat-failed", "object_count": 0})
+                continue
+            file_key = f"{initial_stat.st_size}:{initial_stat.st_mtime_ns}:{path.name}"
+            if file_key in processed:
+                continue
+            worker_token = hashlib.sha256(file_key.encode("utf-8")).hexdigest()[:16]
+            worker_result_path = checkpoint.with_name(f".{checkpoint.name}.{worker_token}.worker.private.json")
+            worker_command = [
+                sys.executable,
+                "-X",
+                "utf8",
+                str(Path(__file__).resolve()),
+                "_audit-local-session-worker",
+                "--session-file",
+                str(path),
+                "--source-kind",
+                source_kind,
+                "--result",
+                str(worker_result_path),
+            ]
+            if args.policy:
+                worker_command.extend(["--policy", str(args.policy)])
+            if store.limit_exceeded:
+                worker_command.append("--no-raw")
+            try:
+                worker = subprocess.run(worker_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=DEFAULT_LOCAL_FILE_BUDGET_SECONDS, check=False)
+                if worker.returncode == 0 and worker_result_path.exists():
+                    worker_result = json.loads(worker_result_path.read_text(encoding="utf-8"))
+                else:
+                    worker_result = {"session_ids": [], "record_count": 0, "status": "unreadable", "finding_count": 0, "candidates": [], "candidate_limit_exceeded": True}
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+                worker_result = {"session_ids": [], "record_count": 0, "status": "unreadable", "finding_count": 0, "candidates": [], "candidate_limit_exceeded": True}
+            finally:
+                worker_result_path.unlink(missing_ok=True)
+            status = str(worker_result.get("status", "unreadable"))
+            record_count = int(worker_result.get("record_count", 0))
+            total_findings += int(worker_result.get("finding_count", 0))
+            candidate_limit_exceeded = bool(worker_result.get("candidate_limit_exceeded"))
+            if store.add(worker_result.get("candidates", []), source_kind):
+                candidate_limit_exceeded = True
+            if candidate_limit_exceeded:
+                status = "unreadable"
+            stable_ids = sorted(set(worker_result.get("session_ids", []))) or [f"unresolved-{worker_token}"]
+            for stable_id in stable_ids:
+                previous = sessions.get(stable_id)
+                if previous:
+                    previous["duplicate_file_count"] += 1
+                    previous["record_count"] += record_count
+                    if status != "checked":
+                        previous["status"] = status
+                else:
+                    sessions[stable_id] = {"session_id": stable_id, "source_kind": source_kind, "status": status, "record_count": record_count, "duplicate_file_count": 0}
+            processed.add(file_key)
+            store.commit()
+            write_json(checkpoint, {"schema_version": 3, "scanner_sha256": current_scanner_hash, "policy_fingerprint": current_policy_fingerprint, "processed": sorted(processed), "sessions": [sessions[key] for key in sorted(sessions)], "projects": project_results, "finding_count": total_findings, "candidate_attempt_count": store.attempted_count, "candidate_store_limit_exceeded": store.limit_exceeded}, private=True)
+            print(json.dumps({"phase": "sessions", "processed_file_count": len(processed), "unique_session_count": len(sessions)}, sort_keys=True), flush=True)
+        kind_sessions = [item for item in sessions.values() if item["source_kind"] == source_kind]
+        kind_status = "checked" if all(item["status"] == "checked" for item in kind_sessions) else "unreadable"
+        coverage.append({"surface": source_kind, "status": kind_status, "object_count": len(kind_sessions)})
+    roots, root_error = discover_saved_project_roots(codex_home)
+    for index, root in enumerate(roots, start=1):
+        project_id = f"saved-project-{index}"
+        if project_id in processed_projects:
+            print(json.dumps({"phase": "saved-projects", "processed_project_count": index, "saved_project_count": len(roots)}, sort_keys=True), flush=True)
+            continue
+        state = ScanState(f"saved-project-{index}", policy, collect_raw=True)
+        file_count = 0
+        try:
+            iterator = iter_working_tree(root) if (root / ".git").exists() else iter_project_files(root)
+            for relative, path in iterator:
+                file_count += 1
+                try:
+                    state.raw_candidates.clear()
+                    state._candidate_keys.clear()
+                    scan_bytes(state, path.read_bytes(), surface="saved-project", object_id=f"project:{index}:{relative}", display_path=relative)
+                    if store.add(state.raw_candidates, "saved-project"):
+                        state.add_coverage("saved-project", "tool_failed", "private-candidate-store-limit-exceeded")
+                except (OSError, PermissionError):
+                    state.add_coverage("saved-project", "permission_denied", "project-file-unreadable")
+            state.add_coverage("saved-project", "checked", object_count=file_count)
+            status = "checked" if decision_for(state) != "incomplete" else "unreadable"
+        except OSError:
+            status = "permission_denied"
+        total_findings += len(state.findings)
+        project_results.append({"project_id": project_id, "status": status, "file_count": file_count, "coverage": consolidated_coverage(state.coverage), "summary": {"finding_count": len(state.findings)}})
+        processed_projects.add(project_id)
+        store.commit()
+        write_json(checkpoint, {"schema_version": 3, "scanner_sha256": current_scanner_hash, "policy_fingerprint": current_policy_fingerprint, "processed": sorted(processed), "sessions": [sessions[key] for key in sorted(sessions)], "projects": project_results, "finding_count": total_findings, "candidate_attempt_count": store.attempted_count, "candidate_store_limit_exceeded": store.limit_exceeded}, private=True)
+        print(json.dumps({"phase": "saved-projects", "processed_project_count": index, "saved_project_count": len(roots)}, sort_keys=True), flush=True)
+    if root_error:
+        coverage.append({"surface": "saved-project-roots", "status": "unreadable", "reason": root_error, "object_count": 0})
+    else:
+        coverage.append({"surface": "saved-project-roots", "status": "checked", "object_count": len(roots)})
+    candidate_count = store.write_document(candidates_output)
+    store.close()
+    store.remove_database()
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "mode": "periodic-exposure-audit",
+        "decision": "incomplete" if any(item.get("status") not in {"checked", "not_present"} for item in coverage) or any(item["status"] != "checked" for item in sessions.values()) or any(item["status"] != "checked" for item in project_results) else ("review" if total_findings else "pass"),
+        "session_count": len(sessions),
+        "sessions": [sessions[key] for key in sorted(sessions)],
+        "saved_project_count": len(project_results),
+        "projects": project_results,
+        "coverage": coverage,
+        "summary": {"candidate_count": candidate_count, "finding_count": total_findings},
+        "policy_fingerprint": current_policy_fingerprint,
+        "scanner_versions": {
+            "safe_publish": "3",
+            "safe_publish_sha256": current_scanner_hash,
+            "python": platform.python_version(),
+            "image_ocr_budget_seconds": DEFAULT_IMAGE_OCR_BUDGET_SECONDS,
+        },
+    }
+    stable = {key: value for key, value in report.items() if key not in {"generated_at", "report_fingerprint"}}
+    report["report_fingerprint"] = sha256_bytes(json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    write_json(output, report, private=True)
+    if args.public_summary:
+        write_json(Path(args.public_summary), {"schema_version": SCHEMA_VERSION, "mode": report["mode"], "decision": report["decision"], "scanner_sha256": current_scanner_hash, "session_count": len(sessions), "saved_project_count": len(project_results), "candidate_count": candidate_count, "coverage_status_counts": {status: sum(item.get("status") == status for item in coverage) for status in ("checked", "not_present", "unreadable", "permission_denied", "tool_failed")}})
+    print(json.dumps({"decision": report["decision"], "session_count": len(sessions), "saved_project_count": len(project_results), "candidate_count": candidate_count}, sort_keys=True))
+    return {"pass": 0, "review": 2, "block": 3, "incomplete": 4}[report["decision"]]
+
+
+def command_compile_policy(args: argparse.Namespace) -> int:
+    source = load_policy(Path(args.policy))
+    repository = args.repository
+    identifiers = [item for item in source["identifiers"] if "all" in item.get("scopes", ["all"]) or repository in item.get("scopes", [])]
+    ids = {item["id"] for item in identifiers}
+    compiled = {
+        "schema_version": SCHEMA_VERSION,
+        "identifiers": identifiers,
+        "replacements": [item for item in source["replacements"] if item["identifier_id"] in ids],
+        "approved_locations": [item for item in source["approved_locations"] if item["rule_id"] in ids],
+        "blocked_paths": source["blocked_paths"],
+        "binary_approvals": [item for item in source["binary_approvals"] if item["object"].startswith(("working-tree:", "git:", "release:"))],
+        "exceptions": [item for item in source["exceptions"] if item["rule_id"] in ids],
+        "risk_acceptances": [item for item in source["risk_acceptances"] if item["repository"] == repository],
+    }
+    validate_policy(compiled)
+    encoded = base64.b64encode(json.dumps(compiled, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    if len(encoded) > MAX_SECRET_BYTES:
+        raise ValueError("Compiled private policy exceeds 48 KB")
+    write_json(Path(args.output), compiled, private=True)
+    print(json.dumps({"identifier_count": len(identifiers), "encoded_bytes": len(encoded), "policy_fingerprint": policy_fingerprint(compiled)}, sort_keys=True))
+    return 0
+
+
 def command_audit_fleet(args: argparse.Namespace) -> int:
     root = private_root()
     output = ensure_private_path(Path(args.output))
     candidates_output = ensure_private_path(Path(args.candidates_output))
     local_root = Path(args.local_root).expanduser().resolve() if args.local_root else None
     policy = load_policy(Path(args.policy)) if args.policy else empty_policy()
+    current_scanner_hash = sha256_bytes(Path(__file__).read_bytes())
+    current_policy_fingerprint = policy_fingerprint(policy)
     repos, error = gh_json("user/repos?affiliation=owner&per_page=100&sort=full_name")
     if error:
         raise RuntimeError("Unable to enumerate the authenticated GitHub repository fleet")
     owned = [repo for repo in repos if (repo.get("owner") or {}).get("login", "").lower() == args.owner.lower()]
     owned_by_id = {int(repo["id"]): repo for repo in owned}
     repositories = [owned_by_id[key] for key in sorted(owned_by_id)]
-    local_map: dict[str, Path] = {}
-    if local_root and local_root.exists():
-        for child in local_root.iterdir():
-            if child.is_dir() and (child / ".git").exists():
-                local_map[child.name.lower()] = child
+    local_map = discover_git_repositories([local_root] if local_root else [])
     detailed: list[dict[str, Any]] = []
-    all_candidates: list[dict[str, Any]] = []
+    resume_compatible = False
+    candidate_store = PrivateCandidateStore(candidates_output.with_suffix(".sqlite"))
+    if args.resume and output.exists():
+        try:
+            previous = json.loads(output.read_text(encoding="utf-8"))
+            if previous.get("owner", "").lower() == args.owner.lower() and (previous.get("scanner_versions") or {}).get("safe_publish_sha256") == current_scanner_hash and previous.get("policy_fingerprint") == current_policy_fingerprint:
+                detailed = list(previous.get("repositories") or [])
+                resume_compatible = True
+        except (OSError, json.JSONDecodeError):
+            detailed = []
+    if args.resume and resume_compatible and candidates_output.exists():
+        try:
+            candidate_store.restore_document(json.loads(candidates_output.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            pass
+    elif args.resume and not resume_compatible:
+        candidate_store.close()
+        candidate_store.remove_database()
+        candidate_store = PrivateCandidateStore(candidates_output.with_suffix(".sqlite"))
+    completed_ids = {int(item["repository_id"]) for item in detailed if "repository_id" in item}
+    ephemeral_mirror_root: Path | None = None
+    if args.cache_mirrors:
+        mirror_root = root / "mirrors"
+    else:
+        ephemeral_mirror_root = Path(tempfile.mkdtemp(prefix="safe-publish-mirrors-"))
+        mirror_root = ephemeral_mirror_root
+        atexit.register(shutil.rmtree, ephemeral_mirror_root, True)
     for index, repo in enumerate(repositories, start=1):
+        if int(repo["id"]) in completed_ids:
+            print(json.dumps({"progress": index, "repository_count": len(repositories), "resumed": True}, sort_keys=True), flush=True)
+            continue
         name = str(repo["name"])
         state = ScanState(name, policy, collect_raw=True)
-        mirror = root / "mirrors" / f"{int(repo['id'])}.git"
-        prepared, mirror_error = prepare_mirror(args.owner, name, local_map.get(name.lower()), mirror)
+        mirror = mirror_root / f"{int(repo['id'])}.git"
+        prepared, mirror_error = prepare_mirror(args.owner, name, local_map.get(f"{args.owner}/{name}".lower()), mirror)
         if mirror_error or prepared is None:
             state.add_coverage("git-history", mirror_error or "tool_failed", "mirror-preparation-failed")
             state.add_coverage("git-lfs", "unreadable", "git-mirror-unavailable")
@@ -1492,7 +3628,10 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
             scan_lfs(state, prepared, fetch=True)
             run_gitleaks(state, prepared, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
         scan_metadata(state, repo)
-        download_release_assets(args.owner, name, state, root / "release-assets" / str(repo["id"]))
+        with tempfile.TemporaryDirectory(prefix="safe-publish-release-") as release_temporary:
+            download_release_assets(args.owner, name, state, Path(release_temporary))
+        if args.surface_profile == "repository-associated":
+            audit_repository_associated_surfaces(state, args.owner, name, repo)
         remote_refs = run(["git", "for-each-ref", "--format=%(refname) %(objectname)"], prepared) if prepared else None
         ref_count = len(remote_refs.stdout.splitlines()) if remote_refs and remote_refs.returncode == 0 else 0
         if prepared and (not remote_refs or remote_refs.returncode != 0):
@@ -1517,50 +3656,46 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
                 "summary": report["summary"],
             }
         )
-        all_candidates.extend(state.raw_candidates)
+        candidate_store.add(state.raw_candidates, "github-fleet")
+        detailed.sort(key=lambda item: item["repository_id"])
+        write_json(output, {"schema_version": SCHEMA_VERSION, "generated_at": utc_now(), "owner": args.owner, "mode": "periodic-exposure-audit", "surface_profile": args.surface_profile, "policy_fingerprint": current_policy_fingerprint, "scanner_versions": {"safe_publish": "3", "safe_publish_sha256": current_scanner_hash, "gitleaks": GITLEAKS_VERSION, "python": platform.python_version(), "image_ocr_budget_seconds": DEFAULT_IMAGE_OCR_BUDGET_SECONDS}, "repositories": detailed}, private=True)
         print(json.dumps({"progress": index, "repository_count": len(repositories)}, sort_keys=True), flush=True)
     decision_counts = {decision: sum(item["decision"] == decision for item in detailed) for decision in ("pass", "review", "block", "incomplete")}
+    profile_exclusions = ["gists", "github-projects", "codespaces", "billing-data", "external-clones", "other-accounts"]
+    if args.surface_profile == "publication":
+        profile_exclusions.extend(["issues", "pull-requests", "comments", "reviews", "discussions", "wiki", "github-pages", "actions-logs", "actions-artifacts", "packages", "container-images", "caches", "deployments"])
     fleet_report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
+        "mode": "periodic-exposure-audit",
+        "surface_profile": args.surface_profile,
         "owner": args.owner,
         "repository_count": len(detailed),
         "decision_counts": decision_counts,
-        "policy_fingerprint": policy_fingerprint(policy),
-        "declared_exclusions": [
-            "issues",
-            "pull-request-text-and-comments",
-            "discussions",
-            "wiki",
-            "github-pages",
-            "historical-actions-logs-and-artifacts",
-            "packages",
-            "container-images",
-            "caches",
-            "gists",
-            "external-clones",
-        ],
+        "policy_fingerprint": current_policy_fingerprint,
+        "scanner_versions": {"safe_publish": "3", "safe_publish_sha256": current_scanner_hash, "gitleaks": GITLEAKS_VERSION, "python": platform.python_version(), "image_ocr_budget_seconds": DEFAULT_IMAGE_OCR_BUDGET_SECONDS},
+        "declared_exclusions": profile_exclusions,
         "repositories": detailed,
     }
-    candidate_document = {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": utc_now(),
-        "owner": args.owner,
-        "candidate_count": len(all_candidates),
-        "candidates": sorted(all_candidates, key=lambda item: (item["repository"], item["object"], item["rule_id"], item["location"])),
-    }
+    candidate_count = candidate_store.write_document(candidates_output)
+    candidate_store.close()
+    candidate_store.remove_database()
     write_json(output, fleet_report, private=True)
-    write_json(candidates_output, candidate_document, private=True)
+    if ephemeral_mirror_root is not None:
+        shutil.rmtree(ephemeral_mirror_root, ignore_errors=True)
     if args.public_summary:
         public_summary = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": fleet_report["generated_at"],
+            "mode": fleet_report["mode"],
+            "surface_profile": fleet_report["surface_profile"],
+            "scanner_sha256": current_scanner_hash,
             "owner_repository_count": len(detailed),
             "public_count": sum(item["visibility"] == "public" for item in detailed),
             "private_count": sum(item["visibility"] == "private" for item in detailed),
             "fork_count": sum(item["fork"] for item in detailed),
             "archived_count": sum(item["archived"] for item in detailed),
-            "candidate_count": len(all_candidates),
+            "candidate_count": candidate_count,
             "decision_counts": decision_counts,
             "finding_counts_by_rule": {},
             "coverage_gap_counts_by_surface": {},
@@ -1586,7 +3721,7 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
             security_key = f"{security.get('secret_scanning', 'unknown')}::{security.get('secret_scanning_push_protection', 'unknown')}"
             public_summary["repository_security_setting_counts"][security_key] = public_summary["repository_security_setting_counts"].get(security_key, 0) + 1
         write_json(Path(args.public_summary), public_summary)
-    print(json.dumps({"repository_count": len(detailed), "candidate_count": len(all_candidates), "decision_counts": decision_counts}, sort_keys=True))
+    print(json.dumps({"repository_count": len(detailed), "candidate_count": candidate_count, "decision_counts": decision_counts}, sort_keys=True))
     return 0 if len(detailed) == len(owned_by_id) else 4
 
 
@@ -1603,7 +3738,33 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--public-summary")
     audit.add_argument("--gitleaks-path")
     audit.add_argument("--history-time-limit-seconds", type=int, default=300)
+    audit.add_argument("--surface-profile", choices=("publication", "repository-associated"), default="publication")
+    audit.add_argument("--resume", action="store_true")
+    audit.add_argument("--cache-mirrors", action="store_true", help="Retain private mirrors for an explicitly approved secure cache")
     audit.set_defaults(handler=command_audit_fleet)
+
+    local = subcommands.add_parser("audit-local", help="Audit local Codex sessions and saved project roots without exposing raw candidates")
+    local.add_argument("--policy")
+    local.add_argument("--output", required=True)
+    local.add_argument("--candidates-output", required=True)
+    local.add_argument("--checkpoint", required=True)
+    local.add_argument("--public-summary")
+    local.add_argument("--resume", action="store_true")
+    local.set_defaults(handler=command_audit_local)
+
+    local_worker = subcommands.add_parser("_audit-local-session-worker", help=argparse.SUPPRESS)
+    local_worker.add_argument("--session-file", required=True)
+    local_worker.add_argument("--source-kind", required=True, choices=("active-session", "archived-session"))
+    local_worker.add_argument("--policy")
+    local_worker.add_argument("--result", required=True)
+    local_worker.add_argument("--no-raw", action="store_true")
+    local_worker.set_defaults(handler=command_audit_local_session_worker)
+
+    compile_policy = subcommands.add_parser("compile-policy", help="Compile a repository-scoped v3 policy from the private master policy")
+    compile_policy.add_argument("--policy", required=True)
+    compile_policy.add_argument("--repository", required=True)
+    compile_policy.add_argument("--output", required=True)
+    compile_policy.set_defaults(handler=command_compile_policy)
 
     candidates = subcommands.add_parser("policy-candidates", help="Write raw candidates to the restricted local policy directory")
     candidates.add_argument("--source", required=True)
@@ -1620,7 +3781,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--report", required=True)
     prepare.set_defaults(handler=command_prepare)
 
-    gate = subcommands.add_parser("gate", help="Fail closed unless every publication surface is clean and readable")
+    gate = subcommands.add_parser("gate", help="Audit strictly and decide publication with the selected release profile")
     gate.add_argument("--source", required=True)
     gate.add_argument("--repository")
     gate.add_argument("--policy")
@@ -1628,8 +3789,40 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--generic-only", action="store_true")
     gate.add_argument("--release-asset", action="append", default=[])
     gate.add_argument("--gitleaks-path")
+    gate.add_argument("--release-profile", choices=tuple(sorted(RELEASE_PROFILES)), default="permissive-noncritical")
     gate.add_argument("--report", required=True)
+    gate.add_argument("--public-summary")
     gate.set_defaults(handler=command_gate)
+
+    doctor = subcommands.add_parser("doctor", help="Check local parser and publication dependencies without changing a repository")
+    doctor.add_argument("--source")
+    doctor.add_argument("--all", action="store_true", help="Require every supported parser layer")
+    doctor.add_argument("--output")
+    doctor.set_defaults(handler=command_doctor)
+
+    managed = subcommands.add_parser("managed-publish", help="Gate one exact worktree candidate and publish it through a pull request")
+    managed.add_argument("--source", required=True)
+    managed.add_argument("--repository", required=True)
+    managed.add_argument("--base-commit", required=True)
+    managed.add_argument("--base-branch")
+    managed.add_argument("--policy", required=True)
+    managed.add_argument("--private-output-dir", required=True)
+    managed.add_argument("--checkpoint")
+    managed.add_argument("--public-summary")
+    managed.add_argument("--readme-auditor")
+    managed.add_argument("--validation-command", action="append", default=[])
+    managed.add_argument("--validation-timeout-seconds", type=int, default=900)
+    managed.add_argument("--checks-timeout-seconds", type=int, default=1800)
+    managed.add_argument("--intent", choices=("audit", "pr", "auto-merge"), default="audit")
+    managed.add_argument("--branch")
+    managed.add_argument("--commit-message", default="chore: publish verified skill update")
+    managed.add_argument("--pr-title", default="Publish verified skill update")
+    managed.add_argument("--pr-body", default="Generated from an isolated candidate and approved by the local trusted publication gate")
+    managed.add_argument("--release-asset", action="append", default=[])
+    managed.add_argument("--gitleaks-path")
+    managed.add_argument("--release-profile", choices=tuple(sorted(RELEASE_PROFILES)), default="permissive-noncritical")
+    managed.add_argument("--resume", action="store_true")
+    managed.set_defaults(handler=command_managed_publish)
     return parser
 
 
@@ -1640,7 +3833,13 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.handler(args))
     except (OSError, RuntimeError, ValueError) as exc:
         # The exception class is safe to expose; the message is intentionally generic.
-        print(json.dumps({"decision": "incomplete", "error": exc.__class__.__name__}, sort_keys=True), file=sys.stderr)
+        print(
+            json.dumps(
+                {"decision": "incomplete", "publication_decision": "deny", "error": exc.__class__.__name__},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
         return 4
 
 

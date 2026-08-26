@@ -1,0 +1,28 @@
+{
+  "candidate_count": 64102,
+  "candidate_attempt_count": 250000,
+  "candidate_attempt_limit_reached": true,
+  "coverage_status_counts": {
+    "checked": 1,
+    "not_present": 0,
+    "permission_denied": 0,
+    "tool_failed": 0,
+    "unreadable": 2
+  },
+  "decision": "incomplete",
+  "mode": "periodic-exposure-audit",
+  "saved_project_count": 62,
+  "saved_project_file_count": 35635,
+  "saved_project_status_counts": {
+    "checked": 14,
+    "unreadable": 48
+  },
+  "scanner_sha256": "609f039edc6cde8432ebe6ca0d1da609e0c67a3b8e5fd4d697d900baab61557e",
+  "schema_version": 2,
+  "session_count": 738,
+  "session_file_count": 736,
+  "session_status_counts": {
+    "checked": 23,
+    "unreadable": 715
+  }
+}

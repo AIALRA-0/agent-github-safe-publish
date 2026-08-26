@@ -1,355 +1,254 @@
 <div align="center">
 
-<img src="docs/assets/readme-hero.svg" alt="Every GitHub transfer passes through a private policy, complete surface audit, fail-closed decision, and separately authorized write" />
+<img src="docs/assets/readme-hero.svg" alt="GitHub Safe Publish connects private policy, strict audit, graded release decisions, and separate write authorization" />
 
-Figure 1 Unified GitHub safe-publication gate
+<p>Figure 1 Unified GitHub publication boundary</p>
+
+</div>
 
 # GitHub Safe Publish
 
-**Give every Agent the same private policy and stop conditions before a push, upload, sync, open-source action, or Release asset change**
+<p align="center"><strong>Give every Agent the same redaction, coverage, and stopping rules before any GitHub upload</strong></p>
+
+<div align="center">
 
 <p>
-  <a href="#2-invocation-contract"><img src="docs/assets/badges/trigger.svg" alt="Every GitHub transfer triggers the safe-publication rules"></a>
-  <a href="#31-four-gate-decisions"><img src="docs/assets/badges/decision.svg" alt="The publication gate stops on risk or incomplete coverage"></a>
-  <a href="#6-private-policy"><img src="docs/assets/badges/privacy.svg" alt="Candidate values and private policy stay local"></a>
-  <a href="README.md"><img src="docs/assets/badges/language.svg" alt="The project provides Chinese and English documentation"></a>
+  <a href="#2-automatic-invocation"><img src="docs/assets/badges/trigger.svg" alt="GitHub transfer intent automatically invokes the shared rules"></a>
+  <a href="#3-decision-model"><img src="docs/assets/badges/decision.svg" alt="Audit every issue strictly and stop publication only for critical risk"></a>
+  <a href="#6-private-policy"><img src="docs/assets/badges/privacy.svg" alt="Raw candidates and private policy remain local"></a>
+  <a href="README.md"><img src="docs/assets/badges/language.svg" alt="Switch to the Chinese documentation"></a>
 </p>
 
-[中文](README.md) · [Invocation](#2-invocation-contract) · [Quick start](#4-quick-start) · [CI](#7-continuous-integration) · [Evidence](#8-verification-evidence) · [Safety](#9-safety-boundaries)
+<p><a href="README.md">中文</a> · <a href="#4-quick-start">Quick start</a> · <a href="#5-coverage">Coverage</a> · <a href="#8-verification">Verification</a> · <a href="#9-safety-boundaries">Safety</a></p>
 
 </div>
 
 > [!IMPORTANT]
-> Every task that may send repository content or artifacts to GitHub must invoke `$github-safe-publish` first
+> Any task that may push, upload, sync, mirror, open-source, or change a GitHub Release must load `$github-safe-publish` first
 >
-> A Skill is a reusable Codex instruction package. Loading it activates audit and stopping rules; it does not authorize a push, Release, history rewrite, or any other remote write
+> Loading the Skill activates audit and stopping rules; it does not authorize a remote write
 
-## 1 Project position
+## 1 Problem and design
 
-`github-safe-publish` standardizes repository sanitization that otherwise drifts between Agents, including credentials, personal data, addresses, URLs, account identifiers, databases, logs, binary metadata, and repository history
+Agents often apply different sanitization standards. Common misses extend beyond passwords and tokens to addresses, personal sites, accounts, UIDs, contacts, databases, Git history, image pixels, document properties, and distribution assets
 
-This repository provides:
+This project separates two complementary workflows:
 
-GitHub Release is the GitHub publication page that carries version notes and downloadable assets. If assets bypass inspection, images, archives, or binaries can still expose sensitive content
+- Exact publication check: inspects only the disposable copy, Git history, and assets intended for the current publication; it preserves every strict audit finding while only critical risk stops the write
+- Periodic exposure audit: inspects accessible Codex sessions, saved project roots, and repository-associated GitHub surfaces; its result identifies existing risk and never authorizes deletion or modification
 
-Git is the version-control tool that stores repository history. Without history inspection, deleted or renamed sensitive content can remain in older commits
+Both workflows share the same sensitive-data classes and private policy, so an ordinary publication does not rescan all Codex history
 
-Git Large File Storage, or Git LFS, keeps large-file contents as separate objects. A missing object prevents complete release scanning and returns `incomplete`
+## 2 Automatic invocation
 
-- Automatic discovery when an Agent identifies an intended GitHub transfer
-- Private candidate and policy storage outside the repository, while public reports retain only rules, locations, and handling states
-- Disposable publication copies created from exact source commits, keeping private drafts and private history unchanged
-- Coverage of the working copy, Git history, Git Large File Storage (Git LFS) entities, submodules, repository metadata, and GitHub Release assets
-- Four decisions: `pass`, `review`, `block`, and `incomplete`
-- A reusable GitHub Actions workflow that starts in shadow mode before a repository owner chooses remote enforcement
+`agents/openai.yaml` enables implicit invocation. The Skill description covers `push`, `publish`, `upload`, `sync`, `mirror`, `open-source`, and `Release`
 
-<div align="center">
+A user-level `AGENTS.md` provides the second enforcement layer; see the [global invocation policy](references/global-invocation-policy.md)
 
-Table 1.1 Current implementation state
-
-| Scope | Current state | Evidence and consequence |
-| --- | --- | --- |
-| Skill discovery | Enabled | `agents/openai.yaml` sets `allow_implicit_invocation: true` |
-| User-level mandatory rule | Enabled | The local `AGENTS.md` requires Codex tasks that load it to invoke this Skill before a transfer |
-| Local gate | Implemented | `scripts/safe_publish.py gate` succeeds only for `pass` |
-| Continuous-integration gate | Implemented | The reusable workflow defaults to shadow mode and cannot return a complete `pass` without private policy |
-| GitHub remote enforcement | Not enabled | Other clients may still bypass local instructions until a ruleset or branch protection is approved |
-| History remediation | Repository-specific approval | The tool reports history risk but never rewrites history or force-pushes automatically |
-
-</div>
-
-## 2 Invocation contract
-
-### 2.1 Tasks that must trigger the Skill
-
-The Agent triggers this Skill from the intended external transfer. The user does not need to mention privacy, sanitization, redaction, or the Skill name
-
-<div align="center">
-
-Table 2.1 User intent and required handling
-
-| User intent | Trigger | Required Agent action |
-| --- | --- | --- |
-| Push a repository or branch to GitHub | Yes | Load the Skill, prepare a disposable copy, and obtain `pass` before the write |
-| Upload, publish, or sync a repository | Yes | Treat the task as an external transfer and run the same gate |
-| Mirror a project or make a private project open source | Yes | Audit every declared surface; missing access returns `incomplete` |
-| Create or update a GitHub Release | Yes | Check Git history and Release assets together |
-| Create a local commit only | No | Do not start publication when no remote transfer is planned |
-| Read, summarize, or review GitHub content | No | Remain read-only and acquire no write permission |
-
-</div>
-
-### 2.2 Three enforcement layers
-
-Model selection alone cannot constrain clients that do not load Codex instructions, so the project uses three layers:
-
-<div align="center">
+Repository rulesets or branch protection form a third layer. This repository currently provides a shadow workflow and does not automatically modify GitHub rules
 
 ```mermaid
-%% Discovery, mandatory user instructions, and remote rejection form one publication path
+%% Both audit modes share policy, but only the exact check produces a publication decision
 flowchart TD
-    A[Detect intended GitHub transfer] --> B[Skill description enables discovery]
-    B --> C[User AGENTS.md requires invocation]
-    C --> D[Run the unified gate on a disposable copy]
-    D --> E{Decision is pass}
-    E -->|No| F[Stop the remote write]
-    E -->|Yes| G{Current task explicitly authorizes the write}
+    A[Detect GitHub transfer intent] --> B[Load shared Skill]
+    B --> C[Create copy from exact commit]
+    C --> D[Run strict audit]
+    D --> E[Apply publication risk matrix]
+    E --> K{allow or allow_with_risk}
+    K -->|No| F[Stop and remediate critical risk]
+    K -->|Yes| G{Exact write authorized}
     G -->|No| F
-    G -->|Yes| H[Begin the exact GitHub write]
-    H --> I[Ruleset or branch protection checks status]
+    G -->|Yes| H[Perform exact remote write]
+    I[Periodic exposure audit] --> J[Private detail and public aggregate]
+    J --> F
 ```
 
-Figure 2.1 Discovery, local enforcement, and remote enforcement
+Figure 2.1 Strict audit, graded release, and periodic exposure audit
 
-</div>
+## 3 Decision model
 
-Layer one lets Codex discover the Skill from its description
+Table 3.1 Strict audit decisions
 
-Layer two requires invocation for every Codex task that loads the user-level `AGENTS.md`; see the [global invocation policy](references/global-invocation-policy.md)
-
-Layer three uses a GitHub ruleset or branch protection to reject writes without a successful `safe-publish / gate` status. This repository provides the workflow, but remote enforcement remains subject to repository-specific approval
-
-## 3 Publication workflow
-
-Gitleaks is a credential-pattern scanner. A scanner failure or an unresolved credential stops the publication workflow
-
-### 3.1 Four gate decisions
-
-<div align="center">
-
-Table 3.1 Machine decision and next action
-
-| Decision | Meaning | Required next action |
+| Decision | What it establishes | Required action |
 | --- | --- | --- |
-| `pass` | Every declared surface was readable and no unresolved finding remains | Continue only when the current task explicitly authorizes the exact remote write |
-| `review` | The information owner must classify a candidate | Stop and confirm ownership and approved location |
-| `block` | A confirmed policy violation remains | Remove or replace it, or obtain an exact expiring exception |
-| `incomplete` | Policy, access, object, dependency, or file-format coverage is insufficient | Restore coverage and rerun the complete gate |
+| `pass` | Every declared surface was readable and no unresolved finding remains | Record a complete and clean strict audit |
+| `review` | An information owner must classify a candidate | Confirm ownership, location, and handling |
+| `block` | A confirmed policy violation remains | Repair it; risk acceptance cannot override a critical issue |
+| `incomplete` | Policy, permission, object, tool, or format coverage is insufficient | Record the gap and let the publication matrix determine whether the surface is critical |
 
-</div>
+Coverage gaps take precedence and produce `incomplete`; zero findings cannot cover an unread surface
 
-Coverage gaps take precedence and produce `incomplete`; a zero-finding count cannot cover an unread surface
+Table 3.2 Publication decisions
 
-### 3.2 Disposable publication loop
+| Publication decision | Condition | Command result |
+| --- | --- | --- |
+| `allow` | The strict audit is `pass` | Success, with separate write authorization still required |
+| `allow_with_risk` | Only reviewed noncritical findings or auxiliary-surface gaps remain | Success with the full risk report preserved |
+| `deny` | A credential, private identity, real data, legal issue, critical infrastructure, unclassified candidate, or critical coverage failure remains | Failure and no write |
 
-<div align="center">
-
-```mermaid
-%% Private source remains unchanged while all replacements and checks run in a disposable copy
-flowchart TD
-    A[Select exact source commit] --> B[Load private policy outside repository]
-    B --> C[Create disposable publication copy]
-    C --> D[Apply approved exact replacements]
-    D --> E[Scan working copy and all Git history]
-    E --> F[Scan LFS, submodules, metadata, and Release assets]
-    F --> G[Run Gitleaks and repository tests]
-    G --> H[Write a report without matched source values]
-    H --> I{Unified decision}
-    I -->|pass and authorized| J[Perform exact GitHub write]
-    I -->|any other result| K[Stop and preserve remediation route]
-```
-
-Figure 3.1 Private source, disposable copy, and remote write
-
-</div>
+The default profile is `permissive-noncritical`; `strict` returns `allow` only for a strict audit `pass`
 
 ## 4 Quick start
 
-Python is the runtime used to execute this project's test commands. The current working copy completed its tests with Python `3.12.7`; an incompatible runtime prevents reproducing that evidence. Git is also required, and a full fleet audit requires an authenticated GitHub CLI
-
-- First, inspect the fixed command interface:
+The runtime needs Python and Git. A fleet audit also needs an authenticated GitHub CLI
 
 ```powershell
-python scripts/safe_publish.py --help # Shows fleet audit, candidate discovery, disposable preparation, and gate commands
+python -X utf8 scripts/safe_publish.py --help # Lists every supported command with stable UTF-8 decoding on Windows
 ```
 
-- Second, write candidate source values only to a private local directory:
+Audit accessible Codex sessions and saved project roots:
 
 ```powershell
-python scripts/safe_publish.py policy-candidates --source . --repository ExampleOrg/example-repo --output "$env:CODEX_HOME/private/github-safe-publish/candidates.private.json" # Keeps candidate source values out of the repository and public logs
+python -X utf8 scripts/safe_publish.py audit-local --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --output "$env:CODEX_HOME/private/github-safe-publish/local-audit.private.json" --candidates-output "$env:CODEX_HOME/private/github-safe-publish/candidates.private.json" --checkpoint "$env:CODEX_HOME/private/github-safe-publish/local-audit.checkpoint.json" --resume # Keeps raw candidates and detailed evidence in the private local directory
 ```
 
-- Third, have the information owner approve the policy outside the repository:
-
-Read the [private-policy contract](references/private-policy.md) for fields and exact allow rules
-
-- Fourth, create a disposable publication copy from an exact commit:
+Compile a repository-scoped version 3 policy:
 
 ```powershell
-python scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMIT> --destination ..\example-publication-copy --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --mode preserve-history --report "$env:CODEX_HOME/private/github-safe-publish/prepare.private.json" # Preserves existing public history for an update
+python -X utf8 scripts/safe_publish.py compile-policy --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --repository ExampleOrg/example-repo --output "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" # Trims scopes and verifies the encoded 48 KB limit
 ```
 
-- Fifth, gate the disposable copy, its history, and any proposed assets:
+Audit repository-associated GitHub surfaces:
 
 ```powershell
-python scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" # Exits successfully only for pass
+python -X utf8 scripts/safe_publish.py audit-fleet --owner ExampleOrg --local-root "<LOCAL_ROOT>" --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --surface-profile repository-associated --resume --output "$env:CODEX_HOME/private/github-safe-publish/fleet.private.json" --candidates-output "$env:CODEX_HOME/private/github-safe-publish/fleet-candidates.private.json" --public-summary .\fleet-summary.public.json # Pagination, permission, or download failures remain incomplete
 ```
 
-- Sixth, confirm that the current task explicitly authorizes the exact GitHub write:
+Create and gate a disposable publication copy:
 
-A successful gate proves only that the declared scope has no unresolved finding. It does not authorize a push, Release, settings change, or history rewrite
+```powershell
+python -X utf8 scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMIT> --destination ..\example-publication-copy --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --mode preserve-history --report "$env:CODEX_HOME/private/github-safe-publish/prepare.private.json" # Preserves existing public history for an update
+python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # allow and allow_with_risk succeed while deny stops publication
+```
 
-## 5 Inspection scope
+Run the read-only runtime diagnosis for the current repository:
+
+```powershell
+python -X utf8 scripts/safe_publish.py doctor --source . # Requires only the parser layers used by the current tracked object types
+```
+
+After explicit GitHub write authorization, run the managed publication path:
+
+```powershell
+python -X utf8 scripts/safe_publish.py managed-publish --source . --repository ExampleOrg/example-repo --base-commit <SOURCE_COMMIT> --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --private-output-dir "$env:CODEX_HOME/private/github-safe-publish/example-repo-release" --validation-command "python -X utf8 -m unittest discover -s tests -v" --intent auto-merge # Auto-merges only after allow, required checks, and branch governance all pass
+```
+
+See [`managed-publish.md`](references/managed-publish.md), [`runtime.md`](references/runtime.md), and [`recovery.md`](references/recovery.md) for the orchestration, runtime, and recovery contracts
+
+## 5 Coverage
 
 ### 5.1 Sensitive-data classes
 
-A user identifier, or UID, distinguishes an account or object and can connect activity across files. A uniform resource locator, or URL, points to a network resource; an Internet Protocol address identifies a network location; and a media access control address identifies a network device
-
-An HTTP archive, or HAR, records browser requests and responses and may contain authentication data, cookies, or real interface traffic. Portable Document Format files, Office documents, and interactive Notebooks may preserve author properties, thumbnails, or execution output
-
-A cookie stores browser session or site-state data. Exposure can let another party reuse a login state or correlate user activity
-
-LICENSE records licensing terms, NOTICE records declarations, and CITATION records citation instructions. Automatic edits can damage rights, attribution, or provenance
-
-<div align="center">
-
-Table 5.1 Unified sensitive-data classes
+Table 5.1 Default classes and handling
 
 | Class | Typical content | Default handling |
 | --- | --- | --- |
-| Credentials | Accounts, passwords, tokens, private keys, cookies, sessions, verification codes, database credentials, and signed URLs | Revoke or rotate a confirmed leak before considering history cleanup [1] |
-| Identity | Names, aliases, email addresses, telephone numbers, detailed addresses, personal sites, avatars, QR codes, contacts, UIDs, and device identifiers | Confirm through private exact rules and replace consistently |
-| Infrastructure | Real URLs, internal domains, IP and MAC addresses, host names, ports, cloud resources, absolute local paths, and topology | Replace with invalid synthetic values or remove |
-| Data | Databases, dumps, backups, real records, orders, messages, calendars, locations, browser data, logs, HAR files, and complete tool output | Block publication and inspect derived artifacts |
-| Artifacts | Image pixels and metadata, PDF, Office properties, Notebook output, archives, LFS, and Release assets | Parse completely or require an exact approved binary digest |
-| Legal records | LICENSE, NOTICE, CITATION, copyright, third-party authorship, and provenance | Request human review and never replace automatically |
+| Credentials | Passwords, tokens, private keys, cookies, sessions, recovery codes, database credentials, and signed URLs | Block; revoke or rotate after public exposure |
+| Identity | Names, aliases, email, telephone, addresses, personal sites, avatars, QR payloads, contacts, UIDs, and device identifiers | Confirm with private exact rules and replace consistently |
+| Infrastructure | URLs, domains, IPv4, IPv6, CIDR, MAC addresses, host names, ports, cloud resources, local paths, and topology | Replace with synthetic values or remove |
+| Data | Databases, dumps, backups, real records, messages, calendars, locations, browser data, logs, HAR, prompts, and Agent sessions | Block and inspect derived artifacts |
+| Artifacts | Images, PDF, Office, Notebook, archives, media, binaries, LFS, and Release assets | Fully parse or require an exact reviewed digest |
+| Legal records | LICENSE, NOTICE, CITATION, copyright, third-party attribution, and provenance | Human review only; never replace automatically |
 
-</div>
+### 5.2 Files and Git
 
-NIST de-identification guidance also includes free text and multimedia within the handling scope [2]
+Content signatures and extensions jointly select the analyzer
 
-### 5.2 Repository surfaces
+- Text: credential, identity, infrastructure, Unicode normalization, and bounded Base64, hexadecimal, and URL decoding
+- Git: all visible objects, branch and tag names, annotated tags, notes, author, committer, messages, and signature payloads
+- Office: properties, relationships, embedded files, images, and macros
+- Images: metadata, every animation frame, OCR text, QR payloads, and barcodes; a missing layer returns `incomplete`
+- PDF: text, properties, attachments, page-image OCR, and encryption state; unreadable page content returns `incomplete`
+- Media: container and stream properties, convertible subtitles, attachments, and embedded cover art; parser or extraction failure returns `incomplete`
+- Native binaries: format properties, printable strings, and debug paths; parser failure returns `incomplete`
 
-<div align="center">
+Image OCR receives a 300-second budget per repository by default; after the budget, metadata, QR, and barcode checks continue while the pixel layer becomes `incomplete`; a trusted local run may change the budget with `SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS`
 
-Table 5.2 Surface coverage and unreadable result
+Each local session file runs in an isolated child process with a 600-second default budget. A child crash or timeout isolates only that file and returns `incomplete` instead of terminating the fleet. Gitleaks keeps its 300-second internal limit and receives a 330-second parent-process hard timeout
 
-| Surface | Content checked | Result when unreadable |
-| --- | --- | --- |
-| Working copy | Tracked files, symbolic links, databases, archives, and binaries | `incomplete` |
-| Git history | All visible refs, deleted and renamed files, commit metadata | `incomplete` |
-| Git LFS | Pointers and corresponding large-file entities | Missing entity produces `incomplete` |
-| Submodules | URL, path, and pinned commit | Enumeration failure produces `incomplete` |
-| Repository metadata | Description, homepage, topics, and security settings | Insufficient permission produces `incomplete` |
-| GitHub Release | Asset name, size, content, and digest | Unreadable asset produces `incomplete` |
+### 5.3 Repository-associated GitHub surfaces
 
-</div>
+The `repository-associated` profile covers collaboration text, Release metadata and assets, Wiki, Pages metadata, retained Actions logs and artifacts, variables, environments, deployments, cache metadata, package and container access, security settings, rulesets, and Actions permissions
+
+Gists, GitHub Projects, Codespaces, billing data, external clones, and other accounts are outside that finite set
 
 ## 6 Private policy
 
-The private policy uses JavaScript Object Notation (JSON) for machine-readable rules. It must remain outside the repository, and repository-controlled files cannot expand its approvals
+Version 3 retains eight top-level fields: `schema_version`, `identifiers`, `replacements`, `approved_locations`, `blocked_paths`, `binary_approvals`, `exceptions`, and `risk_acceptances`
 
-<div align="center">
+Identifiers declare normalization and scope. Binary approvals bind the exact object digest to inspection layers, tool versions, reviewer, reason, and review trigger. Exceptions bind a rule and exact object to an approver, reason, expiry, and review trigger
 
-Table 6.1 Private-policy fields
+Risk acceptances bind a repository, eligible noncritical rule, exact object, whole-object digest, scanner digest, approver, reason, expiry, and the `content-or-scanner-change` review trigger
 
-| Field | Stored content |
-| --- | --- |
-| `schema_version` | Policy-format version |
-| `identifiers` | Private literal or regular-expression rules |
-| `replacements` | Approved stable synthetic mappings |
-| `approved_locations` | Exact object locations where one rule may appear |
-| `blocked_paths` | Path patterns that can never be published |
-| `binary_approvals` | Exact digests for human-reviewed binaries |
-| `exceptions` | Exact exceptions with approver, reason, expiry, and review trigger |
+Versions 1 and 2 remain readable through in-memory migration. Repository files cannot broaden private approvals
 
-</div>
+A risk acceptance becomes inactive when the object, scanner, or expiry changes. It can never override credentials, private identifiers, legal records, real data, or critical coverage gaps
 
-Candidate source values, private policy, and detailed reports belong only below `CODEX_HOME/private/github-safe-publish/`. The public repository stores generic rules, synthetic tests, and aggregate reports without matched values
+Raw candidates, policy, checkpoints, and detailed reports stay below `CODEX_HOME/private/github-safe-publish/`
+
+A local audit attempts at most 250,000 private candidates. The checkpoint persists the attempt count and exhaustion state. After exhaustion, non-raw rule and coverage checks continue, but the result remains `incomplete`
 
 ## 7 Continuous integration
 
-The [reusable safe-publish workflow](.github/workflows/reusable-safe-publish.yml) runs the unified gate with a pinned tool commit, complete Git history, and Git LFS entities
+The [reusable workflow](.github/workflows/reusable-safe-publish.yml) runs public generic rules only and remains shadow evidence
 
-The private policy is injected temporarily through `SAFE_PUBLISH_POLICY_B64`, an encrypted variable used by a GitHub Actions workflow. A missing variable, decode failure, unknown version, or an encoded value above GitHub's `48 KB` limit returns `incomplete` [3]
+Private policy never enters GitHub Actions controlled by an ordinary repository branch, so this workflow can display only the strict audit and shadow `deny`; it cannot approve publication
 
-Dependabot is GitHub's tool for automatically creating dependency-update requests. Fork and Dependabot events cannot receive the private policy, so they run public generic rules only and cannot obtain a complete `pass`
+The trusted local gate remains authoritative until a separately approved trusted runner exists. A repository owner must approve any later ruleset or branch-protection requirement per repository
 
-Shadow mode reports the decision without blocking a merge. A repository owner should approve a ruleset or branch-protection requirement only after real-change validation, failure drills, and recovery drills
+## 8 Verification
 
-## 8 Verification evidence
-
-### 8.1 Repository tests
-
-Repository tests generate synthetic fixtures at runtime and store no real credential, personal identifier, or private policy
+Tests generate synthetic fixtures at runtime and do not write real credentials or private identifiers into Git history
 
 ```powershell
-python -m unittest discover -s tests -v # Runs pattern, policy, history, LFS, artifact, and Skill invocation-contract tests
+python -X utf8 -m unittest discover -s tests -v # Verifies patterns, policy migration, Git metadata, artifact parsing, resume behavior, and invocation contracts
+python -X utf8 "<SKILL_CREATOR>/scripts/quick_validate.py" . # Validates the Skill package with deterministic UTF-8 decoding
+python "<README_STANDARDIZER>/scripts/audit_readme.py" . --scan-repository # Audits bilingual structure, links, visuals, secret shapes, and local-path leakage
 ```
 
-The regression suite covers these critical failures:
+Automated tests establish only declared synthetic cases and machine contracts. Real binary meaning, information ownership, and remote authorization still require human review
 
-- Deleted and renamed history still enters candidate output
-- Missing LFS entities, unknown binaries, and unsupported archives produce `incomplete`
-- Wildcard approvals are rejected while exact approved locations may pass
-- Public reports contain neither matched values nor matched-value digests
-- Missing or oversized CI policy fails closed
-- Implicit invocation, transfer-intent coverage, and global stopping conditions remain aligned
-
-### 8.2 Initial fleet audit
-
-The public summary generated on `2026-08-25` records `93` repository objects: `71` public plus `22` private, so $71 + 22 = 93$ [4]
-
-The same summary records `91` repositories as `incomplete` and `2` as `block`, so $91 + 2 = 93$; none received `pass` [4]
-
-Those results identify broad coverage gaps and do not establish any repository as safe. See the [fleet audit report](docs/research/2026-08-25-fleet-analysis.md)
-
-### 8.3 Credential-pattern scanner
-
-The project pins Gitleaks `v8.30.1`. The helper verifies the official release archive against its checksum file and requests fully redacted output [5]
+Gitleaks remains pinned to `v8.30.1`. Because that release has a platform-specific silent-detection report [6], the first use of each binary in a process runs a synthetic credential canary. A missed canary, a canary longer than 60 seconds, or a repository process longer than 330 seconds returns `incomplete`
 
 ## 9 Safety boundaries
 
-### 9.1 Actions the tool never performs automatically
+The tool never automatically rewrites authors, tags, signatures, legal records, or public history; revokes credentials; force-pushes; cleans GitHub caches; coordinates forks; replaces an existing Release; modifies repository settings; or publishes candidate values and private evidence
 
-- Rewrite authors, tags, signatures, LICENSE, NOTICE, CITATION, history commits, or an existing GitHub Release
-- Revoke or rotate a leaked credential
-- Force-push, purge caches, coordinate forks, or replace Release assets
-- Store candidate source values, private policy, GitHub Actions encrypted variables, history-recovery copies, or incident evidence in the public repository, because this could republish secrets used by continuous integration
+Detailed reports retain the strict audit and complete risk classification. Public summaries retain only both decisions, aggregate counts, commit and scanner identifiers, and report fingerprints; they omit rule locations, candidate values, and private object digests
 
-When a credential may still be active or is already public, notify its owner and revoke or rotate it first. Removing repository content cannot neutralize a copied credential [1]
-
-### 9.2 Surfaces outside the first audit
-
-The first audit excludes Issues, pull-request bodies and comments, Discussions, Wiki, GitHub Pages, historical Actions logs and artifacts, Packages, container images, caches, Gists, and external clones
-
-Those surfaces need separate access, enumeration, and reporting policy. They remain unchecked until that scope is added
+A credential that may remain valid or has already been public stops ordinary publication. The credential owner revokes or rotates it before separately approved history remediation
 
 ## 10 Repository map
 
-<div align="center">
+Table 10.1 Main entry points
 
-Table 10.1 Main file responsibilities
-
-| Path | Responsibility |
+| Path | Purpose |
 | --- | --- |
-| [`SKILL.md`](SKILL.md) | Invocation, authorization, and unified publication workflow read by Agents |
-| [`agents/openai.yaml`](agents/openai.yaml) | Skill interface and implicit-invocation policy |
-| [`scripts/safe_publish.py`](scripts/safe_publish.py) | Fleet audit, candidate discovery, disposable preparation, and gate commands |
-| [`references/global-invocation-policy.md`](references/global-invocation-policy.md) | Mandatory user-level Agent invocation rule |
-| [`references/private-policy.md`](references/private-policy.md) | Private-policy fields and exact approvals |
-| [`references/gate-and-incident.md`](references/gate-and-incident.md) | Decision precedence, binary handling, and credential incidents |
-| [`.github/workflows/reusable-safe-publish.yml`](.github/workflows/reusable-safe-publish.yml) | Reusable shadow or required gate for other repositories |
-| [`tests/`](tests) | Synthetic, Git-history, and invocation-contract regressions |
+| [`SKILL.md`](SKILL.md) | Invocation, operating modes, and stopping conditions read by Agents |
+| [`scripts/safe_publish.py`](scripts/safe_publish.py) | Local audit, fleet audit, policy compilation, disposable preparation, and publication gate |
+| [`references/local-audit.md`](references/local-audit.md) | Codex session and saved-project audit contract |
+| [`references/fleet-audit.md`](references/fleet-audit.md) | GitHub repository set, associated surfaces, and recovery contract |
+| [`references/private-policy.md`](references/private-policy.md) | Private policy version 3, exact approvals, and risk acceptances |
+| [`references/gate-and-incident.md`](references/gate-and-incident.md) | Decision precedence, file gaps, and credential incidents |
+| [`.github/workflows/reusable-safe-publish.yml`](.github/workflows/reusable-safe-publish.yml) | Public shadow gate without private policy |
+| [`tests/`](tests) | Synthetic regression and invocation contracts |
 
-</div>
+## 11 Maintenance and license
 
-## 11 Maintenance route
+Never paste a candidate value, credential, or private policy into a public Issue. Submit a non-sensitive request for a private reporting channel
 
-Never paste a suspected credential, candidate source value, or private policy into a public Issue, pull-request description, or log. When no private reporting route exists, submit a non-sensitive request for maintainers to provide one
+This repository currently has no license file. Public visibility does not grant permission to copy, modify, redistribute, or use the project commercially; obtain permission from the repository owner first
 
-## 12 License boundary
+## 12 References
 
-This repository currently has no license file. Public visibility does not grant permission to copy, modify, redistribute, or use it commercially; obtain permission from the repository owner first
+[1] GitHub, [Remediating a leaked secret](https://docs.github.com/en/code-security/tutorials/remediate-leaked-secrets/remediating-a-leaked-secret)
 
-## 13 References
+[2] GitHub, [Removing sensitive data from a repository](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)
 
-[1] GitHub, “Remediating a leaked secret in your repository.” [Online]. Available: <https://docs.github.com/en/code-security/tutorials/remediate-leaked-secrets/remediating-a-leaked-secret>
+[3] GitHub, [Push protection](https://docs.github.com/en/code-security/concepts/secret-security/push-protection)
 
-[2] NIST, “IR 8053 De-Identification of Personal Information.” [Online]. Available: <https://csrc.nist.gov/pubs/ir/8053/final>
+[4] NIST, [IR 8053 De-Identification of Personal Information](https://csrc.nist.gov/pubs/ir/8053/final)
 
-[3] GitHub, “Secrets reference.” [Online]. Available: <https://docs.github.com/en/actions/reference/security/secrets>
+[5] Gitleaks, [Official repository](https://github.com/gitleaks/gitleaks)
 
-[4] Repository owner, “Initial GitHub repository fleet inventory,” Aug. 25, 2026. [Online]. Available: [docs/research/2026-08-25-fleet-analysis.md](docs/research/2026-08-25-fleet-analysis.md)
-
-[5] Gitleaks, “Official repository.” [Online]. Available: <https://github.com/gitleaks/gitleaks>
+[6] Gitleaks, [v8.30.1 silent-detection regression report](https://github.com/gitleaks/gitleaks/issues/2170)

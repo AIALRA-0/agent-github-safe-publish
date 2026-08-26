@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "mode": "local-shadow-pilots",
+  "generated_at": "2026-08-28",
+  "pilot_count": 3,
+  "decision_counts": {
+    "pass": 0,
+    "review": 0,
+    "block": 2,
+    "incomplete": 1
+  },
+  "finding_count": 45198,
+  "approved_count": 32,
+  "block_count": 27919,
+  "review_count": 17247,
+  "coverage_gap_count": 1478,
+  "scanner_sha256": "609f039edc6cde8432ebe6ca0d1da609e0c67a3b8e5fd4d697d900baab61557e",
+  "pilots": [
+    {
+      "repository": "AIALRA-SKILL-TEMPLATE",
+      "source_commit": "ef796d4db5cdb81eafc696b5d31055902ed8e33f",
+      "decision": "block",
+      "finding_count": 420,
+      "coverage_gap_count": 0,
+      "report_fingerprint": "9bf27d75b0c948e698f02eebfcfeb0b9e2d4ade62aa09624ef601c3b836af691"
+    },
+    {
+      "repository": "ReadWeave",
+      "source_commit": "8844fc9c3d8cacb59fbe861e6823e17f4c6868c7",
+      "decision": "incomplete",
+      "finding_count": 38226,
+      "coverage_gap_count": 1478,
+      "report_fingerprint": "da2cb993a3fd95f523c739007af5a5208d50acc8205e5d16bfaf45d3172df161"
+    },
+    {
+      "repository": "AIALRA-TTS",
+      "source_commit": "52fec9b30e0a17bfadd72992d9cab04e4015425b",
+      "decision": "block",
+      "finding_count": 6552,
+      "coverage_gap_count": 0,
+      "report_fingerprint": "9e608aa650382c2c05aefdcc97c94ec106d69efac176396d9046c9516dbc3241"
+    }
+  ],
+  "remote_writes_performed": 0
+}

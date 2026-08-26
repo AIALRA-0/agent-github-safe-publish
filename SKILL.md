@@ -1,77 +1,82 @@
 ---
 name: github-safe-publish
-description: Audit, sanitize, and gate repository content before it is sent to GitHub. Use whenever a task may push, publish, upload, sync, mirror, open-source, or create or update a GitHub Release, even when the user does not mention privacy or redaction. Do not use for read-only GitHub inspection or a purely local commit with no planned remote transfer.
+description: Audit, sanitize, and gate repository content before it is sent to GitHub. Use whenever a task may push, publish, upload, sync, mirror, open-source, or create or update a GitHub Release, including Chinese requests such as 推送、发布、上传、同步、镜像、开源、全量发布, even when the user does not mention privacy or redaction. Do not use for read-only GitHub inspection or a purely local commit with no planned remote transfer.
 ---
 
 # GitHub Safe Publish
 
-Use one policy and one fail-closed decision model for every repository publication. Keep detection, proposed edits, approval, and external writes as separate actions.
+Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits only reviewed noncritical risk. Keep periodic exposure discovery separate from the exact gate for an intended publication
 
-## 1 Mandatory invocation
+## 1 Mandatory publication boundary
 
-- Invoke this Skill as soon as a task may transfer repository content or artifacts to GitHub. The user does not need to say “sanitize,” “redact,” or the Skill name.
-- Treat “push this,” “publish the repository,” “upload to GitHub,” “sync the remote,” “mirror the project,” “make it open source,” and “create or update a Release” as publication intent.
-- Do not invoke it for read-only repository inspection or a purely local commit when no remote transfer is planned.
-- Loading the Skill never authorizes an external write. It only activates the audit and stopping rules below.
-- Stop before the write when the Skill, private policy, declared object coverage, or required scanner is unavailable. Record the decision as `incomplete` rather than silently falling back to a weaker upload path.
-- Only an explicit publication authorization and a `pass` decision for the exact publication copy allow the GitHub write to begin.
-- When installing or validating fleet-wide discovery, read [global-invocation-policy.md](references/global-invocation-policy.md).
+- Invoke this Skill as soon as a task may transfer repository content or artifacts to GitHub
+- Loading the Skill never authorizes a write
+- Before a write, create an isolated copy from the exact source commit and run `gate` against its working tree, visible Git history, LFS entities, submodules, and proposed Release assets
+- Read both results from the exact copy: `decision` remains the strict audit result, while `publication_decision` controls the separately authorized write
+- The default `permissive-noncritical` profile continues only for `allow` or `allow_with_risk`; `deny` stops the write
+- Use the `strict` profile for high-sensitivity repositories, incident response, or final red-team review; it permits only a strict audit `pass`
+- Read [the global invocation policy](references/global-invocation-policy.md) when installing or validating fleet-wide discovery
 
-## 2 Authorization boundary
+## 2 Choose the operating mode
 
-- Read-only auditing does not authorize a push, release change, history rewrite, ruleset change, or secret rotation.
-- Confirm that the current task explicitly authorizes the exact GitHub write immediately before performing it.
-- Never rewrite authors, tags, signatures, `LICENSE`, `NOTICE`, `CITATION`, history, or an existing GitHub Release automatically.
-- Treat a credential found in public history as an incident. Revoke or rotate it before considering repository cleanup.
-- Require repository-specific approval before history rewriting, force-pushing, cache cleanup, or replacing a Release asset.
+- Exact publication: use `prepare` and `gate`; this is the only mode whose `publication_decision` can permit a separately authorized write
+- Managed publication: use `managed-publish` only after explicit GitHub write authorization; it creates an isolated candidate, runs declared validations, executes the exact gate, and routes the result through a pull request. Read [the managed publication contract](references/managed-publish.md)
+- Runtime diagnosis: use the read-only `doctor --source <repository>` before a gate, or `doctor --all` when validating a maintained runtime. Read [the runtime contract](references/runtime.md)
+- Repository candidate discovery: use `policy-candidates`; raw values stay below `CODEX_HOME/private/github-safe-publish/`
+- Local exposure audit: use `audit-local` for accessible Codex sessions and saved project roots; read [the local audit contract](references/local-audit.md)
+- Fleet exposure audit: use `audit-fleet --surface-profile repository-associated --resume`; read [the fleet audit contract](references/fleet-audit.md)
+- Policy distribution: use `compile-policy` to create a repository-scoped v3 policy from the private master policy
 
-## 3 Required separation
+Periodic exposure audit results describe existing risk. They never authorize deletion, remote remediation, history rewriting, credential rotation, or publication
 
-- Inspect the private source in place only with read-only operations.
-- Write raw candidates only below `CODEX_HOME/private/github-safe-publish/`. Never show raw candidates in chat, logs, public reports, or GitHub Actions artifacts.
-- Load the private policy from outside the repository. A repository file cannot broaden an allow rule.
-- Create a disposable publication copy from an exact source commit. Apply approved replacements only in that copy.
-- Keep scanning credentials separate from publishing. Enable write credentials only after `gate` returns `pass`.
+## 3 Private policy and evidence
 
-## 4 Decision model
+- Load private policy from outside the source repository; repository-controlled files cannot broaden approvals
+- Version 3 adds exact, expiring `risk_acceptances`; versions 1 and 2 remain readable through in-memory migration
+- Exact binary approvals record object, digest, inspection layers, scanner versions, reviewer, reason, and review trigger
+- Exact exceptions record rule, object, approver, reason, expiry, and review trigger
+- Risk acceptances additionally lock the repository, whole-object SHA-256, scanner SHA-256, and `content-or-scanner-change` trigger
+- Risk acceptances apply only to the fixed noncritical rule matrix and never override credentials, private identifiers, legal records, real data, critical infrastructure, or critical coverage gaps
+- Never print, upload, hash into a public report, or place raw candidates in GitHub Actions
+- Read [the private policy contract](references/private-policy.md) before candidate approval or policy compilation
 
-Run `scripts/safe_publish.py gate` against the publication copy, its Git history, and any proposed Release assets.
+## 4 Required inspection behavior
 
-- `pass` means every declared surface was readable and no unresolved finding remains. Only this decision permits the publication workflow to continue.
-- `review` means an information owner must classify a candidate.
-- `block` means a confirmed rule violation must be removed or approved through an exact, expiring exception.
-- `incomplete` means the policy, access, object, dependency, or file-format coverage was insufficient.
+Check credentials, personal and contact information, addresses, sites, accounts, UIDs, device identifiers, URLs, domains, IP and MAC addresses, host names, ports, cloud resources, local paths, databases, backups, real records, logs, prompts, Agent transcripts, and full tool output
 
-The command exits successfully only for `pass`. Treat `review`, `block`, and `incomplete` as publication failures.
+Inspect Git reference names, annotated tags, notes, author and committer data, signature payloads, historical submodule configuration, image metadata and pixels, QR and barcode payloads, PDF text and page images, Office embedded media and macros, Notebook output, archives, audio and video metadata plus extractable subtitles, attachments and cover art, binary format data and strings, LFS objects, repository metadata, collaboration content, retained automation output, and Release assets when the selected mode declares those surfaces
 
-## 5 Sensitive information
+Apply Unicode normalization and bounded decoding only as declared by the private policy. Never turn generic name recognition into an automatic replacement rule
 
-Check credentials, account identifiers, names, aliases, email addresses, phone numbers, detailed addresses, personal sites, avatars, QR codes, contacts, UIDs, device IDs, URLs, domains, IP addresses, MAC addresses, hostnames, ports, cloud resource names, absolute local paths, remote addresses, deployment topology, databases, dumps, backups, real records, messages, calendars, locations, browser data, logs, HAR files, crash files, prompts, Agent transcripts, and full tool output.
+Unsupported formats, missing parsers, encrypted or oversized objects, missing LFS data, incomplete history, pagination failure, permission denial, and unavailable declared surfaces still produce the strict audit result `incomplete`
 
-Also inspect image pixels and metadata, PDF and Office properties, Notebook outputs, archives, LFS objects, submodule URLs, repository metadata, and GitHub Release assets. Mark encrypted archives, oversized objects, missing LFS data, unreadable objects, and unsupported binary formats as `incomplete`.
+For exact publication, failures in the working tree, Git history, LFS, submodules, proposed Release assets, private policy, or Gitleaks remain critical and produce publication `deny`. A declared auxiliary remote surface that is not transferred by the exact publication may produce `allow_with_risk`
 
-Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and provenance as protected legal records. Findings there remain `review` until the information owner approves the exact rule and object through `approved_locations`. Approval records completed review and must never trigger automatic replacement.
+Image OCR uses a bounded per-repository runtime budget. Budget exhaustion is a coverage gap and produces `incomplete`; a partial pixel scan never permits publication
 
-## 6 Workflow
+Local session files run in isolated child processes with a 600-second default budget. A child crash, timeout, invalid result, or candidate-collection limit produces `incomplete` for the affected audit and must not terminate or pass the remaining fleet
 
-- For a repository fleet audit, run `audit-fleet`. Read [fleet-audit.md](references/fleet-audit.md) before configuring the owner and private output locations.
-- To build a locally reviewable raw-candidate file, run `policy-candidates`. Read [private-policy.md](references/private-policy.md) before the information owner approves mappings and exceptions.
-- To create a disposable publication copy, run `prepare` with an exact commit and an explicit `clean-root` or `preserve-history` mode.
-- Before publication, run `gate`. Read [gate-and-incident.md](references/gate-and-incident.md) for decision precedence, Release assets, and incident handling.
+Gitleaks uses both its 300-second internal limit and a 330-second parent-process timeout. Canary timeout, repository timeout, nonstandard exit, or an invalid report produces `incomplete`
 
-Pin Gitleaks to v8.30.1. The helper downloads the official release artifact, verifies it against the release checksum file, and requests fully redacted output.
+Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and provenance as protected legal records. They require exact human review and are never replaced automatically
 
-## 7 Replacement rules
+## 5 Incident and mutation boundary
 
-- Replace approved private identities consistently with synthetic values such as `ExampleOrg`, `ExampleUser`, `example.invalid`, and stable synthetic IDs.
-- Store explicit synthetic mappings in the private policy. Never derive replacements by hashing private values.
-- Allow a private identifier only at an exact approved object location or through an exact, expiring exception.
-- Preserve third-party attribution and legal provenance for manual review.
-- Delete private candidate files and detailed reports after the information owner confirms remediation. Keep only aggregate statistics without paths or identifiers.
+- A credential that may remain valid or has been public is an incident; revoke or rotate it before repository cleanup
+- Require repository-specific approval for history rewriting, force-pushing, cache cleanup, Release replacement, ruleset changes, and credential rotation
+- Never rewrite authors, tags, signatures, legal records, history, or an existing Release automatically
+- Read [gate and incident handling](references/gate-and-incident.md) before any publication decision or credential response
 
-## 8 Continuous integration
+## 6 Continuous integration
 
-- Inject the trimmed private policy through the `SAFE_PUBLISH_POLICY_B64` GitHub Actions Secret.
-- Treat a missing Secret, invalid Base64, unknown policy version, or encoded value larger than 48 KB as `incomplete`.
-- Fork pull requests and Dependabot events run public generic checks only. They cannot receive a full `pass`; reproduce the exact commit on a trusted branch or local machine for the complete gate.
-- Start in shadow mode. Require an out-of-band repository-owner decision before enabling a ruleset or branch protection requirement.
+Repository-controlled GitHub Actions run public generic rules only and remain shadow evidence. They cannot receive the private master policy or return publication `allow`
+
+The local trusted gate is authoritative until a separately approved trusted execution environment exists. A repository owner must approve any later ruleset or branch-protection requirement out of band
+
+## 7 Managed pull requests
+
+- Never push directly to the default branch and never use an administrator bypass
+- `allow_with_risk` may create a pull request after explicit authorization, but it never auto-merges
+- `allow` may auto-merge only when project checks, README checks, an unchanged base, an exact remote tree match, and required branch governance all pass
+- Missing branch protection or required checks returns `BRANCH_PROTECTION_MISSING` and leaves the pull request for review
+- A resumed run must recompute all bound fingerprints; read [the recovery contract](references/recovery.md) before retrying a partial remote operation
