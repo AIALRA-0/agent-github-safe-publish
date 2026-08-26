@@ -1,0 +1,177 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "Codex 历史与 GitHub 安全发布全量端到端审计",
+    "mode": "deep",
+    "as_of": "2026-08-28",
+    "status": "blocked",
+    "scope": "AIALRA-0 仓库母集、可访问 Codex 会话、已保存项目根目录、统一门禁和 3 个本地试点",
+    "exclusions": ["其他账号", "其他离线主机", "永久删除的会话", "外部克隆", "未授权的远端写入"]
+  },
+  "decision_problem": {
+    "project_classification": "高风险且可逆的本地安全控制改造",
+    "risk_level": "high",
+    "decision_owner": "AIALRA-0 仓库所有者",
+    "desired_outcome": "所有 Agent 使用同一敏感分类和严格审计，同时只让关键风险阻止精确发布",
+    "current_state": "本地实现已经拆分严格审计结论和分级发布结论；97 个仓库的周期审计仍为 incomplete，远端变更暂停",
+    "decision": "双结论模型是否达到 3 个试点送审条件，并能否在逐仓库批准后接入远端规则",
+    "success_metrics": ["关键发布表面失查时 publication_decision 必须为 deny", "已确认非关键问题能够得到 allow_with_risk", "合成阻断样例全部检出", "公开输出不包含候选原文和对象位置", "3 个试点取得可复现终态"],
+    "constraints": ["不扩大 GitHub 令牌权限", "不自动改写历史、署名或许可证", "不把私有策略注入不受信任工作流"],
+    "irreversible_actions": ["历史重写", "强制推送", "Release 替换", "凭据轮换", "远端规则强制执行"],
+    "research_budget": {
+      "overall_limit": "完成 97 个仓库、736 个冻结会话文件所含 738 个会话 ID、62 个已保存项目根目录和 3 个试点的本地证据",
+      "parallel_capacity": 1,
+      "paid_or_private_access": ["当前 GitHub CLI 身份", "本机 Codex 文件系统"],
+      "cutoff_policy": "出现有效凭据、公开原文泄漏、母集不稳定或错误通过时暂停"
+    },
+    "reversal_evidence": ["母集或权限变化", "试点出现关键漏检", "独立复核否定当前覆盖结论"]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "拆分精确发布门禁和定期暴露面审计能否在不泄露私有候选的前提下覆盖当前发布风险",
+      "critical": true,
+      "internal_probe": "检查实现、测试、试点和覆盖记录",
+      "external_probe": "核对 GitHub、NIST、OpenAI 和 Gitleaks 资料",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S2"],
+      "external_source_ids": ["S3", "S4", "S5", "S6"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {"id": "M1", "question_ids": ["Q1"], "origin": "internal", "channel": "local repository and private audit", "target": "implementation, tests and pilot reports", "decision_use": "证明本地行为和停止条件", "priority": "high", "access_status": "searched"},
+    {"id": "M2", "question_ids": ["Q1"], "origin": "external", "channel": "official documentation and upstream issue", "target": "platform边界、去标识化范围和扫描器失效", "decision_use": "挑战本地零命中判断", "priority": "high", "access_status": "searched"}
+  ],
+  "sources": [
+    {"id": "S1", "origin": "internal", "title": "安全发布实现与合成回归", "location": "scripts/safe_publish.py and tests/", "source_type": "source-code", "date": "2026-08-28", "accessed_at": "2026-08-28", "applicability": "证明双结论、覆盖状态、风险接受失效和不输出原文的机器行为", "limitations": "合成测试不能判断真实信息归属", "retrieval_method": "本地读取并执行测试", "observed_content": "实现包含严格审计、分级发布、第 3 版私有策略、对象与扫描器绑定的风险接受、候选与进程上限、二进制解析、运行时金丝雀和中英文触发合同；52 项自动测试通过", "direct": true, "independence_group": "local-implementation"},
+    {"id": "S2", "origin": "internal", "title": "本地母集与试点检查记录", "location": "CODEX_HOME/private/github-safe-publish/audits", "source_type": "test-observation", "date": "2026-08-28", "accessed_at": "2026-08-28", "applicability": "证明真实仓库结果和访问缺口", "limitations": "私有记录不进入公开仓库且远端写入未执行", "retrieval_method": "运行只读审计和本地 gate", "observed_content": "97 个仓库全部为 incomplete；3 个试点合计 45198 项发现和 1478 个覆盖缺口；冻结 Codex 快照包含 736 个文件、738 个会话 ID 和 62 个已保存项目，最终决定为 incomplete", "direct": true, "independence_group": "local-runtime"},
+    {"id": "S3", "origin": "external", "title": "GitHub Push protection", "location": "https://docs.github.com/en/code-security/concepts/secret-security/push-protection", "source_type": "official-doc", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "说明平台推送保护聚焦受支持的秘密模式", "limitations": "不能证明私有标识和多媒体已经覆盖", "retrieval_method": "读取 GitHub 官方文档", "observed_content": "推送保护阻止受支持秘密并允许特定绕过", "direct": true, "independence_group": "github"},
+    {"id": "S4", "origin": "external", "title": "NIST IR 8053", "location": "https://csrc.nist.gov/pubs/ir/8053/final", "source_type": "official-doc", "date": "2015-10-01", "accessed_at": "2026-08-27", "applicability": "支持自由文本和多媒体同属去标识化范围", "limitations": "不是 GitHub 专用执行规范", "retrieval_method": "读取 NIST 官方资料", "observed_content": "去标识化讨论包含结构化数据、自由文本和多媒体", "direct": true, "independence_group": "nist"},
+    {"id": "S5", "origin": "external", "title": "Gitleaks v8.30.1 静默失效报告", "location": "https://github.com/gitleaks/gitleaks/issues/2170", "source_type": "other", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "支持固定版本前加入运行时金丝雀", "limitations": "单一平台报告不能外推到所有平台", "retrieval_method": "读取上游问题记录", "observed_content": "报告描述进程成功但没有产生预期检测", "direct": true, "independence_group": "gitleaks-community"},
+    {"id": "S6", "origin": "external", "title": "OpenAI Codex 任务归档与删除", "location": "https://help.openai.com/en/articles/20001333-how-to-archive-and-delete-codex-chats-in-the-chatgpt-app", "source_type": "official-doc", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "界定本机可访问历史不代表永久删除记录", "limitations": "不能枚举其他账号或离线主机", "retrieval_method": "读取 OpenAI 官方帮助资料", "observed_content": "删除后的任务不再通过普通产品界面可用", "direct": true, "independence_group": "openai"},
+    {"id": "SL-problem", "origin": "external", "title": "问题分支检索记录", "location": "tool:web-search/problem", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "记录历史与元数据风险", "limitations": "限定官方资料和上游项目", "retrieval_method": "关键词检索和回读", "observed_content": "历史、附件和元数据需要单独处置", "direct": true, "independence_group": "search-problem"},
+    {"id": "SL-mechanism", "origin": "external", "title": "机制分支检索记录", "location": "tool:web-search/mechanism", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "比较平台检测和私有规则", "limitations": "没有组织级自定义模式实测", "retrieval_method": "官方文档对照", "observed_content": "平台检测不能替代个人信息和多媒体审计", "direct": true, "independence_group": "search-mechanism"},
+    {"id": "SL-product", "origin": "external", "title": "产品分支检索记录", "location": "tool:web-search/product", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "确定仓库关联表面", "limitations": "当前身份缺少软件包读取权限", "retrieval_method": "接口与文档核对", "observed_content": "部分内容可下载且部分表面存在平台边界", "direct": true, "independence_group": "search-product"},
+    {"id": "SL-research", "origin": "external", "title": "研究分支检索记录", "location": "tool:web-search/research", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "扩展去标识化对象范围", "limitations": "不提供扫描器实现", "retrieval_method": "NIST 资料回读", "observed_content": "自由文本和多媒体不能排除", "direct": true, "independence_group": "search-research"},
+    {"id": "SL-adjacent", "origin": "external", "title": "相邻分支检索记录", "location": "tool:web-search/adjacent", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "把制品纳入关联表面", "limitations": "不能读取被拒绝访问的内容", "retrieval_method": "接口和文档核对", "observed_content": "仓库以外仍存在关联制品", "direct": true, "independence_group": "search-adjacent"},
+    {"id": "SL-failure", "origin": "external", "title": "失效分支检索记录", "location": "tool:web-search/failure", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "验证零命中不等于扫描器有效", "limitations": "仍需本机金丝雀", "retrieval_method": "上游问题和本机测试", "observed_content": "金丝雀把静默失效转为 incomplete", "direct": true, "independence_group": "search-failure"},
+    {"id": "SL-code", "origin": "external", "title": "代码分支检索记录", "location": "tool:local-source-review/code", "source_type": "search-log", "date": "2026-08-27", "accessed_at": "2026-08-27", "applicability": "记录实现与外部失效证据的对照", "limitations": "不是独立代码审计", "retrieval_method": "本地源码和上游问题对照", "observed_content": "缺口优先级和金丝雀合同可追溯", "direct": true, "independence_group": "search-code"}
+  ],
+  "claims": [
+    {"id": "C1", "statement": "精确发布门禁与定期暴露面审计需要分别报告", "kind": "inference", "impact": "high", "confidence": "high", "support_source_ids": ["S1", "S2", "S3"], "contradict_source_ids": [], "falsifier": "同一轻量检查可完整覆盖每次提交与全部历史母集"},
+    {"id": "C2", "statement": "平台秘密扫描不能替代私有标识、自由文本和多媒体检查", "kind": "inference", "impact": "high", "confidence": "high", "support_source_ids": ["S3", "S4"], "contradict_source_ids": [], "falsifier": "官方证明所有私有标识和多媒体均由推送保护覆盖"},
+    {"id": "C3", "statement": "固定 Gitleaks 版本仍需要运行时金丝雀", "kind": "inference", "impact": "high", "confidence": "medium", "support_source_ids": ["S1", "S5"], "contradict_source_ids": [], "falsifier": "目标二进制不存在静默零检出路径"},
+    {"id": "C4", "statement": "可读取本机会话不等于能够访问全部历史对话", "kind": "fact", "impact": "high", "confidence": "high", "support_source_ids": ["S2", "S6"], "contradict_source_ids": [], "falsifier": "产品接口能够恢复永久删除记录并枚举其他主机"},
+    {"id": "C5", "statement": "周期审计的 incomplete 不应自动替代一次精确发布的风险判断", "kind": "inference", "impact": "high", "confidence": "high", "support_source_ids": ["S1", "S2"], "contradict_source_ids": [], "falsifier": "精确发布依赖周期审计中未进入本次传输的全部对象"}
+  ],
+  "assumptions": [
+    {"id": "A1", "statement": "当前身份枚举的 97 个 owner 仓库构成本次母集", "critical": true, "status": "supported", "decision_impact": "若不成立则覆盖矩阵失真", "falsifier": "不可变仓库编号重新枚举得到无法解释的差异", "support_source_ids": ["S2"], "contradict_source_ids": []},
+    {"id": "A2", "statement": "私有候选需由仓库所有者确认后才能自动替换", "critical": true, "status": "supported", "decision_impact": "若不成立则可能误删品牌或法律记录", "falsifier": "信息所有者批准宽泛自动替换", "support_source_ids": ["S1"], "contradict_source_ids": []},
+    {"id": "A3", "statement": "解析器成功返回能够代表声明格式完整覆盖", "critical": true, "status": "uncertain", "decision_impact": "若不成立则仍可能漏检二进制语义", "falsifier": "真实样例在解析成功时漏掉已知标记", "support_source_ids": ["S1"], "contradict_source_ids": ["S5"]}
+  ],
+  "search_branches": [
+    {"name": "adjacent", "status": "executed", "reason": "", "round_ids": ["R-adjacent"]},
+    {"name": "code", "status": "executed", "reason": "", "round_ids": ["R-code"]},
+    {"name": "failure", "status": "executed", "reason": "", "round_ids": ["R-failure"]},
+    {"name": "mechanism", "status": "executed", "reason": "", "round_ids": ["R-mechanism"]},
+    {"name": "patent", "status": "not_applicable", "reason": "本轮不主张新发明或专利自由实施", "round_ids": []},
+    {"name": "problem", "status": "executed", "reason": "", "round_ids": ["R-problem"]},
+    {"name": "product", "status": "executed", "reason": "", "round_ids": ["R-product"]},
+    {"name": "research", "status": "executed", "reason": "", "round_ids": ["R-research"]}
+  ],
+  "search_rounds": [
+    {"id": "R-problem", "branch": "problem", "query": "repository privacy leaks Git history metadata", "channel": "web and local", "date": "2026-08-27", "discovery_mode": "keyword", "new_candidate_ids": [], "evidence_source_ids": ["S1", "S2", "S3"], "search_log_source_id": "SL-problem", "new_high_similarity_count": 0, "new_decision_evidence_count": 2},
+    {"id": "R-mechanism", "branch": "mechanism", "query": "secret scanning push protection de-identification", "channel": "official docs", "date": "2026-08-27", "discovery_mode": "keyword", "new_candidate_ids": [], "evidence_source_ids": ["S3", "S4"], "search_log_source_id": "SL-mechanism", "new_high_similarity_count": 0, "new_decision_evidence_count": 2},
+    {"id": "R-product", "branch": "product", "query": "GitHub artifacts rulesets releases", "channel": "official docs and API", "date": "2026-08-27", "discovery_mode": "keyword", "new_candidate_ids": [], "evidence_source_ids": ["S3"], "search_log_source_id": "SL-product", "new_high_similarity_count": 0, "new_decision_evidence_count": 0},
+    {"id": "R-research", "branch": "research", "query": "NIST de-identification free text multimedia", "channel": "primary publication", "date": "2026-08-27", "discovery_mode": "citation-chain", "new_candidate_ids": [], "evidence_source_ids": ["S4"], "search_log_source_id": "SL-research", "new_high_similarity_count": 0, "new_decision_evidence_count": 0},
+    {"id": "R-adjacent", "branch": "adjacent", "query": "supply chain release artifacts metadata", "channel": "official docs and API", "date": "2026-08-27", "discovery_mode": "keyword", "new_candidate_ids": [], "evidence_source_ids": ["S3"], "search_log_source_id": "SL-adjacent", "new_high_similarity_count": 0, "new_decision_evidence_count": 1},
+    {"id": "R-failure", "branch": "failure", "query": "Gitleaks silent detection failure", "channel": "upstream issue and local test", "date": "2026-08-27", "discovery_mode": "keyword", "new_candidate_ids": [], "evidence_source_ids": ["S1", "S5"], "search_log_source_id": "SL-failure", "new_high_similarity_count": 0, "new_decision_evidence_count": 2},
+    {"id": "R-code", "branch": "code", "query": "safe publish fail closed behavior", "channel": "local source and tests", "date": "2026-08-27", "discovery_mode": "source-review", "new_candidate_ids": [], "evidence_source_ids": ["S1", "S2", "S5"], "search_log_source_id": "SL-code", "new_high_similarity_count": 0, "new_decision_evidence_count": 2}
+  ],
+  "candidates": [],
+  "novelty": {
+    "applicable": true,
+    "applicability_reason": "需要核对现有平台控制是否已经解决同一范围",
+    "assessment": "no-match-within-scope",
+    "stop_reason": "saturated",
+    "saturation_round_ids": ["R-product", "R-research"],
+    "languages": ["zh", "en"],
+    "regions": ["global"],
+    "access_gaps": [
+      {"resource": "组织级自定义秘密模式", "impact": "不能验证组织级规则能否替代部分私有策略", "critical": false},
+      {"resource": "GitHub Packages 内容", "impact": "当前令牌缺少读取权限，因此软件包内容保持 incomplete", "critical": true}
+    ],
+    "scope_statement": "限定 GitHub、NIST、OpenAI、Gitleaks 和本地实现"
+  },
+  "perspectives": [
+    {"id": "P1", "lens": "失败即停止与覆盖证明", "producer": "lead-security-pass", "producer_type": "lead-agent", "producer_reference": "current-task/security-pass", "independent": false, "context_isolated": true, "source_ids": ["S1", "S5"], "findings": ["零命中不能覆盖未读对象", "金丝雀应先于真实扫描"], "limitations": "没有独立子代理复核授权"},
+    {"id": "P2", "lens": "隐私与法律记录", "producer": "lead-privacy-pass", "producer_type": "lead-agent", "producer_reference": "current-task/privacy-pass", "independent": false, "context_isolated": true, "source_ids": ["S1", "S4"], "findings": ["自由文本与多媒体属于审计范围", "法律记录只能人工复核"], "limitations": "不构成法律意见"},
+    {"id": "P3", "lens": "运行成本与推广", "producer": "lead-operations-pass", "producer_type": "lead-agent", "producer_reference": "current-task/operations-pass", "independent": false, "context_isolated": true, "source_ids": ["S2", "S3"], "findings": ["每次提交扫描全部会话成本过高", "本地权威门禁和远端影子检查应分层"], "limitations": "远端强制规则尚未实测"}
+  ],
+  "real_world_validations": [
+    {"id": "V1", "role": "decision-owner", "participant_reference": "user-provided-execution-plan", "method": "确认母集、试点和暂停远端写入的边界", "conducted_at": "2026-08-28", "status": "completed", "outcome": "批准本地执行并暂停远端不可逆动作", "limitations": "不等于逐仓库强制规则批准", "evidence_source_ids": ["S2"]},
+    {"id": "V2", "role": "information-owner", "participant_reference": "user-approved-dual-decision-policy", "method": "确认严格审计、分级覆盖缺口、固定风险矩阵加精确人工覆盖和默认宽松放行", "conducted_at": "2026-08-28", "status": "completed", "outcome": "批准双结论模型的本地实现与试点验证", "limitations": "不等于任何具体仓库的远端写入或规则启用授权", "evidence_source_ids": ["S1", "S2"]}
+  ],
+  "alignment_questions": [],
+  "execution_results": {
+    "scanner_sha256": "609f039edc6cde8432ebe6ca0d1da609e0c67a3b8e5fd4d697d900baab61557e",
+    "dual_decision_implementation": {
+      "scanner_sha256": "f1299e69fdd91b8bcbcfa75795d730bc81e9f706628b0d6df0e890dad2e31e01",
+      "policy_schema_version": 3,
+      "release_profile": "permissive-noncritical",
+      "automated_test_count": 52,
+      "automated_test_status": "passed",
+      "source_skill_validation": "passed",
+      "installed_skill_validation": "passed",
+      "readme_repository_audit": "passed",
+      "remote_writes_performed": 0
+    },
+    "fleet": {
+      "repository_count": 97,
+      "public_count": 75,
+      "private_count": 22,
+      "decision_counts": {"pass": 0, "review": 0, "block": 0, "incomplete": 97},
+      "candidate_count": 24792,
+      "remote_writes_performed": 0
+    },
+    "local_exposure": {
+      "session_file_count": 736,
+      "session_id_count": 738,
+      "saved_project_count": 62,
+      "decision": "incomplete",
+      "candidate_attempt_limit": 250000,
+      "candidate_store_limit_exceeded": true,
+      "deduplicated_candidate_count": 64102,
+      "finding_occurrence_count": 9087283,
+      "session_status_counts": {"checked": 23, "unreadable": 715},
+      "saved_project_status_counts": {"checked": 14, "unreadable": 48},
+      "saved_project_file_count": 35635,
+      "active_session_tail_after_snapshot_included": false
+    },
+    "pilots": {
+      "pilot_count": 3,
+      "decision_counts": {"pass": 0, "review": 0, "block": 2, "incomplete": 1},
+      "finding_count": 45198,
+      "approved_count": 32,
+      "block_count": 27919,
+      "review_count": 17247,
+      "coverage_gap_count": 1478,
+      "remote_writes_performed": 0
+    }
+  },
+  "recommendation": {
+    "verdict": "pause",
+    "action": "保留双结论本地实现，完成 3 个试点的真实 allow_with_risk 与 deny 验证后再逐仓库批准远端规则",
+    "rationale": "双结论合成回归已经通过，但 97 个仓库的周期审计仍为 incomplete，3 个试点尚未取得新的逐仓库信息所有者批准",
+    "strongest_counterevidence": "没有独立复核视角，用户级 push protection 状态未知，软件包内容和部分二进制、历史、Actions 对象无法完整覆盖",
+    "minimum_test": "3 个试点各完成一次真实 allow_with_risk、一次关键泄漏 deny、金丝雀和部分失败演练",
+    "failure_response": "保持影子模式并把对应表面标为 incomplete",
+    "reversal_condition": "独立复核通过、访问缺口补齐并取得逐仓库授权",
+    "support_source_ids": ["S1", "S2", "S3", "S4"],
+    "counter_source_ids": ["S5", "S6"]
+  },
+  "review_triggers": ["仓库母集变化", "GitHub 权限变化", "解析器版本变化", "出现关键漏检", "准备启用远端规则"]
+}

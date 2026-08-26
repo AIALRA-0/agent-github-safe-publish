@@ -1,27 +1,27 @@
-# Fleet audit
+# Fleet exposure audit
 
-## 1 Declared surfaces
+## 1 Repository set
 
-`audit-fleet` builds the owner repository set from the authenticated GitHub API. For each immutable repository ID it records visibility, fork and archive state, default-branch commit, visible references, repository security settings, and the status of these surfaces:
+`audit-fleet` enumerates repositories owned by the authenticated GitHub identity and freezes each immutable repository ID. Local checkouts are discovered recursively and associated by normalized GitHub remote full name rather than folder name
 
-- ordinary Git objects across visible history
-- Git LFS entities
-- submodule URLs and pinned commits
-- repository description, homepage, and topics
-- GitHub Release assets
+Use `--surface-profile publication` for the original Git, LFS, submodule, repository metadata, and Release scope. Use `--surface-profile repository-associated` for the periodic exposure audit
 
-Each surface reports `checked`, `not_present`, `unreadable`, `permission_denied`, or `tool_failed`. Any present surface without `checked` coverage makes the repository decision `incomplete`.
+## 2 Repository-associated profile
 
-## 2 Private outputs
+The expanded profile declares these surfaces:
 
-The detailed report and raw candidate file must remain below `CODEX_HOME/private/github-safe-publish/`. The command prints aggregate counts only. Raw matches never enter standard output or standard error.
+- Git objects, reference names, annotated tags, notes, commit and tag signatures, LFS entities, and historical submodule configuration
+- Repository description, homepage, topics, Release title, body, tag metadata, and Release assets
+- Issues, pull requests, comments, reviews, Discussions, labels, milestones, Wiki, Pages metadata, and up to 100 same-origin rendered Pages resources
+- Workflow runs, retained logs, artifacts, job-summary availability, cache metadata, repository variables, environment names, deployment status URLs, secret names, Actions permissions, rulesets, and repository security settings
+- Repository-associated packages and container images when the authenticated identity and platform interface permit content access
 
-The optional public summary contains aggregate counts without repository names, paths, object IDs, candidate values, or policy details.
+Secrets and deployment-key private values are not readable by design. Audit their names and settings only. Cache content without a stable download interface is `unreadable`; metadata coverage cannot substitute for content coverage
 
-## 3 Forks and archives
+## 3 Status and recovery
 
-Fork audits preserve upstream authorship and distinguish repository state through GitHub metadata. The tool never rewrites upstream history. Archived repositories remain read-only and receive an audit decision only.
+Every declared surface reports `checked`, `not_present`, `unreadable`, `permission_denied`, or `tool_failed`. A present or declared surface without complete inspection makes the repository `incomplete`
 
-## 4 Coverage limits
+Use `--resume` to reuse repositories already written to the private checkpoint report only when the scanner digest and policy fingerprint match. Ordinary mirrors and downloaded Release or Actions assets use disposable directories. `--cache-mirrors` is an explicit opt-in for an approved secure cache
 
-The first audit excludes Issues, pull-request text and comments, Discussions, Wiki, GitHub Pages, historical Actions logs and artifacts, Packages, container images, caches, Gists, and external clones. Record these as declared exclusions instead of implying they were checked.
+The public summary contains aggregate counts only. Gists, GitHub Projects, Codespaces, billing data, external clones, and other accounts remain outside the repository-associated profile
