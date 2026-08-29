@@ -61,6 +61,9 @@ MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
 DEFAULT_IMAGE_OCR_BUDGET_SECONDS = 300
 DEFAULT_LOCAL_FILE_BUDGET_SECONDS = 600
+DEFAULT_GATE_HISTORY_BUDGET_SECONDS = 900
+DEFAULT_HISTORY_CHECKPOINT_INTERVAL = 10_000
+HISTORY_CHECKPOINT_SCHEMA_VERSION = 1
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_ARCHIVE_EXPANDED_BYTES = 250 * 1024 * 1024
 MAX_ARCHIVE_DEPTH = 3
@@ -523,6 +526,7 @@ class ScanState:
             budget = 0
         self.image_ocr_budget_seconds = max(0, budget)
         self.image_ocr_started_at: float | None = None
+        self.history_progress: dict[str, Any] | None = None
         self._private_rules = self._compile_private_rules()
 
     def register_object(self, object_id: str, data: bytes) -> None:
@@ -1452,16 +1456,140 @@ def git_head(source: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def scan_git_history(state: ScanState, source: Path, *, time_limit_seconds: int | None = None) -> None:
+def merge_scan_state(target: ScanState, source: ScanState) -> None:
+    for finding in source.findings:
+        key = (finding.object, finding.location, finding.rule_id, finding.status)
+        if key not in target._finding_keys:
+            target._finding_keys.add(key)
+            target.findings.append(finding)
+    target.coverage.extend(source.coverage)
+    target.object_sha256.update(source.object_sha256)
+    for candidate in source.raw_candidates:
+        key = (
+            str(candidate.get("repository", "")),
+            str(candidate.get("surface", "")),
+            str(candidate.get("object", "")),
+            str(candidate.get("rule_id", "")),
+            str(candidate.get("raw_value", "")),
+        )
+        if key not in target._candidate_keys:
+            target._candidate_keys.add(key)
+            target.raw_candidates.append(candidate)
+    target._raw_candidate_total = max(target._raw_candidate_total, len(target.raw_candidates))
+
+
+def history_checkpoint_binding(
+    state: ScanState,
+    source: Path,
+    object_inventory: bytes,
+    object_count: int,
+) -> dict[str, Any]:
+    return {
+        "repository": state.repository,
+        "source_commit": git_head(source),
+        "object_inventory_sha256": sha256_bytes(object_inventory),
+        "object_count": object_count,
+        "scanner_sha256": state.scanner_sha256,
+        "policy_fingerprint": policy_fingerprint(state.policy),
+        "collect_raw": state.collect_raw,
+    }
+
+
+def default_history_checkpoint_path(binding: dict[str, Any]) -> Path:
+    encoded = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return private_root() / "history-checkpoints" / f"{sha256_bytes(encoded)}.private.json"
+
+
+def history_checkpoint_document(
+    state: ScanState,
+    binding: dict[str, Any],
+    *,
+    phase: str,
+    next_object_index: int,
+    blob_count: int,
+) -> dict[str, Any]:
+    return {
+        "history_checkpoint_schema_version": HISTORY_CHECKPOINT_SCHEMA_VERSION,
+        "binding": binding,
+        "phase": phase,
+        "next_object_index": next_object_index,
+        "blob_count": blob_count,
+        "updated_at": utc_now(),
+        "findings": [item.public_dict() for item in state.findings],
+        "coverage": [item.as_dict() for item in state.coverage],
+        "object_sha256": state.object_sha256,
+        "raw_candidates": state.raw_candidates if state.collect_raw else [],
+    }
+
+
+def restore_history_checkpoint(state: ScanState, document: dict[str, Any]) -> tuple[str, int, int]:
+    for item in document.get("findings", []):
+        finding = Finding(**item)
+        key = (finding.object, finding.location, finding.rule_id, finding.status)
+        if key not in state._finding_keys:
+            state._finding_keys.add(key)
+            state.findings.append(finding)
+    state.coverage.extend(Coverage(**item) for item in document.get("coverage", []))
+    state.object_sha256.update({str(key): str(value) for key, value in document.get("object_sha256", {}).items()})
+    if state.collect_raw:
+        state.raw_candidates.extend(item for item in document.get("raw_candidates", []) if isinstance(item, dict))
+        state._candidate_keys.update(
+            (
+                str(item.get("repository", "")),
+                str(item.get("surface", "")),
+                str(item.get("object", "")),
+                str(item.get("rule_id", "")),
+                str(item.get("raw_value", "")),
+            )
+            for item in state.raw_candidates
+        )
+        state._raw_candidate_total = len(state.raw_candidates)
+    return (
+        str(document.get("phase", "objects")),
+        max(0, int(document.get("next_object_index", 0))),
+        max(0, int(document.get("blob_count", 0))),
+    )
+
+
+def scan_git_history(
+    state: ScanState,
+    source: Path,
+    *,
+    time_limit_seconds: int | None = None,
+    checkpoint_path: Path | None = None,
+    checkpoint_interval: int = DEFAULT_HISTORY_CHECKPOINT_INTERVAL,
+) -> None:
     started = time.monotonic()
-    shallow = run(["git", "rev-parse", "--is-shallow-repository"], source)
+    history_state = ScanState(state.repository, state.policy, collect_raw=state.collect_raw)
+
+    def time_exceeded() -> bool:
+        return time_limit_seconds is not None and time.monotonic() - started >= time_limit_seconds
+
+    try:
+        shallow = run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            source,
+            timeout_seconds=max(1, time_limit_seconds) if time_limit_seconds is not None else None,
+        )
+    except subprocess.TimeoutExpired:
+        state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded")
+        return
     if shallow.returncode != 0:
         state.add_coverage("git-history", "tool_failed", "git-repository-unavailable")
         return
     if shallow.stdout.strip().lower() == "true":
         state.add_coverage("git-history", "unreadable", "shallow-history")
         return
-    objects = run(["git", "rev-list", "--objects", "--all"], source, text=False)
+    try:
+        objects = run(
+            ["git", "rev-list", "--objects", "--all"],
+            source,
+            text=False,
+            timeout_seconds=max(1, time_limit_seconds) if time_limit_seconds is not None else None,
+        )
+    except subprocess.TimeoutExpired:
+        state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded")
+        return
     if objects.returncode != 0:
         state.add_coverage("git-history", "tool_failed", "git-object-enumeration-failed")
         return
@@ -1474,104 +1602,177 @@ def scan_git_history(state: ScanState, source: Path, *, time_limit_seconds: int 
         path = path_raw.decode("utf-8", errors="replace") if separator else ""
         if oid:
             object_entries.append((oid, path))
-    try:
-        process = subprocess.Popen(
-            ["git", "cat-file", "--batch"],
-            cwd=str(source),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert process.stdin is not None and process.stdout is not None
-        blob_count = 0
-        completed = True
-        for oid, path in object_entries:
-            if time_limit_seconds is not None and time.monotonic() - started > time_limit_seconds:
-                state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded", blob_count)
-                completed = False
-                break
-            process.stdin.write(f"{oid}\n".encode("ascii"))
-            process.stdin.flush()
-            header = process.stdout.readline().decode("ascii", errors="replace").strip()
-            parts = header.split()
-            if len(parts) < 3 or parts[1] == "missing":
-                state.add_coverage("git-history", "unreadable", f"git-object-unreadable:{oid}")
-                continue
-            object_type, size_text = parts[1], parts[2]
-            try:
-                size = int(size_text)
-            except ValueError:
-                state.add_coverage("git-history", "tool_failed", f"git-object-header-invalid:{oid}")
-                continue
-            content = process.stdout.read(size)
-            process.stdout.read(1)
-            if object_type in {"commit", "tag"}:
-                scan_text(
-                    state,
-                    content.decode("utf-8", errors="replace"),
-                    surface="git-metadata",
-                    object_id=f"git-{object_type}:{oid}",
-                    display_path=f"git-{object_type}:{oid[:12]}",
-                )
-                continue
-            if object_type != "blob":
-                continue
-            blob_count += 1
-            display = path or f"blob-{oid[:12]}"
-            scan_bytes(
-                state,
-                content,
-                surface="git-history",
-                object_id=f"git:{oid}:{display}",
-                display_path=display,
-            )
-        process.stdin.close()
-        if not completed:
-            process.terminate()
-        process.wait(timeout=30)
-        process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
-        if not completed:
+    binding = history_checkpoint_binding(state, source, objects.stdout, len(object_entries))
+    resolved_checkpoint = (
+        ensure_private_path(checkpoint_path or default_history_checkpoint_path(binding))
+        if checkpoint_path is not None or time_limit_seconds is not None
+        else None
+    )
+    phase, next_object_index, blob_count = "objects", 0, 0
+    resumed = False
+    if resolved_checkpoint is not None and resolved_checkpoint.exists():
+        try:
+            document = json.loads(resolved_checkpoint.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state.add_coverage("git-history", "tool_failed", "git-history-checkpoint-invalid")
             return
-        # Commit authors, committers, and messages are separate sensitive surfaces from file blobs.
-        log = run(
-            ["git", "log", "--all", "-z", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x00%x1e"],
+        if (
+            document.get("history_checkpoint_schema_version") != HISTORY_CHECKPOINT_SCHEMA_VERSION
+            or document.get("binding") != binding
+        ):
+            state.add_coverage("git-history", "tool_failed", "git-history-checkpoint-binding-mismatch")
+            return
+        try:
+            phase, next_object_index, blob_count = restore_history_checkpoint(history_state, document)
+        except (TypeError, ValueError, KeyError):
+            state.add_coverage("git-history", "tool_failed", "git-history-checkpoint-invalid")
+            return
+        if next_object_index > len(object_entries) or phase not in {"objects", "refs", "complete"}:
+            state.add_coverage("git-history", "tool_failed", "git-history-checkpoint-invalid")
+            return
+        resumed = True
+    state.history_progress = {
+        "status": "complete" if phase == "complete" else "in_progress",
+        "processed_object_count": next_object_index,
+        "total_object_count": len(object_entries),
+        "resumed": resumed,
+    }
+    if phase == "complete":
+        merge_scan_state(state, history_state)
+        return
+
+    def save_checkpoint(current_phase: str, current_index: int) -> None:
+        if resolved_checkpoint is None:
+            return
+        write_json(
+            resolved_checkpoint,
+            history_checkpoint_document(
+                history_state,
+                binding,
+                phase=current_phase,
+                next_object_index=current_index,
+                blob_count=blob_count,
+            ),
+            private=True,
+        )
+        state.history_progress = {
+            "status": "complete" if current_phase == "complete" else "in_progress",
+            "processed_object_count": current_index,
+            "total_object_count": len(object_entries),
+            "resumed": resumed,
+        }
+
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        if phase == "objects":
+            process = subprocess.Popen(
+                ["git", "cat-file", "--batch"],
+                cwd=str(source),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert process.stdin is not None and process.stdout is not None
+            for index in range(next_object_index, len(object_entries)):
+                if time_exceeded():
+                    save_checkpoint("objects", index)
+                    history_state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded", blob_count)
+                    merge_scan_state(state, history_state)
+                    return
+                oid, path = object_entries[index]
+                process.stdin.write(f"{oid}\n".encode("ascii"))
+                process.stdin.flush()
+                header = process.stdout.readline().decode("ascii", errors="replace").strip()
+                parts = header.split()
+                if len(parts) < 3 or parts[1] == "missing":
+                    history_state.add_coverage("git-history", "unreadable", f"git-object-unreadable:{oid}")
+                else:
+                    object_type, size_text = parts[1], parts[2]
+                    try:
+                        size = int(size_text)
+                    except ValueError:
+                        history_state.add_coverage("git-history", "tool_failed", f"git-object-header-invalid:{oid}")
+                        size = 0
+                    content = process.stdout.read(size)
+                    process.stdout.read(1)
+                    if object_type in {"commit", "tag"}:
+                        scan_text(
+                            history_state,
+                            content.decode("utf-8", errors="replace"),
+                            surface="git-metadata",
+                            object_id=f"git-{object_type}:{oid}",
+                            display_path=f"git-{object_type}:{oid[:12]}",
+                        )
+                    elif object_type == "blob":
+                        blob_count += 1
+                        display = path or f"blob-{oid[:12]}"
+                        scan_bytes(
+                            history_state,
+                            content,
+                            surface="git-history",
+                            object_id=f"git:{oid}:{display}",
+                            display_path=display,
+                        )
+                next_object_index = index + 1
+                if checkpoint_interval > 0 and next_object_index % checkpoint_interval == 0:
+                    save_checkpoint("objects", next_object_index)
+            process.stdin.close()
+            process.wait(timeout=30)
+            process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            process = None
+            phase = "refs"
+            save_checkpoint(phase, len(object_entries))
+        if time_exceeded():
+            history_state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded", blob_count)
+            merge_scan_state(state, history_state)
+            return
+        history_state.coverage = [
+            item for item in history_state.coverage if not item.reason.startswith("git-ref-enumeration-")
+        ]
+        remaining_seconds = None
+        if time_limit_seconds is not None:
+            remaining_seconds = max(1, int(time_limit_seconds - (time.monotonic() - started)))
+        coverage_before_refs = len(history_state.coverage)
+        scan_git_refs(history_state, source, timeout_seconds=remaining_seconds)
+        ref_coverage = history_state.coverage[coverage_before_refs:]
+        if any(item.status not in {"checked", "not_present"} for item in ref_coverage):
+            save_checkpoint("refs", len(object_entries))
+            merge_scan_state(state, history_state)
+            return
+        history_state.add_coverage("git-history", "checked", object_count=blob_count)
+        save_checkpoint("complete", len(object_entries))
+        merge_scan_state(state, history_state)
+    except (OSError, subprocess.SubprocessError, AssertionError):
+        if process is not None:
+            process.kill()
+        history_state.add_coverage("git-history", "tool_failed", "git-cat-file-failed")
+        merge_scan_state(state, history_state)
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=30)
+            except subprocess.SubprocessError:
+                pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+
+
+def scan_git_refs(state: ScanState, source: Path, *, timeout_seconds: int | None = None) -> None:
+    try:
+        refs = run(
+            ["git", "for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(taggername)%00%(taggeremail)%00%(contents)%00%1e"],
             source,
             text=False,
+            timeout_seconds=timeout_seconds,
         )
-        if log.returncode != 0:
-            state.add_coverage("git-history", "tool_failed", "git-commit-metadata-enumeration-failed")
-        else:
-            for record in log.stdout.split(b"\x1e\x00"):
-                fields = record.strip(b"\x00").split(b"\x00", 5)
-                if len(fields) != 6:
-                    continue
-                commit, author_name, author_email, committer_name, committer_email, message = fields
-                commit_id = commit.decode("ascii", errors="ignore")
-                values = (
-                    ("author-name", author_name),
-                    ("author-email", author_email),
-                    ("committer-name", committer_name),
-                    ("committer-email", committer_email),
-                    ("message", message),
-                )
-                for field_name, raw_value in values:
-                    scan_text(
-                        state,
-                        raw_value.decode("utf-8", errors="replace"),
-                        surface="git-history",
-                        object_id=f"git-commit:{commit_id}:{field_name}",
-                        display_path=f"git-commit:{commit_id}:{field_name}",
-                    )
-        state.add_coverage("git-history", "checked", object_count=blob_count)
-        scan_git_refs(state, source)
-    except (OSError, subprocess.SubprocessError, AssertionError):
-        state.add_coverage("git-history", "tool_failed", "git-cat-file-failed")
-
-
-def scan_git_refs(state: ScanState, source: Path) -> None:
-    refs = run(["git", "for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(taggername)%00%(taggeremail)%00%(contents)%00%1e"], source, text=False)
+    except subprocess.TimeoutExpired:
+        state.add_coverage("git-metadata", "tool_failed", "git-ref-enumeration-time-limit-exceeded")
+        return
     if refs.returncode != 0:
         state.add_coverage("git-metadata", "tool_failed", "git-ref-enumeration-failed")
         return
@@ -1962,6 +2163,11 @@ def gate_report(
             "python": platform.python_version(),
         },
         "policy_fingerprint": policy_fingerprint(policy),
+        "history_progress": (
+            {key: value for key, value in state.history_progress.items() if key != "resumed"}
+            if state.history_progress is not None
+            else None
+        ),
         "coverage": coverage,
         "findings": findings,
         "summary": {
@@ -2023,7 +2229,17 @@ def command_gate(args: argparse.Namespace) -> int:
         state.add_coverage("working-tree", "unreadable", "source-directory-unavailable")
     else:
         scan_working_tree(state, source)
-        scan_git_history(state, source)
+        scan_git_history(
+            state,
+            source,
+            time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
+            checkpoint_path=(
+                Path(args.git_history_checkpoint).expanduser().resolve()
+                if getattr(args, "git_history_checkpoint", None)
+                else None
+            ),
+            checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
+        )
         scan_submodules(state, source)
         scan_lfs(state, source)
         run_gitleaks(state, source, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
@@ -2049,6 +2265,7 @@ def command_gate(args: argparse.Namespace) -> int:
                 "scanner_sha256": report["scanner_versions"]["safe_publish_sha256"],
                 "policy_fingerprint": report["policy_fingerprint"],
                 "report_fingerprint": report["report_fingerprint"],
+                "history_progress": report["history_progress"],
                 "summary": report["summary"],
             },
         )
@@ -2232,7 +2449,24 @@ def copy_worktree_candidate(source: Path, base_commit: str, destination: Path) -
 def run_validation_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
     """Run a caller-approved validation while retaining only status and duration."""
     started = time.monotonic()
-    shell_command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command] if os.name == "nt" else ["bash", "-lc", command]
+    if os.name == "nt":
+        powershell_script = (
+            "$global:LASTEXITCODE = 0; "
+            "$script:validationSucceeded = $true; "
+            "$script:validationExitCode = 0; "
+            f"& {{ {command}; "
+            "$script:validationSucceeded = $?; "
+            "$script:validationExitCode = $LASTEXITCODE }; "
+            "if (-not $validationSucceeded) { "
+            "if ($validationExitCode -is [int] -and $validationExitCode -ne 0) { exit $validationExitCode }; "
+            "exit 1 }; "
+            "if ($validationExitCode -is [int]) { exit $validationExitCode }; "
+            "exit 0"
+        )
+        encoded = base64.b64encode(powershell_script.encode("utf-16-le")).decode("ascii")
+        shell_command = ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+    else:
+        shell_command = ["bash", "-lc", command]
     try:
         result = run(shell_command, cwd, timeout_seconds=timeout_seconds)
         status = "pass" if result.returncode == 0 else "fail"
@@ -2372,6 +2606,9 @@ def command_managed_publish(args: argparse.Namespace) -> int:
         source=str(candidate), repository=args.repository, policy=args.policy, policy_b64_env=None,
         generic_only=False, release_asset=args.release_asset, gitleaks_path=str(gitleaks_binary),
         release_profile=args.release_profile, report=str(report_path), public_summary=args.public_summary,
+        git_history_checkpoint=str(output_dir / "git-history-checkpoint.private.json"),
+        git_history_time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
+        git_history_checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
     )
     gate_exit = command_gate(gate_args)
     gate_document = json.loads(report_path.read_text(encoding="utf-8"))
@@ -3790,6 +4027,9 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--release-asset", action="append", default=[])
     gate.add_argument("--gitleaks-path")
     gate.add_argument("--release-profile", choices=tuple(sorted(RELEASE_PROFILES)), default="permissive-noncritical")
+    gate.add_argument("--git-history-checkpoint")
+    gate.add_argument("--git-history-time-limit-seconds", type=int, default=DEFAULT_GATE_HISTORY_BUDGET_SECONDS)
+    gate.add_argument("--git-history-checkpoint-interval", type=int, default=DEFAULT_HISTORY_CHECKPOINT_INTERVAL)
     gate.add_argument("--report", required=True)
     gate.add_argument("--public-summary")
     gate.set_defaults(handler=command_gate)
@@ -3821,6 +4061,8 @@ def build_parser() -> argparse.ArgumentParser:
     managed.add_argument("--release-asset", action="append", default=[])
     managed.add_argument("--gitleaks-path")
     managed.add_argument("--release-profile", choices=tuple(sorted(RELEASE_PROFILES)), default="permissive-noncritical")
+    managed.add_argument("--git-history-time-limit-seconds", type=int, default=DEFAULT_GATE_HISTORY_BUDGET_SECONDS)
+    managed.add_argument("--git-history-checkpoint-interval", type=int, default=DEFAULT_HISTORY_CHECKPOINT_INTERVAL)
     managed.add_argument("--resume", action="store_true")
     managed.set_defaults(handler=command_managed_publish)
     return parser

@@ -12,6 +12,7 @@ Use one private policy and two explicit decisions across Agents: a strict audit 
 - Invoke this Skill as soon as a task may transfer repository content or artifacts to GitHub
 - Loading the Skill never authorizes a write
 - Before a write, create an isolated copy from the exact source commit and run `gate` against its working tree, visible Git history, LFS entities, submodules, and proposed Release assets
+- Exact gates limit each Git-history slice to 900 seconds by default and save a private resumable checkpoint. Resume only when the repository, source commit, complete object inventory, scanner, and policy bindings still match
 - Read both results from the exact copy: `decision` remains the strict audit result, while `publication_decision` controls the separately authorized write
 - The default `permissive-noncritical` profile continues only for `allow` or `allow_with_risk`; `deny` stops the write
 - Use the `strict` profile for high-sensitivity repositories, incident response, or final red-team review; it permits only a strict audit `pass`
@@ -49,6 +50,8 @@ Inspect Git reference names, annotated tags, notes, author and committer data, s
 Apply Unicode normalization and bounded decoding only as declared by the private policy. Never turn generic name recognition into an automatic replacement rule
 
 Unsupported formats, missing parsers, encrypted or oversized objects, missing LFS data, incomplete history, pagination failure, permission denial, and unavailable declared surfaces still produce the strict audit result `incomplete`
+
+A Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
 
 For exact publication, failures in the working tree, Git history, LFS, submodules, proposed Release assets, private policy, or Gitleaks remain critical and produce publication `deny`. A declared auxiliary remote surface that is not transferred by the exact publication may produce `allow_with_risk`
 

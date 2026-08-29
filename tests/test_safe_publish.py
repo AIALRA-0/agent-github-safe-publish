@@ -583,6 +583,25 @@ class ArtifactTests(unittest.TestCase):
 
 
 class RepositoryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows validation exit propagation")
+    def test_windows_validation_propagates_native_exit_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            failed = subject.run_validation_command('cmd.exe /d /s /c "exit 7"', cwd, 30)
+            passed = subject.run_validation_command('cmd.exe /d /s /c "exit 0"', cwd, 30)
+            powershell_failed = subject.run_validation_command(
+                "Write-Error 'synthetic validation failure'",
+                cwd,
+                30,
+            )
+
+        self.assertEqual("fail", failed["status"])
+        self.assertEqual(7, failed["exit_code"])
+        self.assertEqual("pass", passed["status"])
+        self.assertEqual(0, passed["exit_code"])
+        self.assertEqual("fail", powershell_failed["status"])
+        self.assertEqual(1, powershell_failed["exit_code"])
+
     def test_gitleaks_object_binding_uses_stable_blob_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
@@ -964,6 +983,77 @@ class RepositoryTests(unittest.TestCase):
             subject.scan_git_history(bounded_state, repository, time_limit_seconds=0)
             self.assertTrue(any(item.reason == "git-history-time-limit-exceeded" for item in bounded_state.coverage))
             self.assertEqual("incomplete", subject.decision_for(bounded_state))
+
+    def test_full_history_checkpoint_resumes_and_rejects_changed_bindings(self) -> None:
+        marker = "SYNTHETIC_CHECKPOINT_SECRET_7391"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "history"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "secret.txt").write_text("password=" + marker + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "secret.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "add resumable fixture"], cwd=repository, check=True, capture_output=True)
+
+            codex_home = root / "cold"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "history.private.json"
+            previous_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                partial = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                subject.scan_git_history(
+                    partial,
+                    repository,
+                    time_limit_seconds=0,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+                self.assertEqual("incomplete", subject.decision_for(partial))
+                self.assertEqual("deny", subject.publication_decision_for(partial))
+                self.assertTrue(checkpoint.is_file())
+                checkpoint_text = checkpoint.read_text(encoding="utf-8")
+                self.assertNotIn(marker, checkpoint_text)
+                self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")), checkpoint_text)
+
+                resumed = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                subject.scan_git_history(
+                    resumed,
+                    repository,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+                self.assertEqual("complete", resumed.history_progress["status"])
+                self.assertTrue(resumed.history_progress["resumed"])
+                self.assertTrue(any(item.rule_id == "credential.assignment" for item in resumed.findings))
+                self.assertFalse(any(item.reason == "git-history-time-limit-exceeded" for item in resumed.coverage))
+
+                one_shot = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                subject.scan_git_history(one_shot, repository)
+                normalized = lambda state: sorted(
+                    (item.surface, item.object, item.location, item.rule_id, item.status) for item in state.findings
+                )
+                self.assertEqual(normalized(one_shot), normalized(resumed))
+
+                reused = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                subject.scan_git_history(reused, repository, checkpoint_path=checkpoint)
+                self.assertEqual(normalized(resumed), normalized(reused))
+                self.assertEqual("complete", reused.history_progress["status"])
+
+                (repository / "changed.txt").write_text("changed\n", encoding="utf-8")
+                subprocess.run(["git", "add", "changed.txt"], cwd=repository, check=True)
+                subprocess.run(["git", "commit", "-m", "change binding"], cwd=repository, check=True, capture_output=True)
+                stale = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                subject.scan_git_history(stale, repository, checkpoint_path=checkpoint)
+                self.assertTrue(any(item.reason == "git-history-checkpoint-binding-mismatch" for item in stale.coverage))
+                self.assertEqual("incomplete", subject.decision_for(stale))
+                self.assertEqual("deny", subject.publication_decision_for(stale))
+            finally:
+                if previous_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous_codex_home
 
     def test_gitleaks_detects_a_runtime_generated_credential(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
