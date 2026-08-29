@@ -12,11 +12,11 @@ When the remote default branch changes, stop the run, create a new isolated cand
 
 Never rebase an already gated candidate and reuse its prior decision
 
-## 3 Git-history slices
+## 3 Working-tree and Git-history slices
 
-An exact gate saves Git-history progress after bounded object intervals and again when its time budget expires. Rerun the same command with the same checkpoint to continue from the saved object index
+An exact gate saves working-tree and Git-history progress in separate private checkpoints after bounded object intervals and again when either time budget expires. Rerun the same command with the same checkpoints to continue from the saved object indexes
 
-The scanner re-enumerates the complete visible object inventory before every resume. A changed source commit, object inventory, scanner, policy, repository name, checkpoint schema, or candidate mode makes the checkpoint stale and returns `incomplete` plus publication `deny`
+The scanner re-enumerates the complete visible inventory before every resume. Working-tree bindings include path and content digests; history bindings include the visible Git object inventory. A changed source commit, inventory, scanner, policy, repository name, checkpoint schema, or candidate mode makes the affected checkpoint stale and returns `incomplete` plus publication `deny`
 
 Do not overwrite a stale explicit checkpoint. Keep it as private evidence and select a new private checkpoint path for the changed publication candidate
 

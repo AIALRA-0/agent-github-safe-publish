@@ -362,7 +362,7 @@ class PublicationDecisionTests(unittest.TestCase):
             }
         ]
 
-        def scan_working_tree(state: subject.ScanState, source: Path) -> None:
+        def scan_working_tree(state: subject.ScanState, source: Path, **kwargs: object) -> None:
             subject.scan_text(state, content, surface="working-tree", object_id=object_id, display_path="README.md")
             state.add_coverage("working-tree", "checked", object_count=1)
 
@@ -983,6 +983,73 @@ class RepositoryTests(unittest.TestCase):
             subject.scan_git_history(bounded_state, repository, time_limit_seconds=0)
             self.assertTrue(any(item.reason == "git-history-time-limit-exceeded" for item in bounded_state.coverage))
             self.assertEqual("incomplete", subject.decision_for(bounded_state))
+
+    def test_working_tree_checkpoint_resumes_and_rejects_changed_bindings(self) -> None:
+        marker = "SYNTHETIC_WORKTREE_CHECKPOINT_SECRET_8127"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "worktree"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "secret.txt").write_text("password=" + marker + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "secret.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "add resumable worktree fixture"], cwd=repository, check=True, capture_output=True)
+
+            codex_home = root / "cold"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "worktree.private.json"
+            previous_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                partial = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
+                subject.scan_working_tree(
+                    partial,
+                    repository,
+                    time_limit_seconds=0,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+                self.assertEqual("incomplete", subject.decision_for(partial))
+                self.assertEqual("deny", subject.publication_decision_for(partial))
+                self.assertTrue(checkpoint.is_file())
+                checkpoint_before_resume = checkpoint.read_bytes()
+                checkpoint_text = checkpoint_before_resume.decode("utf-8")
+                self.assertNotIn(marker, checkpoint_text)
+                self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")), checkpoint_text)
+
+                resumed = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
+                subject.scan_working_tree(
+                    resumed,
+                    repository,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+                self.assertEqual("complete", resumed.worktree_progress["status"])
+                self.assertTrue(resumed.worktree_progress["resumed"])
+                self.assertTrue(any(item.rule_id == "credential.assignment" for item in resumed.findings))
+                self.assertFalse(any(item.reason == "working-tree-time-limit-exceeded" for item in resumed.coverage))
+
+                one_shot = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
+                subject.scan_working_tree(one_shot, repository)
+                normalized = lambda state: sorted(
+                    (item.surface, item.object, item.location, item.rule_id, item.status) for item in state.findings
+                )
+                self.assertEqual(normalized(one_shot), normalized(resumed))
+
+                completed_checkpoint = checkpoint.read_bytes()
+                (repository / "secret.txt").write_text("password=" + marker + "-changed\n", encoding="utf-8")
+                stale = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
+                subject.scan_working_tree(stale, repository, checkpoint_path=checkpoint)
+                self.assertTrue(any(item.reason == "working-tree-checkpoint-binding-mismatch" for item in stale.coverage))
+                self.assertEqual("incomplete", subject.decision_for(stale))
+                self.assertEqual("deny", subject.publication_decision_for(stale))
+                self.assertEqual(completed_checkpoint, checkpoint.read_bytes())
+            finally:
+                if previous_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous_codex_home
 
     def test_full_history_checkpoint_resumes_and_rejects_changed_bindings(self) -> None:
         marker = "SYNTHETIC_CHECKPOINT_SECRET_7391"
