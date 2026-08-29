@@ -6,7 +6,7 @@
 
 </div>
 
-# GitHub 安全发布
+<h1 align="center">GitHub 安全发布</h1>
 
 <p align="center"><strong>让每个 Agent 在上传 GitHub 前执行同一套脱敏、覆盖检查和停止条件</strong></p>
 
@@ -129,7 +129,7 @@ python -X utf8 scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMI
 - 第六步，检查隔离副本和拟发布附件：
 
 ```powershell
-python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # allow 和 allow_with_risk 返回成功，deny 停止发布
+python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # 单轮超时会保存进度并拒绝发布，相同输入再次运行会接着检查
 ```
 
 - 第七步，只读检查当前仓库需要的运行组件：
@@ -145,6 +145,8 @@ python -X utf8 scripts/safe_publish.py managed-publish --source . --repository E
 ```
 
 托管流程、运行环境和恢复边界分别见 [`managed-publish.md`](references/managed-publish.md)、[`runtime.md`](references/runtime.md) 和 [`recovery.md`](references/recovery.md)
+
+Windows 上的项目验证会把内部程序的退出码原样交回；内部程序返回非零结果或 PowerShell 命令报错时，托管发布必须停止，不能把失败误判为通过
 
 ## 5 覆盖范围
 
@@ -174,6 +176,10 @@ python -X utf8 scripts/safe_publish.py managed-publish --source . --repository E
 - 本机二进制：检查格式属性、可打印字符串和调试路径；解析器失败时返回 `incomplete`
 
 每个仓库的图片 OCR 默认最多运行 300 秒；超过预算后继续检查元数据、二维码和条形码，但像素层记为 `incomplete`；受信任本地运行可用 `SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS` 调整预算
+
+精确门禁的 Git 全历史默认每轮最多运行 900 秒，并把已脱敏发现、覆盖状态和下一个对象位置原子写入私有检查点。相同仓库、源提交、完整对象清单、扫描器和策略再次运行时从断点继续；任一绑定变化都返回 `incomplete` 和 `deny`，不会覆盖旧证据
+
+检查点默认保存在 `CODEX_HOME/private/github-safe-publish/history-checkpoints/`。需要统一写入冷存储时，先把 `CODEX_HOME` 指向批准的冷存储根目录，或显式传入该目录下的 `--git-history-checkpoint`
 
 本机会话文件在独立子进程中扫描，单文件默认最多运行 600 秒；子进程崩溃或超时只隔离该文件并返回 `incomplete`，不会终止整个审计；Gitleaks 自带 300 秒扫描限制，父进程另设 330 秒硬超时
 

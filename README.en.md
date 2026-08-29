@@ -6,7 +6,7 @@
 
 </div>
 
-# GitHub Safe Publish
+<h1 align="center">GitHub Safe Publish</h1>
 
 <p align="center"><strong>Give every Agent the same redaction, coverage, and stopping rules before any GitHub upload</strong></p>
 
@@ -118,7 +118,7 @@ Create and gate a disposable publication copy:
 
 ```powershell
 python -X utf8 scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMIT> --destination ..\example-publication-copy --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --mode preserve-history --report "$env:CODEX_HOME/private/github-safe-publish/prepare.private.json" # Preserves existing public history for an update
-python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # allow and allow_with_risk succeed while deny stops publication
+python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # A bounded slice saves progress and denies publication; an identical rerun resumes
 ```
 
 Run the read-only runtime diagnosis for the current repository:
@@ -134,6 +134,8 @@ python -X utf8 scripts/safe_publish.py managed-publish --source . --repository E
 ```
 
 See [`managed-publish.md`](references/managed-publish.md), [`runtime.md`](references/runtime.md), and [`recovery.md`](references/recovery.md) for the orchestration, runtime, and recovery contracts
+
+On Windows, project validation propagates the inner process exit code. A nonzero native exit or a PowerShell command error stops managed publication instead of being reported as a pass
 
 ## 5 Coverage
 
@@ -165,6 +167,10 @@ Content signatures and extensions jointly select the analyzer
 Image OCR receives a 300-second budget per repository by default; after the budget, metadata, QR, and barcode checks continue while the pixel layer becomes `incomplete`; a trusted local run may change the budget with `SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS`
 
 Each local session file runs in an isolated child process with a 600-second default budget. A child crash or timeout isolates only that file and returns `incomplete` instead of terminating the fleet. Gitleaks keeps its 300-second internal limit and receives a 330-second parent-process hard timeout
+
+An exact gate limits Git-history work to 900 seconds per run by default and atomically saves redacted findings, coverage, and the next object position in a private checkpoint. An identical repository, source commit, complete object inventory, scanner, and policy resumes from that point. Any changed binding returns `incomplete` and `deny` without overwriting the old evidence
+
+The default checkpoint location is below `CODEX_HOME/private/github-safe-publish/history-checkpoints/`. Point `CODEX_HOME` at an approved cold-storage root, or pass an explicit `--git-history-checkpoint` below that private root, when evidence must stay in cold storage
 
 ### 5.3 Repository-associated GitHub surfaces
 

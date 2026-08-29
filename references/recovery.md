@@ -12,13 +12,21 @@ When the remote default branch changes, stop the run, create a new isolated cand
 
 Never rebase an already gated candidate and reuse its prior decision
 
-## 3 Failed remote action
+## 3 Git-history slices
+
+An exact gate saves Git-history progress after bounded object intervals and again when its time budget expires. Rerun the same command with the same checkpoint to continue from the saved object index
+
+The scanner re-enumerates the complete visible object inventory before every resume. A changed source commit, object inventory, scanner, policy, repository name, checkpoint schema, or candidate mode makes the checkpoint stale and returns `incomplete` plus publication `deny`
+
+Do not overwrite a stale explicit checkpoint. Keep it as private evidence and select a new private checkpoint path for the changed publication candidate
+
+## 4 Failed remote action
 
 A failed branch push, pull-request creation, status check, tree comparison, or merge leaves the checkpoint outside the repository
 
 Do not force-push or use administrator bypass. Inspect the checkpoint state, repair the external condition, then resume only if all bound fingerprints remain unchanged
 
-## 4 Incident
+## 5 Incident
 
 A detected credential or private identifier stops publication. Rotate a credential before repository cleanup when it may have been valid or previously public
 

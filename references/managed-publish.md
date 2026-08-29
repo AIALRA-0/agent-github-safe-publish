@@ -25,6 +25,8 @@ The private checkpoint binds the base commit, candidate Git tree object, candida
 
 The command never pushes directly to the default branch and never uses an administrator bypass
 
+On Windows, validation runs through a noninteractive PowerShell wrapper that returns the inner native exit code. A PowerShell command failure without a native exit code returns `1`
+
 ## 4 Auto-merge boundary
 
 Auto-merge requires a strict `allow`, complete project and README validation, an unchanged remote base, an exact remote tree match, and required status checks enforced by branch protection or an active ruleset
