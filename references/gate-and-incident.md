@@ -24,6 +24,10 @@ Git scanning covers blob history, author and committer metadata, messages, refer
 
 Exact gates bound working-tree and Git-history work to separate 900-second slices per run by default. When either budget expires, the scanner writes a private atomic checkpoint and returns `incomplete` plus publication `deny`. Each checkpoint stores only redacted findings, coverage, object digests, and the next object index; it never stores matched values or matched-value hashes
 
+When a working-tree slice expires, the gate defers Git history, LFS, submodules, and Gitleaks until an identical resume completes the working-tree checkpoint. This prevents every partial working-tree slice from repeating later expensive surfaces while preserving fail-closed publication behavior
+
+Positive working-tree budgets run the slice in an isolated child process. The parent terminates the child at the declared deadline, restores only an atomically completed private checkpoint, and returns `incomplete` plus publication `deny`. A child crash, missing result, or malformed result also fails closed
+
 Working-tree resume additionally binds the complete path-and-content inventory digest and count. Git-history resume binds the complete Git object inventory digest and count. Both require the repository name, source commit, scanner digest, private policy fingerprint, and raw-candidate mode to match exactly. Invalid or mismatched checkpoints fail closed and are not overwritten
 
 ## 3 Credential incident

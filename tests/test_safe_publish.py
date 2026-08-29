@@ -411,6 +411,46 @@ class PublicationDecisionTests(unittest.TestCase):
             self.assertNotIn("infrastructure.url", public_text)
             self.assertNotIn("docs.example.com", public_text)
 
+    def test_gate_defers_later_surfaces_until_worktree_slice_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            report_path = root / "gate.private.json"
+            args = subject.argparse.Namespace(
+                source=str(source),
+                repository="ExampleOrg/example",
+                policy=str(root / "policy.private.json"),
+                policy_b64_env=None,
+                generic_only=False,
+                release_asset=[],
+                gitleaks_path=None,
+                release_profile="permissive-noncritical",
+                report=str(report_path),
+                public_summary=None,
+            )
+
+            def timed_out_worktree(state: subject.ScanState, source_path: Path, **kwargs: object) -> None:
+                state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded")
+
+            with (
+                mock.patch.object(subject, "load_policy", return_value=subject.empty_policy()),
+                mock.patch.object(subject, "scan_working_tree", side_effect=timed_out_worktree),
+                mock.patch.object(subject, "scan_git_history") as history,
+                mock.patch.object(subject, "scan_submodules") as submodules,
+                mock.patch.object(subject, "scan_lfs") as lfs,
+                mock.patch.object(subject, "run_gitleaks") as gitleaks,
+            ):
+                self.assertEqual(3, subject.command_gate(args))
+
+            history.assert_not_called()
+            submodules.assert_not_called()
+            lfs.assert_not_called()
+            gitleaks.assert_not_called()
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual("incomplete", report["decision"])
+            self.assertEqual("deny", report["publication_decision"])
+
 
 class ArtifactTests(unittest.TestCase):
     def test_barcode_result_normalizes_three_and_four_value_opencv_abis(self) -> None:
@@ -1022,6 +1062,7 @@ class RepositoryTests(unittest.TestCase):
                 subject.scan_working_tree(
                     resumed,
                     repository,
+                    time_limit_seconds=10,
                     checkpoint_path=checkpoint,
                     checkpoint_interval=1,
                 )
