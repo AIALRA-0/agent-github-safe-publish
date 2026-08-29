@@ -22,9 +22,9 @@ The pinned Gitleaks binary must detect a runtime-generated synthetic credential 
 
 Git scanning covers blob history, author and committer metadata, messages, reference names, annotated tag payloads, notes, and signature payloads. Legal provenance and third-party attribution remain review-only and are never rewritten automatically
 
-Exact gates bound Git-history work to 900 seconds per run by default. When the budget expires, the scanner writes a private atomic checkpoint and returns `incomplete` plus publication `deny`. The checkpoint stores only redacted findings, coverage, object digests, and the next object index; it never stores matched values or matched-value hashes
+Exact gates bound working-tree and Git-history work to separate 900-second slices per run by default. When either budget expires, the scanner writes a private atomic checkpoint and returns `incomplete` plus publication `deny`. Each checkpoint stores only redacted findings, coverage, object digests, and the next object index; it never stores matched values or matched-value hashes
 
-Resume is allowed only when the repository name, source commit, complete Git object inventory digest and count, scanner digest, private policy fingerprint, and raw-candidate mode match exactly. Invalid or mismatched checkpoints fail closed and are not overwritten
+Working-tree resume additionally binds the complete path-and-content inventory digest and count. Git-history resume binds the complete Git object inventory digest and count. Both require the repository name, source commit, scanner digest, private policy fingerprint, and raw-candidate mode to match exactly. Invalid or mismatched checkpoints fail closed and are not overwritten
 
 ## 3 Credential incident
 

@@ -129,7 +129,7 @@ python -X utf8 scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMI
 - 第六步，检查隔离副本和拟发布附件：
 
 ```powershell
-python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # 单轮超时会保存进度并拒绝发布，相同输入再次运行会接着检查
+python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --worktree-time-limit-seconds 900 --worktree-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.worktree.private.json" --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # 工作树或历史单轮超时都会保存进度并拒绝发布，相同输入再次运行会接着检查
 ```
 
 - 第七步，只读检查当前仓库需要的运行组件：
@@ -179,7 +179,7 @@ Windows 上的项目验证会把内部程序的退出码原样交回；内部程
 
 精确门禁的 Git 全历史默认每轮最多运行 900 秒，并把已脱敏发现、覆盖状态和下一个对象位置原子写入私有检查点。相同仓库、源提交、完整对象清单、扫描器和策略再次运行时从断点继续；任一绑定变化都返回 `incomplete` 和 `deny`，不会覆盖旧证据
 
-检查点默认保存在 `CODEX_HOME/private/github-safe-publish/history-checkpoints/`。需要统一写入冷存储时，先把 `CODEX_HOME` 指向批准的冷存储根目录，或显式传入该目录下的 `--git-history-checkpoint`
+工作树与 Git 历史检查点默认分别保存在 `CODEX_HOME/private/github-safe-publish/worktree-checkpoints/` 和 `CODEX_HOME/private/github-safe-publish/history-checkpoints/`。需要统一写入冷存储时，先把 `CODEX_HOME` 指向批准的冷存储根目录，或显式传入该目录下的 `--worktree-checkpoint` 与 `--git-history-checkpoint`
 
 本机会话文件在独立子进程中扫描，单文件默认最多运行 600 秒；子进程崩溃或超时只隔离该文件并返回 `incomplete`，不会终止整个审计；Gitleaks 自带 300 秒扫描限制，父进程另设 330 秒硬超时
 

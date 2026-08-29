@@ -12,7 +12,7 @@ The caller supplies the source repository, GitHub repository name, current base 
 
 The private checkpoint binds the base commit, candidate Git tree object, candidate index SHA-256, binary patch SHA-256, scanner SHA-256, policy fingerprint, report fingerprint, and validation outcomes
 
-`--resume` may reuse only the isolated candidate in the same private output directory. A changed source base, policy, scanner, or candidate produces a new fingerprint and requires a new gate
+`--resume` may reuse only the isolated candidate and its separately bound working-tree and Git-history checkpoints in the same private output directory. A changed source base, policy, scanner, candidate, or complete inventory produces a new fingerprint and requires a new gate
 
 ## 3 Publication decisions
 
