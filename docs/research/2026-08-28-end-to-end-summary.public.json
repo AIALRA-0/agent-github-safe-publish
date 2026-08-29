@@ -1,0 +1,70 @@
+{
+  "as_of": "2026-08-28",
+  "decision": "incomplete",
+  "dual_decision_implementation": {
+    "automated_test_count": 52,
+    "automated_test_status": "passed",
+    "installed_skill_validation": "passed",
+    "policy_schema_version": 3,
+    "publication_decisions": [
+      "allow",
+      "allow_with_risk",
+      "deny"
+    ],
+    "readme_repository_audit": "passed",
+    "release_profile": "permissive-noncritical",
+    "scanner_sha256": "f1299e69fdd91b8bcbcfa75795d730bc81e9f706628b0d6df0e890dad2e31e01",
+    "strict_audit_decisions": [
+      "pass",
+      "review",
+      "block",
+      "incomplete"
+    ]
+  },
+  "fleet": {
+    "candidate_count": 24792,
+    "decision_counts": {
+      "block": 0,
+      "incomplete": 97,
+      "pass": 0,
+      "review": 0
+    },
+    "private_repository_count": 22,
+    "public_repository_count": 75,
+    "repository_count": 97
+  },
+  "local_exposure": {
+    "candidate_attempt_count": 250000,
+    "candidate_attempt_limit_reached": true,
+    "deduplicated_candidate_count": 64102,
+    "saved_project_count": 62,
+    "saved_project_file_count": 35635,
+    "saved_project_status_counts": {
+      "checked": 14,
+      "unreadable": 48
+    },
+    "session_file_count": 736,
+    "session_id_count": 738,
+    "session_status_counts": {
+      "checked": 23,
+      "unreadable": 715
+    }
+  },
+  "pilots": {
+    "approved_count": 32,
+    "block_count": 27919,
+    "coverage_gap_count": 1478,
+    "decision_counts": {
+      "block": 2,
+      "incomplete": 1,
+      "pass": 0,
+      "review": 0
+    },
+    "finding_count": 45198,
+    "pilot_count": 3,
+    "review_count": 17247
+  },
+  "remote_writes_performed": 0,
+  "scanner_sha256": "609f039edc6cde8432ebe6ca0d1da609e0c67a3b8e5fd4d697d900baab61557e",
+  "schema_version": 1
+}

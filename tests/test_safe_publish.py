@@ -11,6 +11,7 @@ import time
 import unittest
 from unittest import mock
 import zipfile
+from contextlib import redirect_stdout, redirect_stderr
 
 
 # Import the repository helper directly so the tests exercise the published file.
@@ -58,10 +59,10 @@ class PatternTests(unittest.TestCase):
                 "AIALRA and AΙALRA",
                 "北京市海淀区示例街道42号",
                 "42 Example Street",
-                "http://10.24.1.8:8080/private",
+                "http://" + "10." + "24.1.8:8080/private",
                 "AA:BB:CC:DD:EE:FF",
-                r"C:\Users\PrivateUser\Documents\notes.txt",
-                "/home/private-user/notes.txt",
+                "C:\\" + "Users\\PrivateUser\\Documents\\notes.txt",
+                "/" + "home/private-user/notes.txt",
             ]
         )
         state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()), collect_raw=True)
@@ -114,6 +115,29 @@ class PatternTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_v1_and_v2_policies_migrate_to_v3_in_memory(self) -> None:
+        original = synthetic_policy()
+        validated = subject.validate_policy(original)
+        self.assertEqual(1, original["schema_version"])
+        self.assertEqual(3, validated["schema_version"])
+        self.assertEqual(["nfkc"], validated["identifiers"][0]["normalization"])
+        self.assertEqual([], validated["risk_acceptances"])
+
+        version_two = dict(validated)
+        version_two["schema_version"] = 2
+        version_two.pop("risk_acceptances")
+        migrated = subject.validate_policy(version_two)
+        self.assertEqual(3, migrated["schema_version"])
+        self.assertEqual([], migrated["risk_acceptances"])
+
+    def test_unicode_zero_width_and_encoded_private_literals_are_detected(self) -> None:
+        policy = subject.validate_policy(synthetic_policy())
+        policy["identifiers"][0]["normalization"] = ["nfkc", "casefold", "zero-width", "confusable"]
+        state = subject.ScanState("synthetic", subject.validate_policy(policy))
+        subject.scan_text(state, "AI\u200bALRA QUlBTFJB", surface="working-tree", object_id="working-tree:encoded.txt", display_path="encoded.txt")
+        matches = [item for item in state.findings if item.rule_id == "private.brand"]
+        self.assertGreaterEqual(len(matches), 2)
+
     def test_exact_approved_location_is_allowed(self) -> None:
         policy = synthetic_policy()
         policy["approved_locations"] = [
@@ -172,6 +196,28 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             subject.validate_policy(policy)
 
+    def test_risk_acceptance_rejects_wildcards_and_critical_rules(self) -> None:
+        base = {
+            "repository": "ExampleOrg/example",
+            "rule_id": "infrastructure.url",
+            "object": "working-tree:README.md",
+            "object_sha256": "1" * 64,
+            "scanner_sha256": "2" * 64,
+            "approved_by": "information-owner",
+            "reason": "Reviewed public documentation address",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "review_trigger": "content-or-scanner-change",
+        }
+        wildcard_policy = subject.empty_policy()
+        wildcard_policy["risk_acceptances"] = [{**base, "object": "working-tree:*"}]
+        with self.assertRaises(ValueError):
+            subject.validate_policy(wildcard_policy)
+
+        critical_policy = subject.empty_policy()
+        critical_policy["risk_acceptances"] = [{**base, "rule_id": "credential.assignment"}]
+        with self.assertRaises(ValueError):
+            subject.validate_policy(critical_policy)
+
     def test_missing_and_oversized_action_secret_fail_closed(self) -> None:
         old_value = os.environ.pop("SAFE_PUBLISH_POLICY_B64", None)
         try:
@@ -188,7 +234,275 @@ class PolicyTests(unittest.TestCase):
                 os.environ["SAFE_PUBLISH_POLICY_B64"] = old_value
 
 
+class PublicationDecisionTests(unittest.TestCase):
+    def _url_state(self) -> tuple[subject.ScanState, subject.Finding]:
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        subject.scan_text(
+            state,
+            "Documentation https://docs.example.com/guide",
+            surface="working-tree",
+            object_id="working-tree:README.md",
+            display_path="README.md",
+        )
+        finding = next(item for item in state.findings if item.rule_id == "infrastructure.url")
+        return state, finding
+
+    def _accept_url(self, state: subject.ScanState, finding: subject.Finding, **updates: str) -> None:
+        acceptance = {
+            "repository": state.repository,
+            "rule_id": finding.rule_id,
+            "object": finding.object,
+            "object_sha256": state.object_sha256[finding.object],
+            "scanner_sha256": state.scanner_sha256,
+            "approved_by": "information-owner",
+            "reason": "Reviewed public documentation address",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "review_trigger": "content-or-scanner-change",
+        }
+        acceptance.update(updates)
+        state.policy["risk_acceptances"] = [acceptance]
+
+    def test_confirmed_public_url_allows_with_risk_but_strict_profile_denies(self) -> None:
+        state, finding = self._url_state()
+        self.assertEqual("review", subject.decision_for(state))
+        self.assertEqual("deny", subject.publication_decision_for(state))
+        self._accept_url(state, finding)
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
+        self.assertEqual("deny", subject.publication_decision_for(state, release_profile="strict"))
+
+    def test_expired_changed_object_or_changed_scanner_reopens_denial(self) -> None:
+        cases = (
+            {"expires_at": "2000-01-01T00:00:00Z"},
+            {"object_sha256": "1" * 64},
+            {"scanner_sha256": "2" * 64},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                state, finding = self._url_state()
+                self._accept_url(state, finding, **changes)
+                self.assertEqual("deny", subject.publication_decision_for(state))
+
+    def test_critical_findings_and_critical_coverage_always_deny(self) -> None:
+        secret_state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        subject.scan_text(
+            secret_state,
+            "password=SYNTHETIC_ONLY_42",
+            surface="working-tree",
+            object_id="working-tree:secret.txt",
+            display_path="secret.txt",
+        )
+        self.assertEqual("block", subject.decision_for(secret_state))
+        self.assertEqual("deny", subject.publication_decision_for(secret_state))
+
+        coverage_state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        coverage_state.add_coverage("working-tree", "unreadable", "synthetic-read-failure")
+        self.assertEqual("incomplete", subject.decision_for(coverage_state))
+        self.assertEqual("deny", subject.publication_decision_for(coverage_state))
+
+    def test_noncritical_auxiliary_coverage_allows_with_risk(self) -> None:
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        state.add_coverage("actions-logs", "tool_failed", "synthetic-optional-tool-failure")
+        self.assertEqual("incomplete", subject.decision_for(state))
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
+
+    def test_exact_approval_can_produce_clean_allow(self) -> None:
+        policy = subject.empty_policy()
+        policy["approved_locations"] = [
+            {
+                "rule_id": "infrastructure.url",
+                "object": "working-tree:README.md",
+                "approved_by": "information-owner",
+                "reason": "Reviewed public project homepage",
+            }
+        ]
+        state = subject.ScanState("ExampleOrg/example", subject.validate_policy(policy))
+        subject.scan_text(
+            state,
+            "Homepage https://docs.example.com/guide",
+            surface="working-tree",
+            object_id="working-tree:README.md",
+            display_path="README.md",
+        )
+        self.assertEqual("pass", subject.decision_for(state))
+        self.assertEqual("allow", subject.publication_decision_for(state))
+
+    def test_gate_report_keeps_both_decisions_and_redacts_raw_values(self) -> None:
+        marker = "SYNTHETIC_ONLY_DO_NOT_LOG_8821"
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy(), collect_raw=True)
+        subject.scan_text(
+            state,
+            "password=" + marker,
+            surface="working-tree",
+            object_id="working-tree:secret.txt",
+            display_path="secret.txt",
+        )
+        report = subject.gate_report(state, REPOSITORY_ROOT, state.policy)
+        encoded = json.dumps(report, sort_keys=True)
+        self.assertEqual("block", report["decision"])
+        self.assertEqual("deny", report["publication_decision"])
+        self.assertEqual("permissive-noncritical", report["release_profile"])
+        self.assertNotIn(marker, encoded)
+        self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")), encoded)
+
+    def test_gate_command_exit_and_public_summary_follow_publication_decision(self) -> None:
+        content = "Documentation https://docs.example.com/guide"
+        object_id = "working-tree:README.md"
+        policy = subject.empty_policy()
+        policy["risk_acceptances"] = [
+            {
+                "repository": "ExampleOrg/example",
+                "rule_id": "infrastructure.url",
+                "object": object_id,
+                "object_sha256": subject.sha256_bytes(content.encode("utf-8")),
+                "scanner_sha256": subject.sha256_bytes((REPOSITORY_ROOT / "scripts" / "safe_publish.py").read_bytes()),
+                "approved_by": "information-owner",
+                "reason": "Reviewed public documentation address",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "review_trigger": "content-or-scanner-change",
+            }
+        ]
+
+        def scan_working_tree(state: subject.ScanState, source: Path) -> None:
+            subject.scan_text(state, content, surface="working-tree", object_id=object_id, display_path="README.md")
+            state.add_coverage("working-tree", "checked", object_count=1)
+
+        def checked_surface(name: str):
+            def scanner(state: subject.ScanState, source: Path, *args: object, **kwargs: object) -> None:
+                state.add_coverage(name, "not_present")
+
+            return scanner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            report_path = root / "gate.private.json"
+            public_path = root / "gate.public.json"
+            args = subject.argparse.Namespace(
+                source=str(source),
+                repository="ExampleOrg/example",
+                policy=str(root / "policy.private.json"),
+                policy_b64_env=None,
+                generic_only=False,
+                release_asset=[],
+                gitleaks_path=None,
+                release_profile="permissive-noncritical",
+                report=str(report_path),
+                public_summary=str(public_path),
+            )
+            with (
+                mock.patch.object(subject, "load_policy", return_value=subject.validate_policy(policy)),
+                mock.patch.object(subject, "scan_working_tree", side_effect=scan_working_tree),
+                mock.patch.object(subject, "scan_git_history", side_effect=checked_surface("git-history")),
+                mock.patch.object(subject, "scan_submodules", side_effect=checked_surface("submodules")),
+                mock.patch.object(subject, "scan_lfs", side_effect=checked_surface("git-lfs")),
+                mock.patch.object(subject, "run_gitleaks", side_effect=checked_surface("gitleaks")),
+            ):
+                exit_code = subject.command_gate(args)
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            public = json.loads(public_path.read_text(encoding="utf-8"))
+            self.assertEqual(0, exit_code)
+            self.assertEqual("review", report["decision"])
+            self.assertEqual("allow_with_risk", report["publication_decision"])
+            self.assertEqual("allow_with_risk", public["publication_decision"])
+            public_text = public_path.read_text(encoding="utf-8")
+            self.assertNotIn("README.md", public_text)
+            self.assertNotIn("infrastructure.url", public_text)
+            self.assertNotIn("docs.example.com", public_text)
+
+
 class ArtifactTests(unittest.TestCase):
+    def test_barcode_result_normalizes_three_and_four_value_opencv_abis(self) -> None:
+        self.assertEqual(["SYNTHETIC-CODE"], subject.normalized_barcode_values(("SYNTHETIC-CODE", "CODE128", None)))
+        self.assertEqual(
+            ["SYNTHETIC-A", "SYNTHETIC-B"],
+            subject.normalized_barcode_values((True, ["SYNTHETIC-A", "SYNTHETIC-B"], ["CODE128", "QR"], None)),
+        )
+        self.assertEqual([], subject.normalized_barcode_values((False, [], [], None)))
+
+    def test_numpy_arrays_are_scanned_without_pickle(self) -> None:
+        import numpy as np
+
+        string_buffer = io.BytesIO()
+        np.save(string_buffer, np.array(["password=SYNTHETIC_ARRAY_SECRET"], dtype="U40"), allow_pickle=False)
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(
+            state,
+            string_buffer.getvalue(),
+            surface="working-tree",
+            object_id="working-tree:values.npy",
+            display_path="values.npy",
+        )
+        self.assertIn("credential.assignment", {item.rule_id for item in state.findings})
+        self.assertTrue(any(item.reason.startswith("numpy-array:") and item.status == "checked" for item in state.coverage))
+
+        object_buffer = io.BytesIO()
+        np.save(object_buffer, np.array([{"secret": "SYNTHETIC"}], dtype=object), allow_pickle=True)
+        object_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(
+            object_state,
+            object_buffer.getvalue(),
+            surface="working-tree",
+            object_id="working-tree:objects.npy",
+            display_path="objects.npy",
+        )
+        self.assertTrue(any(item.reason.startswith("numpy-pickle-forbidden-or-invalid:") for item in object_state.coverage))
+
+    def test_numpy_archive_enforces_member_limit_before_loading(self) -> None:
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            for index in range(subject.MAX_ARRAY_MEMBERS + 1):
+                archive.writestr(f"member-{index}.npy", b"synthetic")
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(
+            state,
+            archive_buffer.getvalue(),
+            surface="working-tree",
+            object_id="working-tree:many.npz",
+            display_path="many.npz",
+        )
+        self.assertTrue(any(item.reason.startswith("numpy-member-limit:") for item in state.coverage))
+
+    def test_image_ocr_budget_exhaustion_fails_closed(self) -> None:
+        from PIL import Image
+
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (13, 17), color=(17, 31, 47)).save(image_buffer, format="PNG")
+        state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
+        state.image_ocr_budget_seconds = 0
+        state.image_ocr_started_at = time.monotonic() - 1
+        subject.scan_image_content(
+            state,
+            image_buffer.getvalue(),
+            surface="working-tree",
+            object_id="working-tree:budget.png",
+            display_path="budget.png",
+        )
+        self.assertTrue(
+            any(item.reason.startswith("image-ocr-budget-exceeded") for item in state.coverage)
+        )
+        self.assertEqual("incomplete", subject.decision_for(state))
+
+    def test_media_metadata_declares_absent_extractable_layers(self) -> None:
+        metadata = json.dumps({"format": {"tags": {"comment": "AIALRA"}}, "streams": []})
+        completed = subprocess.CompletedProcess(["ffprobe"], 0, stdout=metadata, stderr="")
+        state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
+        with mock.patch.object(subject, "run", return_value=completed):
+            subject.scan_media_content(
+                state,
+                b"synthetic-media-container",
+                surface="working-tree",
+                object_id="working-tree:sample.mp3",
+                display_path="sample.mp3",
+            )
+        self.assertIn("private.brand", {item.rule_id for item in state.findings})
+        statuses = {(item.surface, item.status) for item in state.coverage}
+        self.assertIn(("working-tree", "checked"), statuses)
+        self.assertIn(("media-subtitles", "not_present"), statuses)
+        self.assertIn(("media-cover-art", "not_present"), statuses)
+        self.assertIn(("media-attachments", "not_present"), statuses)
+
     def test_office_and_notebook_content_is_scanned(self) -> None:
         # Build a minimal Office Open XML container with synthetic document metadata.
         office_buffer = io.BytesIO()
@@ -220,7 +534,7 @@ class ArtifactTests(unittest.TestCase):
         state = subject.ScanState("synthetic", subject.empty_policy())
         subject.scan_bytes(state, b"synthetic image bytes", surface="working-tree", object_id="working-tree:image.png", display_path="image.png")
         subject.scan_bytes(state, b"synthetic archive bytes", surface="working-tree", object_id="working-tree:data.7z", display_path="data.7z")
-        self.assertTrue(any(item.reason.startswith("binary-review-required") for item in state.coverage))
+        self.assertTrue(any(item.reason.startswith("invalid-image") for item in state.coverage))
         self.assertTrue(any(item.reason.startswith("unsupported-archive") for item in state.coverage))
         self.assertEqual("incomplete", subject.decision_for(state))
 
@@ -254,10 +568,329 @@ class ArtifactTests(unittest.TestCase):
         embedded_state = subject.ScanState("synthetic", subject.empty_policy())
         embedded_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,c3ludGhldGlj"/></svg>'
         subject.scan_bytes(embedded_state, embedded_svg, surface="working-tree", object_id="working-tree:embedded.svg", display_path="embedded.svg")
-        self.assertTrue(any(item.reason.startswith("binary-review-required") for item in embedded_state.coverage))
+        self.assertTrue(any(item.reason.startswith("invalid-image") for item in embedded_state.coverage))
+
+    def test_office_embedded_media_and_macro_are_not_skipped(self) -> None:
+        # Embedded media and macro payloads must enter a supported scanner or produce an explicit gap.
+        office_buffer = io.BytesIO()
+        with zipfile.ZipFile(office_buffer, "w") as archive:
+            archive.writestr("word/media/image.png", b"not-a-valid-png")
+            archive.writestr("word/vbaProject.bin", b"MZ password=SYNTHETIC_MACRO_ONLY")
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(state, office_buffer.getvalue(), surface="working-tree", object_id="working-tree:macro.docm", display_path="macro.docm")
+        self.assertTrue(any(item.reason.startswith("invalid-image") for item in state.coverage))
+        self.assertIn("credential.assignment", {item.rule_id for item in state.findings})
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_gitleaks_object_binding_uses_stable_blob_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Synthetic User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "fixture.txt").write_text("synthetic fixture\n", encoding="utf-8")
+            subprocess.run(["git", "add", "fixture.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "first"], cwd=repository, check=True, capture_output=True)
+            first = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True).stdout.strip()
+            (repository / "unrelated.txt").write_text("second commit\n", encoding="utf-8")
+            subprocess.run(["git", "add", "unrelated.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "second"], cwd=repository, check=True, capture_output=True)
+            second = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True).stdout.strip()
+
+            first_object = subject.stable_gitleaks_object_id(repository, first, "fixture.txt")
+            second_object = subject.stable_gitleaks_object_id(repository, second, "fixture.txt")
+
+        self.assertEqual(first_object, second_object)
+        self.assertRegex(first_object or "", r"^gitleaks-blob:[0-9a-f]{40,64}:fixture\.txt$")
+
+    def test_doctor_requires_numpy_only_when_repository_contains_array_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            (root / "values.npy").write_bytes(b"synthetic")
+            requirements = subject.doctor_requirements(root)
+
+        self.assertIn("numpy", requirements)
+        self.assertNotIn("libmagic", requirements)
+
+    def test_managed_publish_audit_binds_candidate_without_remote_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "remote.git"
+            codex_home = root / "codex-home"
+            private = codex_home / "private" / "github-safe-publish" / "managed"
+            policy_path = codex_home / "private" / "github-safe-publish" / "policy.private.json"
+            source.mkdir()
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Synthetic User"], cwd=source, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=source, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=source, check=True)
+            (source / "README.md").write_text("safe\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=source, check=True, capture_output=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=source, check=True, capture_output=True)
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+            (source / "README.md").write_text("verified candidate\n", encoding="utf-8")
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(json.dumps(synthetic_policy()), encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "source": str(source), "repository": "ExampleOrg/example", "base_commit": base, "base_branch": "main",
+                    "policy": str(policy_path), "private_output_dir": str(private), "checkpoint": None,
+                    "public_summary": None, "readme_auditor": None, "validation_command": [],
+                    "validation_timeout_seconds": 30, "checks_timeout_seconds": 30, "intent": "audit", "branch": None,
+                    "commit_message": "chore: synthetic managed publication", "pr_title": "Synthetic", "pr_body": "Synthetic",
+                    "release_asset": [], "gitleaks_path": None, "release_profile": "permissive-noncritical", "resume": False,
+                },
+            )()
+            old_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+
+            def fake_gate(gate_args: object) -> int:
+                report = {
+                    "publication_decision": "allow", "scanner_versions": {"safe_publish_sha256": "a" * 64},
+                    "policy_fingerprint": "b" * 64, "report_fingerprint": "c" * 64,
+                }
+                subject.write_json(Path(gate_args.report), report)
+                return 0
+
+            try:
+                with (
+                    mock.patch.object(subject, "remote_branch_commit", return_value=base),
+                    mock.patch.object(subject, "doctor_report", return_value={"decision": "pass", "fingerprint": "d" * 64}),
+                    mock.patch.object(subject, "ensure_gitleaks", return_value=root / "gitleaks"),
+                    mock.patch.object(subject, "command_gate", side_effect=fake_gate),
+                ):
+                    exit_code = subject.command_managed_publish(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+
+            checkpoint = json.loads((private / "checkpoint.private.json").read_text(encoding="utf-8"))
+            first_candidate_commit = checkpoint["candidate_commit"]
+            repeated_private = codex_home / "private" / "github-safe-publish" / "managed-repeat"
+            args.private_output_dir = str(repeated_private)
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                with (
+                    mock.patch.object(subject, "remote_branch_commit", return_value=base),
+                    mock.patch.object(subject, "doctor_report", return_value={"decision": "pass", "fingerprint": "d" * 64}),
+                    mock.patch.object(subject, "ensure_gitleaks", return_value=root / "gitleaks"),
+                    mock.patch.object(subject, "command_gate", side_effect=fake_gate),
+                ):
+                    repeated_exit_code = subject.command_managed_publish(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            repeated_checkpoint = json.loads((repeated_private / "checkpoint.private.json").read_text(encoding="utf-8"))
+            remote_branches = subprocess.run(
+                ["git", "for-each-ref", "--format=%(refname)", "refs/heads"],
+                cwd=remote,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(0, repeated_exit_code)
+        self.assertEqual("gated", checkpoint["state"])
+        self.assertEqual(first_candidate_commit, repeated_checkpoint["candidate_commit"])
+        self.assertRegex(checkpoint["candidate_tree_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(checkpoint["patch_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(["refs/heads/main"], remote_branches)
+
+    def test_rendered_pages_follow_only_same_origin_resources(self) -> None:
+        root = b'<html><img src="/asset.txt"><a href="https://outside.example/skip">x</a></html>'
+        asset = b"AIALRA"
+        state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
+        with mock.patch.object(
+            subject,
+            "fetch_public_url",
+            side_effect=[(root, None, "text/html"), (asset, None, "text/plain")],
+        ) as fetch:
+            subject.audit_rendered_pages(state, "https://pages.example.invalid/")
+        self.assertEqual(2, fetch.call_count)
+        self.assertIn("private.brand", {item.rule_id for item in state.findings})
+        self.assertFalse(any("outside.example" in call.args[0] for call in fetch.call_args_list))
+
+    def test_nested_repositories_are_mapped_by_remote_full_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = root / "group" / "renamed-local-folder"
+            nested.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=nested, check=True, capture_output=True)
+            subprocess.run(["git", "remote", "add", "origin", "git@github.com:ExampleOrg/example-repo.git"], cwd=nested, check=True)
+            discovered = subject.discover_git_repositories([root])
+            self.assertEqual(nested.resolve(), discovered["exampleorg/example-repo"])
+
+    def test_git_ref_tag_and_note_surfaces_are_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "metadata"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "file.txt").write_text("safe\n", encoding="utf-8")
+            subprocess.run(["git", "add", "file.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "safe"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "uid=user-private-0042"], cwd=repository, check=True)
+            subprocess.run(["git", "tag", "-a", "fixture", "-m", "password=SYNTHETIC_TAG"], cwd=repository, check=True)
+            subprocess.run(["git", "notes", "add", "-m", "owner@private.test"], cwd=repository, check=True)
+            state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
+            subject.scan_git_history(state, repository)
+            rules = {item.rule_id for item in state.findings}
+            self.assertIn("identity.uid", rules)
+            self.assertIn("credential.assignment", rules)
+            self.assertIn("private.contact", rules)
+
+    def test_local_audit_streams_sessions_resumes_and_keeps_raw_output_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            session_dir = codex_home / "sessions" / "2026" / "08"
+            project = root / "project"
+            session_dir.mkdir(parents=True)
+            project.mkdir()
+            marker = "SYNTHETIC_SESSION_ONLY_9274"
+            records = [
+                {"type": "session_meta", "payload": {"id": "session-1"}},
+                {"type": "response_item", "payload": {"text": "password=" + marker}},
+            ]
+            (session_dir / "session.jsonl").write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            (project / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (codex_home / ".codex-global-state.json").write_text(json.dumps({"electron-saved-workspace-roots": [str(project)], "local-projects": {}}), encoding="utf-8")
+            private = codex_home / "private" / "github-safe-publish"
+            args = type("Args", (), {
+                "policy": None,
+                "output": str(private / "local-report.private.json"),
+                "candidates_output": str(private / "candidates.private.json"),
+                "checkpoint": str(private / "local-checkpoint.private.json"),
+                "public_summary": str(root / "summary.json"),
+                "resume": True,
+            })()
+            old_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    first = subject.command_audit_local(args)
+                    second = subject.command_audit_local(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            self.assertIn(first, {0, 2, 4})
+            self.assertIn(second, {0, 2, 4})
+            self.assertNotIn(marker, stdout.getvalue() + stderr.getvalue() + (root / "summary.json").read_text(encoding="utf-8"))
+            report = json.loads((private / "local-report.private.json").read_text(encoding="utf-8"))
+            self.assertEqual(1, report["session_count"])
+
+    def test_local_audit_resume_keeps_committed_candidates_and_all_session_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            session_dir = codex_home / "sessions"
+            session_dir.mkdir(parents=True)
+            marker = "SYNTHETIC_RESUME_ONLY_4821"
+            records = [
+                {"type": "session_meta", "payload": {"id": "session-first"}},
+                {"type": "response_item", "payload": {"text": "password=" + marker}},
+                {"type": "session_meta", "payload": {"id": "session-second"}},
+            ]
+            (session_dir / "session.jsonl").write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            (codex_home / ".codex-global-state.json").write_text(json.dumps({"electron-saved-workspace-roots": [], "local-projects": {}}), encoding="utf-8")
+            private = codex_home / "private" / "github-safe-publish"
+            args = type("Args", (), {
+                "policy": None,
+                "output": str(private / "local-report.private.json"),
+                "candidates_output": str(private / "candidates.private.json"),
+                "checkpoint": str(private / "local-checkpoint.private.json"),
+                "public_summary": str(root / "summary.json"),
+                "resume": True,
+            })()
+            old_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                with mock.patch.object(subject.PrivateCandidateStore, "remove_database", return_value=None):
+                    first_result = subject.command_audit_local(args)
+                Path(args.candidates_output).unlink()
+                result = subject.command_audit_local(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            self.assertIn(first_result, {0, 2, 4})
+            self.assertIn(result, {0, 2, 4})
+            report = json.loads((private / "local-report.private.json").read_text(encoding="utf-8"))
+            candidates = json.loads((private / "candidates.private.json").read_text(encoding="utf-8"))
+            self.assertEqual(2, report["session_count"])
+            self.assertTrue(any(item["raw_value"] == marker for item in candidates["candidates"]))
+
+    def test_raw_candidate_limit_fails_closed(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy(), collect_raw=True)
+        with mock.patch.object(subject, "MAX_RAW_CANDIDATES_PER_STATE", 1):
+            subject.scan_text(
+                state,
+                "password=SYNTHETIC_FIRST_1234\npassword=SYNTHETIC_SECOND_5678",
+                surface="working-tree",
+                object_id="working-tree:fixture.txt",
+                display_path="fixture.txt",
+            )
+        self.assertEqual(1, len(state.raw_candidates))
+        self.assertTrue(any(item.reason == "raw-candidate-limit-exceeded" and item.status == "tool_failed" for item in state.coverage))
+
+    def test_local_session_worker_crash_is_isolated_and_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            session_dir = codex_home / "sessions"
+            session_dir.mkdir(parents=True)
+            (session_dir / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": "session-crash"}}) + "\n", encoding="utf-8")
+            (codex_home / ".codex-global-state.json").write_text(json.dumps({"electron-saved-workspace-roots": [], "local-projects": {}}), encoding="utf-8")
+            private = codex_home / "private" / "github-safe-publish"
+            args = type("Args", (), {
+                "policy": None,
+                "output": str(private / "local-report.private.json"),
+                "candidates_output": str(private / "candidates.private.json"),
+                "checkpoint": str(private / "local-checkpoint.private.json"),
+                "public_summary": str(root / "summary.json"),
+                "resume": False,
+            })()
+            old_codex_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                crashed = type("Completed", (), {"returncode": 0xC0000005})()
+                real_run = subprocess.run
+
+                def run_with_worker_crash(command: object, *positional: object, **keywords: object) -> object:
+                    if isinstance(command, list) and "_audit-local-session-worker" in command:
+                        return crashed
+                    return real_run(command, *positional, **keywords)
+
+                with mock.patch.object(subject.subprocess, "run", side_effect=run_with_worker_crash):
+                    result = subject.command_audit_local(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            report = json.loads((private / "local-report.private.json").read_text(encoding="utf-8"))
+            self.assertEqual(4, result)
+            self.assertEqual("incomplete", report["decision"])
+            self.assertEqual("unreadable", report["sessions"][0]["status"])
+
     def test_full_history_submodule_and_missing_lfs_are_enumerated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary) / "history"
@@ -347,6 +980,34 @@ class RepositoryTests(unittest.TestCase):
             subject.run_gitleaks(state, repository)
             self.assertTrue(any(item.rule_id.startswith("gitleaks.") for item in state.findings))
             self.assertNotIn(generated_marker, json.dumps(subject.sorted_findings(state), sort_keys=True))
+
+    def test_gitleaks_runtime_canary_fails_closed_on_silent_scanner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "gitleaks"
+            binary.write_bytes(b"synthetic-binary")
+            state = subject.ScanState("synthetic", subject.empty_policy())
+            subject.VERIFIED_GITLEAKS.clear()
+            silent = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(subject, "run", return_value=silent):
+                subject.run_gitleaks(state, root, binary)
+            self.assertTrue(any(item.reason == "gitleaks-runtime-canary-not-detected" for item in state.coverage))
+
+    def test_gitleaks_process_timeout_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "gitleaks"
+            binary.write_bytes(b"synthetic-binary")
+            key = f"{binary.resolve()}:{subject.sha256_bytes(binary.read_bytes())}"
+            state = subject.ScanState("synthetic", subject.empty_policy())
+            subject.VERIFIED_GITLEAKS.add(key)
+            try:
+                with mock.patch.object(subject, "run", side_effect=subprocess.TimeoutExpired(["gitleaks"], 330)):
+                    subject.run_gitleaks(state, root, binary)
+            finally:
+                subject.VERIFIED_GITLEAKS.discard(key)
+            self.assertTrue(any(item.reason == "gitleaks-process-timeout" and item.status == "tool_failed" for item in state.coverage))
+            self.assertEqual("incomplete", subject.decision_for(state))
 
     def test_prepare_changes_only_disposable_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

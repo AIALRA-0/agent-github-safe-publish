@@ -12,11 +12,6 @@ on:
         required: false
         default: true
         type: boolean
-    secrets:
-      SAFE_PUBLISH_POLICY_B64:
-        description: "Trimmed private policy encoded as Base64"
-        required: false
-
 permissions:
   contents: read
 
@@ -43,21 +38,14 @@ jobs:
           path: tool
           persist-credentials: false
 
-      # Untrusted events never receive the private policy and therefore cannot obtain a full pass.
-      - name: Run unified publication gate
+      # Repository-controlled workflows run only public rules and can never approve publication.
+      - name: Run public shadow gate
         id: gate
         continue-on-error: ${{ inputs.shadow }}
-        env:
-          SAFE_PUBLISH_POLICY_B64: ${{ secrets.SAFE_PUBLISH_POLICY_B64 }}
-          SAFE_PUBLISH_UNTRUSTED: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || github.actor == 'dependabot[bot]' }}
         shell: bash
         run: |
-          # Select the fail-closed policy path without printing the Secret or decoded content.
-          if [[ "$SAFE_PUBLISH_UNTRUSTED" == "true" ]]; then
-            python tool/scripts/safe_publish.py gate --source target --repository "${{ github.repository }}" --generic-only --report "$RUNNER_TEMP/safe-publish-report.json"
-          else
-            python tool/scripts/safe_publish.py gate --source target --repository "${{ github.repository }}" --policy-b64-env SAFE_PUBLISH_POLICY_B64 --report "$RUNNER_TEMP/safe-publish-report.json"
-          fi
+          # Keep the private policy outside repository-controlled GitHub Actions.
+          python tool/scripts/safe_publish.py gate --source target --repository "${{ github.repository }}" --generic-only --report "$RUNNER_TEMP/safe-publish-report.json"
 
       # Preserve an aggregate outcome in the job summary while the detailed report is discarded with the runner.
       - name: Summarize shadow outcome
@@ -76,12 +64,16 @@ jobs:
               summary = report.get("summary", {})  # Limit the published summary to aggregate counts.
               lines = [  # Build a small Markdown summary without repository paths or identifiers.
                   "## safe-publish shadow gate",
-                  f"- Decision: `{report.get('decision', 'incomplete')}`",
+                  f"- Strict audit: `{report.get('decision', 'incomplete')}`",
+                  f"- Publication: `{report.get('publication_decision', 'deny')}`",
+                  f"- Release profile: `{report.get('release_profile', 'permissive-noncritical')}`",
                   f"- Findings: `{summary.get('finding_count', 0)}`",
+                  f"- Critical findings: `{summary.get('critical_finding_count', 0)}`",
+                  f"- Noncritical findings: `{summary.get('noncritical_finding_count', 0)}`",
                   f"- Coverage gaps: `{summary.get('coverage_gap_count', 1)}`",
               ]
           else:  # Fail closed when no machine report was produced.
-              lines = ["## safe-publish shadow gate", "- Decision: `incomplete`", "- Coverage gaps: `1`"]
+              lines = ["## safe-publish shadow gate", "- Strict audit: `incomplete`", "- Publication: `deny`", "- Coverage gaps: `1`"]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:  # Append to GitHub's approved summary file.
               handle.write("\n".join(lines) + "\n")  # Write aggregate values only.
           PY
