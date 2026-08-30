@@ -759,17 +759,29 @@ class ArtifactTests(unittest.TestCase):
         )
         self.assertIn("credential.assignment", {item.rule_id for item in state.findings})
 
-    def test_oversized_text_object_fails_closed_before_unbounded_pattern_scanning(self) -> None:
+    def test_text_beyond_one_mib_is_scanned_within_the_file_limit(self) -> None:
         state = subject.ScanState("synthetic", subject.empty_policy())
-        with mock.patch.object(subject, "DEFAULT_MAX_INLINE_TEXT_BYTES", 100):
+        subject.scan_bytes(
+            state,
+            b"A" * (1024 * 1024 + 1) + b"\npassword=SYNTHETIC_LARGE_TEXT_SECRET",
+            surface="working-tree",
+            object_id="working-tree:large.txt",
+            display_path="large.txt",
+        )
+        self.assertIn("credential.assignment", {item.rule_id for item in state.findings})
+        self.assertFalse(any(item.reason.startswith("oversized-text-object:") for item in state.coverage))
+
+    def test_text_beyond_the_file_limit_fails_closed(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        with mock.patch.object(subject, "DEFAULT_MAX_FILE_BYTES", 100):
             subject.scan_bytes(
                 state,
                 b"A" * 101,
                 surface="working-tree",
-                object_id="working-tree:large.txt",
-                display_path="large.txt",
+                object_id="working-tree:too-large.txt",
+                display_path="too-large.txt",
             )
-        self.assertTrue(any(item.reason.startswith("oversized-text-object:") for item in state.coverage))
+        self.assertTrue(any(item.reason.startswith("oversized-object:") for item in state.coverage))
         self.assertEqual("incomplete", subject.decision_for(state))
         self.assertEqual("deny", subject.publication_decision_for(state))
 

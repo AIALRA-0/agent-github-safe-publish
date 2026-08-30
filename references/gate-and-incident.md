@@ -32,7 +32,7 @@ Private finding storage is lossless and paginated. Manifests bind the exact reco
 
 Complex artifact parsing runs in a reusable isolated process with a per-object hard limit. A timeout or worker crash is critical, keeps the Git checkpoint on the current object, and replaces the process before retry. Repository and history budgets never override this object boundary
 
-One decodable text object may contain at most 1 MiB for direct pattern scanning. A larger text object records `oversized-text-object`, keeps the strict audit `incomplete`, and produces publication `deny` until a supported bounded parser inspects it
+One decodable text object may contain at most 25 MiB for direct pattern scanning, matching the fixed single-file safety limit. This keeps lockfiles and source maps fully inspected, including matches after the first MiB. A larger object records `oversized-object`, keeps the strict audit `incomplete`, and produces publication `deny` until a supported bounded parser inspects it
 
 Resume is allowed only when the repository name, source commit, complete Git object inventory digest and count, scanner digest, private policy fingerprint, and raw-candidate mode match exactly. Invalid or mismatched checkpoints fail closed and are not overwritten
 

@@ -60,11 +60,10 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.5"
+TOOL_VERSION = "1.1.6"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
-DEFAULT_MAX_INLINE_TEXT_BYTES = 1 * 1024 * 1024
 DEFAULT_IMAGE_OCR_BUDGET_SECONDS = 300
 DEFAULT_OCR_UNIT_TIMEOUT_SECONDS = 120
 DEFAULT_ARTIFACT_UNIT_TIMEOUT_SECONDS = 180
@@ -1906,9 +1905,6 @@ def scan_bytes(
             raw_value=None,
             legal=is_legal_path(display_path),
         )
-    if pointer_text is not None and len(data) > DEFAULT_MAX_INLINE_TEXT_BYTES:
-        state.add_coverage(surface, "unreadable", f"oversized-text-object:{object_id}")
-        return
     if depth > MAX_ARCHIVE_DEPTH:
         state.add_coverage(surface, "tool_failed", f"archive-depth-limit:{object_id}")
         return
