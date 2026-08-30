@@ -60,7 +60,7 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.2"
+TOOL_VERSION = "1.1.3"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -1936,6 +1936,10 @@ def scan_bytes(
             state.add_coverage(surface, "unreadable", f"unsupported-archive:{object_id}")
         return
     if suffix == ".svg" or mime == "image/svg+xml":
+        # An exact digest approval is the escape hatch for a known malformed or
+        # parser-incompatible SVG. Any content change invalidates the approval.
+        if state.binary_is_approved(object_id, data):
+            return
         # SVG is XML text, so scan its source instead of requiring binary approval.
         svg_text = decode_text(data)
         try:

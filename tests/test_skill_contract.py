@@ -77,7 +77,7 @@ class SkillInvocationContractTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual("github-safe-publish 1.1.2", result.stdout.strip())
+        self.assertEqual("github-safe-publish 1.1.3", result.stdout.strip())
 
     def test_reusable_workflow_accepts_only_public_inputs(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
@@ -232,7 +232,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Copyright (c) 2026 AIALRA-0", license_text)
         for readme_name in ("README.md", "README.en.md"):
             readme = (REPOSITORY_ROOT / readme_name).read_text(encoding="utf-8")
-            self.assertIn("v1.1.2", readme)
+            self.assertIn("v1.1.3", readme)
             self.assertIn("SECURITY.md", readme)
             self.assertIn("CONTRIBUTING.md", readme)
             self.assertIn("CHANGELOG.md", readme)

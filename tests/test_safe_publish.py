@@ -905,6 +905,40 @@ class ArtifactTests(unittest.TestCase):
         invalid_state = subject.ScanState("synthetic", subject.empty_policy())
         subject.scan_bytes(invalid_state, b"<svg>", surface="working-tree", object_id="working-tree:invalid.svg", display_path="invalid.svg")
         self.assertTrue(any(item.reason.startswith("invalid-svg") for item in invalid_state.coverage))
+
+        approved_svg = b"<svg>"
+        approved_policy = subject.empty_policy()
+        approved_policy["binary_approvals"].append(
+            {
+                "object": "working-tree:approved-invalid.svg",
+                "sha256": subject.sha256_bytes(approved_svg),
+                "approved_by": "InformationOwner",
+                "reason": "Exact malformed synthetic fixture reviewed",
+                "inspection_layers": ["manual", "digest"],
+                "tool_versions": {"github-safe-publish": subject.TOOL_VERSION},
+                "review_trigger": "object digest or scanner version changes",
+            }
+        )
+        approved_state = subject.ScanState("synthetic", approved_policy)
+        subject.scan_bytes(
+            approved_state,
+            approved_svg,
+            surface="working-tree",
+            object_id="working-tree:approved-invalid.svg",
+            display_path="approved-invalid.svg",
+        )
+        self.assertFalse(any(item.reason.startswith("invalid-svg") for item in approved_state.coverage))
+
+        changed_state = subject.ScanState("synthetic", approved_policy)
+        subject.scan_bytes(
+            changed_state,
+            b"<svg changed>",
+            surface="working-tree",
+            object_id="working-tree:approved-invalid.svg",
+            display_path="approved-invalid.svg",
+        )
+        self.assertTrue(any(item.reason.startswith("invalid-svg") for item in changed_state.coverage))
+
         embedded_state = subject.ScanState("synthetic", subject.empty_policy())
         embedded_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,c3ludGhldGlj"/></svg>'
         subject.scan_bytes(embedded_state, embedded_svg, surface="working-tree", object_id="working-tree:embedded.svg", display_path="embedded.svg")
