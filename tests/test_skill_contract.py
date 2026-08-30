@@ -77,7 +77,7 @@ class SkillInvocationContractTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual("github-safe-publish 1.1.1", result.stdout.strip())
+        self.assertEqual("github-safe-publish 1.1.2", result.stdout.strip())
 
     def test_reusable_workflow_accepts_only_public_inputs(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
@@ -117,6 +117,9 @@ class DocumentationContractTests(unittest.TestCase):
             REPOSITORY_ROOT / "README.md",
             REPOSITORY_ROOT / "README.en.md",
             REPOSITORY_ROOT / "SKILL.md",
+            REPOSITORY_ROOT / "CHANGELOG.md",
+            REPOSITORY_ROOT / "CONTRIBUTING.md",
+            REPOSITORY_ROOT / "SECURITY.md",
             *sorted((REPOSITORY_ROOT / "references").glob("*.md")),
         ]
 
@@ -128,6 +131,45 @@ class DocumentationContractTests(unittest.TestCase):
                 if numeric_heading.match(line):
                     with self.subTest(document=document.name, line=line_number):
                         self.assertRegex(line, heading)
+
+    def test_numbered_markdown_sections_match_heading_depth_and_parent(self) -> None:
+        heading = re.compile(r"^(#{2,4})\s+(\d+(?:\.\d+)*)\.\s+\S")
+        for document in self._documents():
+            parents: dict[int, tuple[str, ...]] = {}
+            in_fence = False
+            for line_number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
+                if line.strip().startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                match = heading.match(line)
+                if not match:
+                    continue
+                depth = len(match.group(1)) - 1
+                parts = tuple(match.group(2).split("."))
+                with self.subTest(document=document.name, line=line_number):
+                    self.assertEqual(depth, len(parts))
+                    if depth > 1:
+                        self.assertEqual(parents.get(depth - 1), parts[:-1])
+                parents[depth] = parts
+                for child_depth in tuple(parents):
+                    if child_depth > depth:
+                        del parents[child_depth]
+
+    def test_chinese_prose_avoids_full_stops_and_terminal_semicolons(self) -> None:
+        for document in self._documents():
+            in_fence = False
+            for line_number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
+                if line.strip().startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                stripped = line.strip()
+                if in_fence or not stripped or stripped.startswith(">"):
+                    continue
+                with self.subTest(document=document.name, line=line_number):
+                    self.assertNotIn("。", line)
+                    self.assertFalse(stripped.endswith("；"))
 
     def test_table_and_mermaid_captions_follow_the_object(self) -> None:
         caption = re.compile(r"^(?:表|图|Table|Figure)\s+\d")
@@ -190,7 +232,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Copyright (c) 2026 AIALRA-0", license_text)
         for readme_name in ("README.md", "README.en.md"):
             readme = (REPOSITORY_ROOT / readme_name).read_text(encoding="utf-8")
-            self.assertIn("v1.1.1", readme)
+            self.assertIn("v1.1.2", readme)
             self.assertIn("SECURITY.md", readme)
             self.assertIn("CONTRIBUTING.md", readme)
             self.assertIn("CHANGELOG.md", readme)

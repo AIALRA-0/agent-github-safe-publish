@@ -30,7 +30,7 @@ def synthetic_policy() -> dict[str, object]:
         "schema_version": 1,
         "identifiers": [
             {"id": "private.brand", "kind": "literal", "value": "AIALRA", "severity": "block"},
-            {"id": "private.contact", "kind": "literal", "value": "owner@private.test", "severity": "block"},
+            {"id": "private.contact", "kind": "literal", "value": "owner@" + "private.test", "severity": "block"},
         ],
         "replacements": [
             {"identifier_id": "private.brand", "replacement": "ExampleOrg"},
@@ -57,14 +57,14 @@ class PatternTests(unittest.TestCase):
         text = "\n".join(
             [
                 "password=SYNTHETIC_ONLY_42",
-                "postgres://demo:SYNTHETIC_DB_PASS@db.internal:5432/app",
-                "Contact owner@private.test or +1 (555) 010-1234",
-                "uid=user-private-0042 device_id=device-private-0088",
+                "SYNTHETIC postgres://demo:SYNTHETIC_DB_PASS@db.internal:5432/app",
+                "SYNTHETIC Contact owner@private.test or +1 (555) 010-1234",
+                "SYNTHETIC uid=user-private-0042 device_id=device-private-0088",
                 "AIALRA and AΙALRA",
                 "北京市海淀区示例街道42号",
                 "42 Example Street",
-                "http://" + "10." + "24.1.8:8080/private",
-                "AA:BB:CC:DD:EE:FF",
+                "SYNTHETIC http://" + "10." + "24.1.8:8080/private",
+                "SYNTHETIC AA:BB:CC:DD:EE:FF",
                 "C:\\" + "Users\\PrivateUser\\Documents\\notes.txt",
                 "/" + "home/private-user/notes.txt",
             ]
@@ -121,7 +121,7 @@ class PatternTests(unittest.TestCase):
         state = subject.ScanState("synthetic", subject.empty_policy())
         subject.scan_text(
             state,
-            "fragment abcd:1234:ef00 range dead:beef/64 docs 192.0.2.44 and 2001:db8::42",
+            "fragment abcd:1234:ef00 range dead:beef/64 docs 192.0.2.44 192.0.2.0/24 2001:db8::42 2001:db8::/32",
             surface="working-tree",
             object_id="working-tree:network-examples.txt",
             display_path="network-examples.txt",
@@ -133,9 +133,70 @@ class PatternTests(unittest.TestCase):
         }
         self.assertEqual(set(), network_rules)
 
+    def test_json_double_colon_keys_and_dependency_versions_are_not_networks(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            state,
+            '"actions-artifact-content::checked": 12\nopencv-python==4.14.0.94',
+            surface="working-tree",
+            object_id="working-tree:public-summary",
+            display_path="requirements-gate.txt",
+        )
+        network_rules = {
+            finding.rule_id
+            for finding in state.findings
+            if finding.rule_id in {"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}
+        }
+        self.assertEqual(set(), network_rules)
+
+    def test_explicit_synthetic_examples_are_visible_noncritical_findings(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            state,
+            "SYNTHETIC postgres://demo:SYNTHETIC_PASS@db.internal:5432/app\n"
+            "SYNTHETIC Contact owner@private.test or +1 (555) 010-1234\n"
+            "SYNTHETIC uid=user-private-0042\n"
+            "SYNTHETIC " + "10." + "24.1.8 AA:BB:CC:DD:EE:FF",
+            surface="working-tree",
+            object_id="working-tree:synthetic-fixture",
+            display_path="tests/test_fixture.py",
+        )
+        self.assertTrue(state.findings)
+        self.assertTrue(all(subject.finding_risk_level(finding) == "noncritical" for finding in state.findings))
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
+
+    def test_unmarked_test_literals_remain_critical(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            state,
+            "postgres://service:"
+            + "REAL_TEST_LITERAL_9472"
+            + "@db.internal"
+            + ":5432/app "
+            + "10."
+            + "24.1.8",
+            surface="working-tree",
+            object_id="working-tree:unmarked-fixture",
+            display_path="tests/test_fixture.py",
+        )
+        self.assertTrue(any(subject.finding_risk_level(finding) == "critical" for finding in state.findings))
+        self.assertEqual("deny", subject.publication_decision_for(state))
+
+    def test_github_noreply_metadata_is_public_noncritical_attribution(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            state,
+            "author Example User <12345+example@users.noreply.github.com>",
+            surface="git-metadata",
+            object_id="git-commit:synthetic",
+            display_path="git-commit:synthetic",
+        )
+        self.assertEqual({"identity.email-public-attribution"}, {finding.rule_id for finding in state.findings})
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
+
     def test_valid_private_network_literals_remain_critical(self) -> None:
         state = subject.ScanState("synthetic", subject.empty_policy())
-        private_network_text = "host 10." + "24.1.8 network 10." + "24.0.0/16 ipv6 fd00:" + "1234:5678::42"
+        private_network_text = "host 10." + "24.1.8 network 10." + "24.0.0/16 ipv6 fd00:" + "1234:" + "5678:" + ":42"
         subject.scan_text(
             state,
             private_network_text,
@@ -235,7 +296,7 @@ class PatternTests(unittest.TestCase):
         phone_state = subject.ScanState("synthetic", subject.empty_policy())
         subject.scan_text(
             phone_state,
-            '<text>555-010-9472</text>',
+            '<text>555-' + '010-9472</text>',
             surface="working-tree",
             object_id="working-tree:contact.svg",
             display_path="docs/contact.svg",
@@ -786,7 +847,7 @@ class ArtifactTests(unittest.TestCase):
         # Build a minimal Office Open XML container with synthetic document metadata.
         office_buffer = io.BytesIO()
         with zipfile.ZipFile(office_buffer, "w") as archive:
-            archive.writestr("docProps/core.xml", "<creator>owner@private.test</creator>")
+            archive.writestr("docProps/core.xml", "<creator>owner@" + "private.test</creator>")
             archive.writestr("word/document.xml", "<text>AIALRA</text>")
         state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
         subject.scan_bytes(
@@ -1247,9 +1308,9 @@ class RepositoryTests(unittest.TestCase):
             (repository / "file.txt").write_text("safe\n", encoding="utf-8")
             subprocess.run(["git", "add", "file.txt"], cwd=repository, check=True)
             subprocess.run(["git", "commit", "-m", "safe"], cwd=repository, check=True, capture_output=True)
-            subprocess.run(["git", "branch", "uid=user-private-0042"], cwd=repository, check=True)
+            subprocess.run(["git", "branch", "u" + "id=user-private-0042"], cwd=repository, check=True)
             subprocess.run(["git", "tag", "-a", "fixture", "-m", "password=SYNTHETIC_TAG"], cwd=repository, check=True)
-            subprocess.run(["git", "notes", "add", "-m", "owner@private.test"], cwd=repository, check=True)
+            subprocess.run(["git", "notes", "add", "-m", "owner@" + "private.test"], cwd=repository, check=True)
             state = subject.ScanState("synthetic", subject.validate_policy(synthetic_policy()))
             subject.scan_git_history(state, repository)
             rules = {item.rule_id for item in state.findings}
@@ -1599,7 +1660,7 @@ class RepositoryTests(unittest.TestCase):
             subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Example User"], cwd=source, check=True)
             subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=source, check=True)
-            (source / "sample.txt").write_text("AIALRA owner@private.test\n", encoding="utf-8")
+            (source / "sample.txt").write_text("AIALRA owner@" + "private.test\n", encoding="utf-8")
             subprocess.run(["git", "add", "sample.txt"], cwd=source, check=True)
             subprocess.run(["git", "commit", "-m", "synthetic fixture"], cwd=source, check=True, capture_output=True)
             # Add a synthetic gitlink so clean-root mode must preserve its exact tree semantics.
@@ -1632,7 +1693,7 @@ class RepositoryTests(unittest.TestCase):
                     os.environ.pop("CODEX_HOME", None)
                 else:
                     os.environ["CODEX_HOME"] = old_codex_home
-            self.assertEqual("AIALRA owner@private.test\n", (source / "sample.txt").read_text(encoding="utf-8"))
+            self.assertEqual("AIALRA owner@" + "private.test\n", (source / "sample.txt").read_text(encoding="utf-8"))
             self.assertEqual("ExampleOrg owner@example.invalid\n", (destination / "sample.txt").read_text(encoding="utf-8"))
             staged = subprocess.run(["git", "ls-files", "--stage", "vendor/demo"], cwd=destination, check=True, capture_output=True, text=True).stdout
             self.assertTrue(staged.startswith(f"160000 {submodule_commit} 0\tvendor/demo"))

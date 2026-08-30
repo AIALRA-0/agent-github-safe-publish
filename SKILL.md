@@ -7,7 +7,7 @@ description: Audit, sanitize, and gate repository content before it is sent to G
 
 Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits fixed-matrix noncritical risk while preserving it in the report. Keep periodic exposure discovery separate from the exact gate for an intended publication
 
-Stable interface version: `1.1.1`. Resume feature development only for a critical miss, security or parser incompatibility, damaged report or checkpoint migration, or a reproducible incorrect publication decision
+Stable interface version: `1.1.2`. Resume feature development only for a critical miss, security or parser incompatibility, damaged report or checkpoint migration, or a reproducible incorrect publication decision
 
 ## 1. Mandatory publication boundary
 
@@ -43,6 +43,8 @@ Periodic exposure audit results describe existing risk. They never authorize del
 - Risk acceptances additionally lock the repository, whole-object SHA-256, scanner SHA-256, and `content-or-scanner-change` trigger
 - Risk acceptances apply only to the fixed noncritical rule matrix and never override credentials, private identifiers, legal records, real data, critical infrastructure, or critical coverage gaps
 - Source-code references to credential variables and synthetic signed URLs in test or fixture paths remain visible noncritical findings; literal credentials and signed URLs outside those exact contexts remain critical
+- Explicitly marked synthetic values in test or fixture lines remain visible noncritical findings; unmarked credentials, private networks, and private identifiers remain critical even below test paths
+- GitHub `users.noreply.github.com` commit attribution remains a visible noncritical public identity finding; other author and committer email addresses remain critical until reviewed
 - Working-tree object identities include a content digest so an exact approval cannot survive a content change
 - Never print, upload, hash into a public report, or place raw candidates in GitHub Actions
 - Read [the private policy contract](references/private-policy.md) before candidate approval or policy compilation

@@ -60,7 +60,7 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.1"
+TOOL_VERSION = "1.1.2"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -127,10 +127,39 @@ SAFE_STANDARD_URLS = {"http://www.w3.org/2000/svg", "http://www.w3.org/1999/xlin
 RELEASE_PROFILES = {"permissive-noncritical", "strict"}
 NONCRITICAL_FINDING_RULES = {
     "credential.assignment-reference",
+    "credential.database-uri-example",
     "credential.signed-url-example",
     "identity.aialra",
     "identity.aialra-confusable",
+    "identity.address-cn-example",
+    "identity.address-us-example",
+    "identity.email-example",
+    "identity.email-public-attribution",
+    "identity.phone-example",
+    "identity.uid-example",
+    "infrastructure.cidr-example",
+    "infrastructure.cloud-resource-example",
+    "infrastructure.hostname-port-example",
+    "infrastructure.ipv4-example",
+    "infrastructure.ipv6-example",
+    "infrastructure.mac-example",
+    "infrastructure.rule-definition",
     "infrastructure.url",
+}
+
+EXPLICIT_SYNTHETIC_RULES = {
+    "credential.database-uri",
+    "identity.address-cn",
+    "identity.address-us",
+    "identity.email",
+    "identity.phone",
+    "identity.uid",
+    "infrastructure.cidr",
+    "infrastructure.cloud-resource",
+    "infrastructure.hostname-port",
+    "infrastructure.ipv4",
+    "infrastructure.ipv6",
+    "infrastructure.mac",
 }
 REPOSITORY_ASSOCIATED_SURFACES = {
     "actions-artifact-content",
@@ -925,8 +954,10 @@ def parse_network_literal(rule_id: str, value: str) -> ipaddress._BaseAddress | 
     return None
 
 
-def is_public_example_address(value: ipaddress._BaseAddress) -> bool:
-    if value.is_loopback or value.is_unspecified or value.is_multicast:
+def is_public_example_address(value: ipaddress._BaseAddress | ipaddress._BaseNetwork) -> bool:
+    if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)) and (
+        value.is_loopback or value.is_unspecified or value.is_multicast
+    ):
         return True
     documentation_networks = (
         ipaddress.ip_network("192.0.2.0/24"),
@@ -934,7 +965,66 @@ def is_public_example_address(value: ipaddress._BaseAddress) -> bool:
         ipaddress.ip_network("203.0.113.0/24"),
         ipaddress.ip_network("2001:db8::/32"),
     )
-    return any(value in network for network in documentation_networks if value.version == network.version)
+    for network in documentation_networks:
+        if value.version != network.version:
+            continue
+        if isinstance(value, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            if value.subnet_of(network):
+                return True
+        elif value in network:
+            return True
+    return False
+
+
+def is_embedded_ipv6_fragment(text: str, match: re.Match[str]) -> bool:
+    """Reject valid-looking hexadecimal fragments embedded in ordinary words or keys."""
+    previous = text[match.start() - 1] if match.start() else ""
+    following = text[match.end()] if match.end() < len(text) else ""
+    separators = "._-"
+    return (
+        previous.isalnum()
+        or following.isalnum()
+        or (bool(previous) and previous in separators)
+        or (bool(following) and following in separators)
+    )
+
+
+def is_dependency_version_false_positive(text: str, match: re.Match[str], display_path: str) -> bool:
+    """Separate dotted dependency versions from IPv4 literals without weakening address checks."""
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    prefix = text[line_start:match.start()]
+    if re.search(r"(?:==|~=)\s*$", prefix):
+        return True
+    name = Path(display_path.split("!", 1)[0]).name.lower()
+    if name in {"pyproject.toml", "poetry.lock", "package.json", "package-lock.json"}:
+        return bool(re.search(r"\bversion\s*[:=]\s*[\"']?$", prefix, re.IGNORECASE))
+    return False
+
+
+def is_explicit_synthetic_context(text: str, match: re.Match[str], display_path: str) -> bool:
+    """Grade only visibly marked test examples as noncritical; unmarked literals still block."""
+    if not is_synthetic_path(display_path):
+        return False
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    if line_end < 0:
+        line_end = len(text)
+    line = text[line_start:line_end].casefold()
+    return any(marker in line for marker in ("synthetic", "example", "示例", "demo", "changeme", "change-me"))
+
+
+def is_scanner_rule_definition(text: str, match: re.Match[str], display_path: str) -> bool:
+    """Keep regex definitions visible without mistaking their syntax for deployed infrastructure."""
+    normalized = display_path.replace("\\", "/").lower()
+    if not normalized.endswith("scripts/safe_publish.py"):
+        return False
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    if line_end < 0:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    raw = match.group(0)
+    return "Rule(" in line and bool(re.search(r"[\\\[\]^$*+?{}()]", raw))
 
 
 def rule_can_match(rule_id: str, text: str, lowered: str) -> bool:
@@ -1014,12 +1104,22 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
                 continue
             if rule.rule_id == "infrastructure.ipv6" and is_powershell_static_member_false_positive(scan_value, match, display_path):
                 continue
+            if rule.rule_id == "infrastructure.ipv6" and is_embedded_ipv6_fragment(scan_value, match):
+                continue
+            if rule.rule_id == "infrastructure.ipv4" and is_dependency_version_false_positive(scan_value, match, display_path):
+                continue
             if rule.rule_id in {"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}:
                 parsed_network = parse_network_literal(rule.rule_id, raw)
                 if parsed_network is None:
                     continue
-                if isinstance(parsed_network, (ipaddress.IPv4Address, ipaddress.IPv6Address)) and is_public_example_address(parsed_network):
+                if is_public_example_address(parsed_network):
                     continue
+            if rule.rule_id == "identity.email" and surface == "git-metadata" and raw.lower().endswith("@users.noreply.github.com"):
+                finding_rule = Rule("identity.email-public-attribution", "identity", "review", rule.pattern, rule.value_group)
+            if rule.rule_id in EXPLICIT_SYNTHETIC_RULES and is_explicit_synthetic_context(scan_value, match, display_path):
+                finding_rule = Rule(f"{rule.rule_id}-example", rule.category, "review", rule.pattern, rule.value_group)
+            if rule.category == "infrastructure" and is_scanner_rule_definition(scan_value, match, display_path):
+                finding_rule = Rule("infrastructure.rule-definition", "infrastructure", "review", rule.pattern, rule.value_group)
             if rule.rule_id == "identity.aialra-confusable" and raw.lower() == "aialra":
                 continue
             if rule.rule_id == "identity.email" and raw.lower().rsplit("@", 1)[-1] in {"example.com", "example.net", "example.org", "example.invalid"}:
