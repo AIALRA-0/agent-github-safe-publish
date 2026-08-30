@@ -57,6 +57,7 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
+TOOL_VERSION = "1.1.0"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -5268,6 +5269,7 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit and gate a sanitized GitHub publication without exposing raw matches")
+    parser.add_argument("--version", action="version", version=f"github-safe-publish {TOOL_VERSION}")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     audit = subcommands.add_parser("audit-fleet", help="Audit an authenticated GitHub owner's finite repository fleet")

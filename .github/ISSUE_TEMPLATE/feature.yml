@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a bounded scanner, parser, or workflow improvement
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the missing coverage or workflow result without private data
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Safety boundary
+      description: Explain the failure behavior, resource limit, and expected publication decision
+    validations:
+      required: true
+  - type: textarea
+    id: synthetic
+    attributes:
+      label: Synthetic acceptance example
+      description: Provide an example.invalid or generated test case
+    validations:
+      required: true

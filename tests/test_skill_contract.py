@@ -1,5 +1,7 @@
 from pathlib import Path
 import re
+import subprocess
+import sys
 import unittest
 
 
@@ -67,6 +69,46 @@ class SkillInvocationContractTests(unittest.TestCase):
         workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
         self.assertNotIn("SAFE_PUBLISH_POLICY_B64", workflow)
         self.assertIn("--generic-only", workflow)
+
+    def test_stable_version_interface(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(REPOSITORY_ROOT / "scripts" / "safe_publish.py"), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual("github-safe-publish 1.1.0", result.stdout.strip())
+
+    def test_reusable_workflow_accepts_only_public_inputs(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
+        call_block = workflow.split("workflow_call:", 1)[1].split("permissions:", 1)[0]
+        self.assertIn("tool_ref:", call_block)
+        self.assertIn("shadow:", call_block)
+        self.assertNotIn("secrets:", call_block)
+        self.assertNotIn("SAFE_PUBLISH_POLICY_B64", workflow)
+
+    def test_runtime_locks_platform_specific_opencv(self) -> None:
+        requirements = (REPOSITORY_ROOT / "requirements-gate.txt").read_text(encoding="utf-8")
+        expected = (
+            'Pillow==12.3.0',
+            'numpy==2.5.2',
+            'opencv-python==4.14.0.94; sys_platform == "win32"',
+            'opencv-python-headless==4.14.0.94; sys_platform != "win32"',
+            'pypdf==6.16.2',
+            'PyMuPDF==1.28.2',
+        )
+        for requirement in expected:
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, requirements)
+
+    def test_official_actions_use_full_commit_identifiers(self) -> None:
+        workflow_paths = sorted((REPOSITORY_ROOT / ".github" / "workflows").glob("*.yml"))
+        action_line = re.compile(r"uses:\s+((?:actions|github)/[^@]+)@([^\s]+)")
+        for workflow_path in workflow_paths:
+            workflow = workflow_path.read_text(encoding="utf-8")
+            for action, revision in action_line.findall(workflow):
+                with self.subTest(workflow=workflow_path.name, action=action):
+                    self.assertRegex(revision, r"^[0-9a-f]{40}$")
 
 
 class DocumentationContractTests(unittest.TestCase):
@@ -137,6 +179,21 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("flowchart TD", diagram)
         self.assertGreaterEqual(diagram.count("-->"), 3)
         self.assertIn("图 2.1", readme[match.end():])
+
+    def test_stable_release_documents_and_license_exist(self) -> None:
+        required = ("LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md")
+        for name in required:
+            with self.subTest(name=name):
+                self.assertTrue((REPOSITORY_ROOT / name).is_file())
+        license_text = (REPOSITORY_ROOT / "LICENSE").read_text(encoding="utf-8")
+        self.assertIn("MIT License", license_text)
+        self.assertIn("Copyright (c) 2026 AIALRA-0", license_text)
+        for readme_name in ("README.md", "README.en.md"):
+            readme = (REPOSITORY_ROOT / readme_name).read_text(encoding="utf-8")
+            self.assertIn("v1.1.0", readme)
+            self.assertIn("SECURITY.md", readme)
+            self.assertIn("CONTRIBUTING.md", readme)
+            self.assertIn("CHANGELOG.md", readme)
 
 
 if __name__ == "__main__":

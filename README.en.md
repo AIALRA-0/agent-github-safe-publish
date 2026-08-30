@@ -10,6 +10,8 @@
 
 <p align="center"><strong>Give every Agent the same redaction, coverage, and stopping rules before any GitHub upload</strong></p>
 
+<p align="center">Stable version <code>v1.1.0</code> · Maintenance status: security and compatibility maintenance</p>
+
 <div align="center">
 
 <p>
@@ -103,6 +105,12 @@ The fixed noncritical rules currently include ordinary public URLs, project home
 The runtime needs Python and Git. A fleet audit also needs an authenticated GitHub CLI, the command-line interface used to read repositories visible to the current account. Expired authentication stops the audit and records a coverage gap
 
 The `safe_publish.py` command is the unified entry point. Its first name selects an audit, preparation, or gate action; parameters beginning with `--` select inputs, outputs, and the publication profile. A missing required parameter fails before any remote write
+
+Confirm the tool version first. An output of `github-safe-publish 1.1.0` binds later reports to this stable implementation
+
+```powershell
+python -X utf8 scripts/safe_publish.py --version # Print the stable version without reading a repository or changing the remote
+```
 
 ```powershell
 python -X utf8 scripts/safe_publish.py --help # Lists every supported command with stable UTF-8 decoding on Windows
@@ -226,6 +234,8 @@ Continuous integration, or CI, automatically runs checks for each code change. T
 
 The [reusable workflow](.github/workflows/reusable-safe-publish.yml) runs public generic rules only and remains shadow evidence
 
+CodeQL is GitHub's source-code security scanner. It checks Python data flow and dangerous calls, then displays results in commit checks and the Security page. An unresolved high-risk alert blocks a stable release
+
 Private policy never enters GitHub Actions controlled by an ordinary repository branch, so this workflow can display only the strict audit and shadow `deny`; it cannot approve publication
 
 The trusted local gate remains authoritative until a separately approved trusted runner exists. A repository owner must approve any later ruleset or branch-protection requirement per repository
@@ -282,9 +292,19 @@ Table 10.1 Main entry points
 
 ## 11. Maintenance and license
 
-Never paste a candidate value, credential, or private policy into a public Issue. Submit a non-sensitive request for a private reporting channel
+The current stable version is `1.1.0`. Maintenance resumes for a critical miss, parser incompatibility, damaged report or checkpoint, or a reproducible incorrect allow or denial
 
-This repository currently has no license file. Public visibility does not grant permission to copy, modify, redistribute, or use the project commercially; obtain permission from the repository owner first
+Private policy versions 1, 2, and 3 remain readable. Older policies migrate in memory and the source file is never modified automatically. Reports and checkpoints should finish with the version that created them; rerun the exact gate after a tool-version change
+
+Use GitHub private vulnerability reporting from the repository Security page. It is visible only to maintainers. Never paste candidate values, credentials, private policies, or local paths into a public Issue
+
+Maintenance entry points are listed below:
+
+- [`SECURITY.md`](SECURITY.md) defines private reporting and credential-incident order
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) defines synthetic tests, compatibility changes, and local checks
+- [`CHANGELOG.md`](CHANGELOG.md) records stable interfaces, migrations, and maintenance triggers
+
+The project is licensed under the [`MIT License`](LICENSE), copyright `AIALRA-0`
 
 ## 12. References
 
