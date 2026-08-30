@@ -51,7 +51,7 @@ Apply Unicode normalization and bounded decoding only as declared by the private
 
 Unsupported formats, missing parsers, encrypted or oversized objects, missing LFS data, incomplete history, pagination failure, permission denial, and unavailable declared surfaces still produce the strict audit result `incomplete`
 
-A working-tree or Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
+A working-tree or Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. A working-tree timeout defers history, LFS, submodule, and Gitleaks work until the next identical resume instead of repeating those expensive layers for every partial slice. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
 
 For exact publication, failures in the working tree, Git history, LFS, submodules, proposed Release assets, private policy, or Gitleaks remain critical and produce publication `deny`. A declared auxiliary remote surface that is not transferred by the exact publication may produce `allow_with_risk`
 

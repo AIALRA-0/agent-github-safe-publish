@@ -1513,7 +1513,7 @@ def restore_worktree_checkpoint(state: ScanState, document: dict[str, Any]) -> i
     return max(0, int(document.get("next_object_index", 0)))
 
 
-def scan_working_tree(
+def _scan_working_tree_slice(
     state: ScanState,
     source: Path,
     *,
@@ -1614,6 +1614,108 @@ def scan_working_tree(
     worktree_state.add_coverage("working-tree", "checked", object_count=len(entries))
     save_checkpoint(len(entries))
     merge_scan_state(state, worktree_state)
+
+
+def worktree_worker_result_document(state: ScanState) -> dict[str, Any]:
+    return {
+        "findings": [item.public_dict() for item in state.findings],
+        "coverage": [item.as_dict() for item in state.coverage],
+        "object_sha256": state.object_sha256,
+        "raw_candidates": state.raw_candidates if state.collect_raw else [],
+        "worktree_progress": state.worktree_progress,
+    }
+
+
+def restore_worktree_worker_result(state: ScanState, document: dict[str, Any]) -> None:
+    restore_worktree_checkpoint(state, document)
+    progress = document.get("worktree_progress")
+    if isinstance(progress, dict):
+        state.worktree_progress = {
+            "status": str(progress.get("status", "in_progress")),
+            "processed_object_count": max(0, int(progress.get("processed_object_count", 0))),
+            "total_object_count": max(0, int(progress.get("total_object_count", 0))),
+            "resumed": bool(progress.get("resumed", False)),
+        }
+
+
+def scan_working_tree(
+    state: ScanState,
+    source: Path,
+    *,
+    time_limit_seconds: int | None = None,
+    checkpoint_path: Path | None = None,
+    checkpoint_interval: int = DEFAULT_WORKTREE_CHECKPOINT_INTERVAL,
+) -> None:
+    if time_limit_seconds is None or time_limit_seconds <= 0:
+        _scan_working_tree_slice(
+            state,
+            source,
+            time_limit_seconds=time_limit_seconds,
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=checkpoint_interval,
+        )
+        return
+
+    entries, inventory_digest = working_tree_inventory(source)
+    binding = worktree_checkpoint_binding(state, source, inventory_digest, len(entries))
+    resolved_checkpoint = ensure_private_path(checkpoint_path or default_worktree_checkpoint_path(binding))
+    worker_root = ensure_private_path(private_root() / "worktree-workers")
+    worker_root.mkdir(parents=True, exist_ok=True)
+    restrict_private_path(worker_root, directory=True)
+    token = sha256_bytes(
+        f"{os.getpid()}:{time.time_ns()}:{resolved_checkpoint}".encode("utf-8", errors="surrogateescape")
+    )
+    task_path = worker_root / f"{token}.task.private.json"
+    result_path = worker_root / f"{token}.result.private.json"
+    write_json(
+        task_path,
+        {
+            "repository": state.repository,
+            "policy": state.policy,
+            "collect_raw": state.collect_raw,
+            "source": str(source),
+            "checkpoint": str(resolved_checkpoint),
+            "checkpoint_interval": max(1, min(checkpoint_interval, 5)),
+            "result": str(result_path),
+        },
+        private=True,
+    )
+    try:
+        try:
+            worker = run(
+                [sys.executable, str(Path(__file__).resolve()), "_scan-worktree-worker", "--task", str(task_path)],
+                timeout_seconds=max(1, time_limit_seconds),
+            )
+        except subprocess.TimeoutExpired:
+            if resolved_checkpoint.exists():
+                try:
+                    partial = json.loads(resolved_checkpoint.read_text(encoding="utf-8"))
+                    if partial.get("binding") == binding:
+                        next_index = restore_worktree_checkpoint(state, partial)
+                        state.worktree_progress = {
+                            "status": "in_progress",
+                            "processed_object_count": next_index,
+                            "total_object_count": len(entries),
+                            "resumed": next_index > 0,
+                        }
+                except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+                    pass
+            state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded")
+            return
+        if worker.returncode != 0 or not result_path.is_file():
+            state.add_coverage("working-tree", "tool_failed", "working-tree-worker-failed")
+            return
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            restore_worktree_worker_result(state, result)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+            state.add_coverage("working-tree", "tool_failed", "working-tree-worker-result-invalid")
+    finally:
+        for temporary in (task_path, result_path):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def git_head(source: Path) -> str | None:
@@ -2409,20 +2511,24 @@ def command_gate(args: argparse.Namespace) -> int:
             ),
             checkpoint_interval=getattr(args, "worktree_checkpoint_interval", DEFAULT_WORKTREE_CHECKPOINT_INTERVAL),
         )
-        scan_git_history(
-            state,
-            source,
-            time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
-            checkpoint_path=(
-                Path(args.git_history_checkpoint).expanduser().resolve()
-                if getattr(args, "git_history_checkpoint", None)
-                else None
-            ),
-            checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
+        worktree_slice_incomplete = any(
+            item.reason == "working-tree-time-limit-exceeded" for item in state.coverage
         )
-        scan_submodules(state, source)
-        scan_lfs(state, source)
-        run_gitleaks(state, source, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
+        if not worktree_slice_incomplete:
+            scan_git_history(
+                state,
+                source,
+                time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
+                checkpoint_path=(
+                    Path(args.git_history_checkpoint).expanduser().resolve()
+                    if getattr(args, "git_history_checkpoint", None)
+                    else None
+                ),
+                checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
+            )
+            scan_submodules(state, source)
+            scan_lfs(state, source)
+            run_gitleaks(state, source, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
     scan_release_paths(state, [Path(item).expanduser().resolve() for item in args.release_asset])
     report = gate_report(
         state,
@@ -4146,9 +4252,40 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
     return 0 if len(detailed) == len(owned_by_id) else 4
 
 
+def command_scan_worktree_worker(args: argparse.Namespace) -> int:
+    task_path = ensure_private_path(Path(args.task))
+    try:
+        task = json.loads(task_path.read_text(encoding="utf-8"))
+        source = Path(task["source"]).expanduser().resolve()
+        checkpoint = ensure_private_path(Path(task["checkpoint"]))
+        result_path = ensure_private_path(Path(task["result"]))
+        policy = validate_policy(task["policy"])
+        repository = str(task["repository"])
+        collect_raw = bool(task.get("collect_raw", False))
+        interval = max(1, min(int(task.get("checkpoint_interval", 1)), 100))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return 2
+    worker_state = ScanState(repository, policy, collect_raw=collect_raw)
+    if not source.is_dir():
+        worker_state.add_coverage("working-tree", "unreadable", "source-directory-unavailable")
+    else:
+        _scan_working_tree_slice(
+            worker_state,
+            source,
+            checkpoint_path=checkpoint,
+            checkpoint_interval=interval,
+        )
+    write_json(result_path, worktree_worker_result_document(worker_state), private=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit and gate a sanitized GitHub publication without exposing raw matches")
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    worktree_worker = subcommands.add_parser("_scan-worktree-worker", help=argparse.SUPPRESS)
+    worktree_worker.add_argument("--task", required=True)
+    worktree_worker.set_defaults(handler=command_scan_worktree_worker)
 
     audit = subcommands.add_parser("audit-fleet", help="Audit an authenticated GitHub owner's finite repository fleet")
     audit.add_argument("--owner", required=True)

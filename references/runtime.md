@@ -21,4 +21,6 @@ Gitleaks remains pinned to the version declared by `safe_publish.py`; the scanne
 
 Missing parsers, incompatible runtime results, encrypted objects, resource limits, and malformed containers return `incomplete`
 
+Bounded working-tree slices run in an isolated child process. Worker task and result documents stay below the private Safe Publish root, are removed after the slice, and never place policy values or raw candidates on the command line
+
 NPY and NPZ parsing always uses `allow_pickle=False`. Object dtypes, excessive members, excessive expansion, excessive elements, excessive memory size, excessive extracted text, and excessive nested dtype depth cannot pass the gate
