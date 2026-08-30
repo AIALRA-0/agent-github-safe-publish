@@ -18,6 +18,8 @@ The working tree and Git history use separate checkpoints and time slices. Resum
 
 An exact gate saves Git-history progress after bounded object intervals and again when its time budget expires. Rerun the same command with the same checkpoint to continue from the saved object index
 
+The Git-history scanner runs in an isolated child process whenever a positive time limit is active. The parent enforces the full wall-clock limit, returns `GIT_HISTORY_TIMEOUT` when the child does not finish, and never treats an absent child result as complete
+
 Use the same `--ocr-checkpoint` for identical reruns. Completed image and PDF-page units replay their redacted results, while the next uncached unit consumes the new process budget. A changed repository, source commit, scanner, or policy invalidates the OCR checkpoint
 
 OCR budget exhaustion in Git history keeps the history checkpoint on the current object. Do not manually advance it. Report and history finding pages are content-addressed and must pass digest and total-count verification before resume
@@ -31,6 +33,8 @@ Do not overwrite a stale explicit checkpoint. Keep it as private evidence and se
 A failed branch push, pull-request creation, status check, tree comparison, or merge leaves the checkpoint outside the repository
 
 Do not force-push or use administrator bypass. Inspect the checkpoint state, repair the external condition, then resume only if all bound fingerprints remain unchanged
+
+Managed publication writes a fail-closed placeholder before the exact gate starts. A scanner exception replaces it with `SCANNER_CRASHED`; an unchanged or missing report returns `GATE_REPORT_MISSING`. Both results remain `incomplete` with publication `deny`
 
 ## 5. Incident
 

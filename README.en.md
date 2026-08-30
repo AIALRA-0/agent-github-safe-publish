@@ -184,7 +184,9 @@ Image OCR receives a 300-second budget per repository and a separate 120-second 
 
 Each local session file runs in an isolated child process with a 600-second default budget. A child crash or timeout isolates only that file and returns `incomplete` instead of terminating the fleet. Gitleaks keeps its 300-second internal limit and receives a 330-second parent-process hard timeout
 
-An exact gate limits Git-history work to 900 seconds per run by default and atomically saves redacted findings, coverage, and the next object position in a private checkpoint. OCR budget exhaustion keeps the history position on the unfinished object. An identical repository, source commit, complete object inventory, scanner, and policy resumes from that point. Any changed binding returns `incomplete` and `deny` without overwriting the old evidence
+An exact gate limits Git-history work to 900 seconds per run by default, with a parent process that terminates a stuck isolated scanner. A timeout returns `GIT_HISTORY_TIMEOUT` and atomically saves redacted findings, coverage, and the next object position in a private checkpoint. OCR budget exhaustion keeps the history position on the unfinished object. An identical repository, source commit, complete object inventory, scanner, and policy resumes from that point. Any changed binding returns `incomplete` and `deny` without overwriting the old evidence
+
+Managed publication writes a deny-by-default placeholder before scanning. A scanner crash returns `SCANNER_CRASHED`; a missing report returns `GATE_REPORT_MISSING`. Both outcomes preserve a recoverable record and stop remote writes
 
 The working tree has the same 900-second default slice. Its checkpoint binds every file path, kind, and content digest plus the next file index. A total-time, OCR, or complex-artifact failure keeps the index on the current file for an identical retry
 

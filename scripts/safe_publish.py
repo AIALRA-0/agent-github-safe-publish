@@ -2413,7 +2413,7 @@ def restore_history_checkpoint(state: ScanState, checkpoint_path: Path, document
     )
 
 
-def scan_git_history(
+def _scan_git_history_slice(
     state: ScanState,
     source: Path,
     *,
@@ -2664,6 +2664,135 @@ def scan_git_history(
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
+
+
+def history_worker_result_document(state: ScanState) -> dict[str, Any]:
+    return {
+        "findings": [item.public_dict() for item in state.findings],
+        "coverage": [item.as_dict() for item in state.coverage],
+        "object_sha256": state.object_sha256,
+        "raw_candidates": state.raw_candidates if state.collect_raw else [],
+        "history_progress": state.history_progress,
+    }
+
+
+def restore_history_worker_result(state: ScanState, document: dict[str, Any]) -> None:
+    findings = [Finding(**item) for item in document.get("findings", [])]
+    coverage = [Coverage(**item) for item in document.get("coverage", [])]
+    state.replay_redacted_result(findings, coverage)
+    state.object_sha256.update({str(key): str(value) for key, value in document.get("object_sha256", {}).items()})
+    if state.collect_raw:
+        for candidate in document.get("raw_candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            key = (
+                str(candidate.get("repository", "")),
+                str(candidate.get("surface", "")),
+                str(candidate.get("object", "")),
+                str(candidate.get("rule_id", "")),
+                str(candidate.get("raw_value", "")),
+            )
+            if key not in state._candidate_keys:
+                state._candidate_keys.add(key)
+                state.raw_candidates.append(candidate)
+        state._raw_candidate_total = max(state._raw_candidate_total, len(state.raw_candidates))
+    progress = document.get("history_progress")
+    if isinstance(progress, dict):
+        state.history_progress = progress
+
+
+def command_scan_git_history_worker(args: argparse.Namespace) -> int:
+    task_path = ensure_private_path(Path(args.task).expanduser().resolve())
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    result_path = ensure_private_path(Path(task["result"]).expanduser().resolve())
+    source = Path(task["source"]).expanduser().resolve()
+    policy = validate_policy(task["policy"])
+    store: OcrCheckpointStore | None = None
+    try:
+        if task.get("ocr_path") and task.get("ocr_binding"):
+            store = OcrCheckpointStore(Path(task["ocr_path"]), task["ocr_binding"])
+        worker_state = ScanState(
+            str(task["repository"]),
+            policy,
+            collect_raw=bool(task.get("collect_raw", False)),
+            ocr_store=store,
+        )
+        _scan_git_history_slice(
+            worker_state,
+            source,
+            time_limit_seconds=int(task["slice_time_limit_seconds"]),
+            checkpoint_path=Path(task["checkpoint"]) if task.get("checkpoint") else None,
+            checkpoint_interval=max(1, int(task.get("checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL))),
+        )
+        write_json(result_path, history_worker_result_document(worker_state), private=True)
+    finally:
+        if store is not None:
+            store.close()
+    return 0
+
+
+def scan_git_history(
+    state: ScanState,
+    source: Path,
+    *,
+    time_limit_seconds: int | None = None,
+    checkpoint_path: Path | None = None,
+    checkpoint_interval: int = DEFAULT_HISTORY_CHECKPOINT_INTERVAL,
+) -> None:
+    if time_limit_seconds is None or time_limit_seconds <= 0:
+        _scan_git_history_slice(
+            state,
+            source,
+            time_limit_seconds=time_limit_seconds,
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=checkpoint_interval,
+        )
+        return
+
+    worker_root = ensure_private_path(private_root() / "git-history-workers")
+    worker_root.mkdir(parents=True, exist_ok=True)
+    restrict_private_path(worker_root, directory=True)
+    token = sha256_bytes(f"{os.getpid()}:{time.time_ns()}:{source}".encode("utf-8", errors="surrogateescape"))
+    task_path = worker_root / f"{token}.task.private.json"
+    result_path = worker_root / f"{token}.result.private.json"
+    write_json(
+        task_path,
+        {
+            "repository": state.repository,
+            "policy": state.policy,
+            "collect_raw": state.collect_raw,
+            "source": str(source),
+            "checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
+            "checkpoint_interval": max(1, min(checkpoint_interval, 100)),
+            "slice_time_limit_seconds": max(0, time_limit_seconds - 1),
+            "ocr_path": str(state.ocr_store.path) if state.ocr_store is not None else None,
+            "ocr_binding": state.ocr_store.binding if state.ocr_store is not None else None,
+            "result": str(result_path),
+        },
+        private=True,
+    )
+    try:
+        try:
+            worker = run(
+                [sys.executable, str(Path(__file__).resolve()), "_scan-git-history-worker", "--task", str(task_path)],
+                timeout_seconds=max(1, time_limit_seconds),
+            )
+        except subprocess.TimeoutExpired:
+            state.add_coverage("git-history", "tool_failed", "git-history-hard-time-limit-exceeded")
+            return
+        if worker.returncode != 0 or not result_path.is_file():
+            state.add_coverage("git-history", "tool_failed", "git-history-worker-failed")
+            return
+        try:
+            restore_history_worker_result(state, json.loads(result_path.read_text(encoding="utf-8")))
+        except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+            state.add_coverage("git-history", "tool_failed", "git-history-worker-result-invalid")
+    finally:
+        for temporary in (task_path, result_path):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def scan_git_refs(state: ScanState, source: Path, *, timeout_seconds: int | None = None) -> None:
@@ -2944,6 +3073,19 @@ def consolidated_coverage(coverage: list[Coverage]) -> list[dict[str, Any]]:
     return result
 
 
+def coverage_issue_codes(coverage: list[Coverage]) -> list[str]:
+    codes: set[str] = set()
+    for item in coverage:
+        reason = item.reason.split(":", 1)[0]
+        if reason in {"git-history-time-limit-exceeded", "git-history-hard-time-limit-exceeded"}:
+            codes.add("GIT_HISTORY_TIMEOUT")
+        elif reason in {"git-history-worker-failed", "scanner-crashed"}:
+            codes.add("SCANNER_CRASHED")
+        elif reason == "gate-report-missing":
+            codes.add("GATE_REPORT_MISSING")
+    return sorted(codes)
+
+
 def decision_for(state: ScanState, *, force_incomplete: bool = False) -> str:
     if force_incomplete or any(item.status not in {"checked", "not_present"} for item in state.coverage):
         return "incomplete"
@@ -3119,6 +3261,7 @@ def gate_report(
             else None
         ),
         "coverage": coverage,
+        "issue_codes": coverage_issue_codes(state.coverage),
         "findings": findings,
         "summary": summary,
         "result_explanation": gate_result_explanation(decision, publication_decision, summary),
@@ -3240,6 +3383,7 @@ def command_gate(args: argparse.Namespace) -> int:
                 "report_fingerprint": report["report_fingerprint"],
                 "history_progress": report["history_progress"],
                 "worktree_progress": report["worktree_progress"],
+                "issue_codes": report["issue_codes"],
                 "summary": report["summary"],
                 "result_explanation": report["result_explanation"],
             },
@@ -3508,6 +3652,48 @@ def update_managed_public_summary(path: str | None, values: dict[str, Any]) -> N
     write_json(target, document)
 
 
+def write_managed_gate_failure(
+    *,
+    issue_reason: str,
+    repository: str,
+    candidate: Path,
+    policy: dict[str, Any],
+    release_profile: str,
+    report_path: Path,
+    public_summary_path: str | None,
+) -> dict[str, Any]:
+    failure_state = ScanState(repository, policy)
+    failure_state.add_coverage("exact-gate", "tool_failed", issue_reason)
+    report = gate_report(
+        failure_state,
+        candidate,
+        policy,
+        release_profile=release_profile,
+        force_incomplete=True,
+    )
+    write_paginated_private_report(report_path, report)
+    if public_summary_path:
+        write_json(
+            Path(public_summary_path),
+            {
+                "schema_version": SCHEMA_VERSION,
+                "mode": report["mode"],
+                "decision": report["decision"],
+                "publication_decision": report["publication_decision"],
+                "release_profile": report["release_profile"],
+                "source_commit": report["source_commit"],
+                "scanner_sha256": report["scanner_versions"]["safe_publish_sha256"],
+                "policy_fingerprint": report["policy_fingerprint"],
+                "report_fingerprint": report["report_fingerprint"],
+                "issue_codes": report["issue_codes"],
+                "summary": report["summary"],
+                "result_explanation": report["result_explanation"],
+                "managed_state": "incomplete",
+            },
+        )
+    return report
+
+
 def command_managed_publish(args: argparse.Namespace) -> int:
     """Gate one exact worktree candidate and optionally publish it through a PR."""
     source = Path(args.source).expanduser().resolve()
@@ -3590,8 +3776,66 @@ def command_managed_publish(args: argparse.Namespace) -> int:
         git_history_time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
         git_history_checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
     )
-    gate_exit = command_gate(gate_args)
-    gate_document = json.loads(report_path.read_text(encoding="utf-8"))
+    placeholder = write_managed_gate_failure(
+        issue_reason="gate-report-missing",
+        repository=args.repository,
+        candidate=candidate,
+        policy=policy,
+        release_profile=args.release_profile,
+        report_path=report_path,
+        public_summary_path=args.public_summary,
+    )
+    try:
+        gate_exit = command_gate(gate_args)
+    except Exception:
+        gate_document = write_managed_gate_failure(
+            issue_reason="scanner-crashed",
+            repository=args.repository,
+            candidate=candidate,
+            policy=policy,
+            release_profile=args.release_profile,
+            report_path=report_path,
+            public_summary_path=args.public_summary,
+        )
+        checkpoint = {
+            "schema_version": SCHEMA_VERSION,
+            "state": "incomplete",
+            "base_commit": base_commit,
+            "candidate_tree_oid": tree_oid,
+            "candidate_tree_sha256": tree_sha256,
+            "patch_sha256": patch_sha256,
+            "scanner_sha256": gate_document["scanner_versions"]["safe_publish_sha256"],
+            "policy_fingerprint": gate_document["policy_fingerprint"],
+            "report_fingerprint": gate_document["report_fingerprint"],
+            "publication_decision": "deny",
+            "issue_codes": gate_document["issue_codes"],
+            "validation": validations,
+        }
+        write_json(checkpoint_path, checkpoint, private=True)
+        print(json.dumps({"publication_decision": "deny", "state": "incomplete", "issue_codes": checkpoint["issue_codes"]}, sort_keys=True))
+        return 4
+    try:
+        gate_document = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        gate_document = placeholder
+    if gate_document.get("report_fingerprint") == placeholder["report_fingerprint"]:
+        checkpoint = {
+            "schema_version": SCHEMA_VERSION,
+            "state": "incomplete",
+            "base_commit": base_commit,
+            "candidate_tree_oid": tree_oid,
+            "candidate_tree_sha256": tree_sha256,
+            "patch_sha256": patch_sha256,
+            "scanner_sha256": placeholder["scanner_versions"]["safe_publish_sha256"],
+            "policy_fingerprint": placeholder["policy_fingerprint"],
+            "report_fingerprint": placeholder["report_fingerprint"],
+            "publication_decision": "deny",
+            "issue_codes": placeholder["issue_codes"],
+            "validation": validations,
+        }
+        write_json(checkpoint_path, checkpoint, private=True)
+        print(json.dumps({"publication_decision": "deny", "state": "incomplete", "issue_codes": checkpoint["issue_codes"]}, sort_keys=True))
+        return 4
     publication_decision = gate_document["publication_decision"]
     checkpoint = {
         "schema_version": SCHEMA_VERSION,
@@ -5062,6 +5306,10 @@ def build_parser() -> argparse.ArgumentParser:
     worktree_worker = subcommands.add_parser("_scan-worktree-worker", help=argparse.SUPPRESS)
     worktree_worker.add_argument("--task", required=True)
     worktree_worker.set_defaults(handler=command_scan_worktree_worker)
+
+    history_worker = subcommands.add_parser("_scan-git-history-worker", help=argparse.SUPPRESS)
+    history_worker.add_argument("--task", required=True)
+    history_worker.set_defaults(handler=command_scan_git_history_worker)
 
     compile_policy = subcommands.add_parser("compile-policy", help="Compile a repository-scoped v3 policy from the private master policy")
     compile_policy.add_argument("--policy", required=True)
