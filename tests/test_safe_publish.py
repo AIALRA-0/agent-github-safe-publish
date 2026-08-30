@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import io
+import gzip
+import bz2
 import json
+import lzma
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -142,6 +146,121 @@ class PatternTests(unittest.TestCase):
         network_rules = {finding.rule_id for finding in state.findings}
         self.assertTrue({"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}.issubset(network_rules))
         self.assertEqual("deny", subject.publication_decision_for(state))
+
+    def test_code_references_are_reported_without_blocking_literal_credentials(self) -> None:
+        reference_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            reference_state,
+            'password = settings["webui"]["password"]\ntoken = os.environ.get("SERVICE_TOKEN")',
+            surface="working-tree",
+            object_id="working-tree:source.py",
+            display_path="src/source.py",
+        )
+        self.assertEqual(
+            {"credential.assignment-reference"},
+            {finding.rule_id for finding in reference_state.findings},
+        )
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(reference_state))
+
+        literal_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            literal_state,
+            'password="REAL_LITERAL_VALUE_9472"',
+            surface="working-tree",
+            object_id="working-tree:config.py",
+            display_path="src/config.py",
+        )
+        self.assertEqual({"credential.assignment"}, {finding.rule_id for finding in literal_state.findings})
+        self.assertEqual("deny", subject.publication_decision_for(literal_state))
+
+        fixture_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            fixture_state,
+            'password="RUNTIME_GENERATED_FIXTURE_9472"',
+            surface="working-tree",
+            object_id="working-tree:test-fixture",
+            display_path="tests/test_config.py",
+        )
+        self.assertEqual(
+            {"credential.assignment-reference"},
+            {finding.rule_id for finding in fixture_state.findings},
+        )
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(fixture_state))
+
+        example_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            example_state,
+            'password: "remote-only-change-me"',
+            surface="working-tree",
+            object_id="working-tree:example-config",
+            display_path="config.example.yaml",
+        )
+        self.assertEqual([], example_state.findings)
+
+    def test_test_signed_urls_are_noncritical_but_runtime_signed_urls_block(self) -> None:
+        marker = "https://storage.invalid/object?signature=SYNTHETIC_SIGNATURE_9472"
+        test_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            test_state,
+            marker,
+            surface="working-tree",
+            object_id="working-tree:test-url",
+            display_path="tests/test_download.py",
+        )
+        self.assertIn("credential.signed-url-example", {finding.rule_id for finding in test_state.findings})
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(test_state))
+
+        runtime_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            runtime_state,
+            marker,
+            surface="working-tree",
+            object_id="working-tree:runtime-url",
+            display_path="config/runtime.txt",
+        )
+        self.assertIn("credential.signed-url", {finding.rule_id for finding in runtime_state.findings})
+        self.assertEqual("deny", subject.publication_decision_for(runtime_state))
+
+    def test_svg_geometry_and_powershell_static_members_do_not_masquerade_as_private_values(self) -> None:
+        geometry_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            geometry_state,
+            '<path d="M0 410 C240 330 360 510 610 420 C830 340 1080 430 1440 350 V520 H0Z"/>',
+            surface="working-tree",
+            object_id="working-tree:hero.svg",
+            display_path="docs/hero.svg",
+        )
+        self.assertNotIn("identity.phone", {finding.rule_id for finding in geometry_state.findings})
+
+        phone_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            phone_state,
+            '<text>555-010-9472</text>',
+            surface="working-tree",
+            object_id="working-tree:contact.svg",
+            display_path="docs/contact.svg",
+        )
+        self.assertIn("identity.phone", {finding.rule_id for finding in phone_state.findings})
+
+        powershell_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            powershell_state,
+            "$sha = [System.Security.Cryptography.SHA256]::Create()",
+            surface="working-tree",
+            object_id="working-tree:script.ps1",
+            display_path="tools/script.ps1",
+        )
+        self.assertNotIn("infrastructure.ipv6", {finding.rule_id for finding in powershell_state.findings})
+
+    def test_working_tree_objects_are_bound_to_content_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "README.md").write_text("https://public.example/project\n", encoding="utf-8")
+            state = subject.ScanState("synthetic", subject.empty_policy())
+            subject._scan_working_tree_slice(state, root)
+            finding = next(item for item in state.findings if item.rule_id == "infrastructure.url")
+            expected_digest = subject.sha256_bytes((root / "README.md").read_bytes())
+            self.assertEqual(f"working-tree:{expected_digest}:README.md", finding.object)
 
 
 class PolicyTests(unittest.TestCase):
@@ -512,6 +631,53 @@ class PublicationDecisionTests(unittest.TestCase):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_single_file_compressed_streams_are_bounded_and_scanned_without_tar_false_positive(self) -> None:
+        streams = {
+            ".gz": gzip.compress(b"password=SYNTHETIC_GZIP_SECRET"),
+            ".bz2": bz2.compress(b"password=SYNTHETIC_BZIP_SECRET"),
+            ".xz": lzma.compress(b"password=SYNTHETIC_XZ_SECRET"),
+        }
+        for suffix, payload in streams.items():
+            with self.subTest(suffix=suffix):
+                state = subject.ScanState("synthetic", subject.empty_policy())
+                subject.scan_bytes(
+                    state,
+                    payload,
+                    surface="working-tree",
+                    object_id=f"working-tree:sample.txt{suffix}",
+                    display_path=f"sample.txt{suffix}",
+                )
+                self.assertIn("credential.assignment", {item.rule_id for item in state.findings})
+                self.assertFalse(any(item.reason.startswith("invalid-tar:") for item in state.coverage))
+
+        with mock.patch.object(subject, "MAX_ARCHIVE_EXPANDED_BYTES", 8):
+            limited = subject.ScanState("synthetic", subject.empty_policy())
+            subject.scan_bytes(
+                limited,
+                streams[".gz"],
+                surface="working-tree",
+                object_id="working-tree:limited.txt.gz",
+                display_path="limited.txt.gz",
+            )
+        self.assertTrue(any(item.reason.startswith("archive-expansion-limit:") for item in limited.coverage))
+
+    def test_compressed_tar_keeps_member_scanning(self) -> None:
+        archive_buffer = io.BytesIO()
+        with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+            content = b"password=SYNTHETIC_TAR_SECRET"
+            info = tarfile.TarInfo("nested.txt")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(
+            state,
+            archive_buffer.getvalue(),
+            surface="working-tree",
+            object_id="working-tree:sample.tar.gz",
+            display_path="sample.tar.gz",
+        )
+        self.assertIn("credential.assignment", {item.rule_id for item in state.findings})
+
     def test_oversized_text_object_fails_closed_before_unbounded_pattern_scanning(self) -> None:
         state = subject.ScanState("synthetic", subject.empty_policy())
         with mock.patch.object(subject, "DEFAULT_MAX_INLINE_TEXT_BYTES", 100):

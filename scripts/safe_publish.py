@@ -13,15 +13,18 @@ from array import array
 import base64
 import bisect
 import binascii
+import bz2
 import dataclasses
 import datetime as dt
 import fnmatch
+import gzip
 import hashlib
 from html.parser import HTMLParser
 import importlib
 import io
 import ipaddress
 import json
+import lzma
 import multiprocessing
 import os
 from pathlib import Path
@@ -57,7 +60,7 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.1.1"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -123,6 +126,8 @@ SVG_MIME_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".g
 SAFE_STANDARD_URLS = {"http://www.w3.org/2000/svg", "http://www.w3.org/1999/xlink"}
 RELEASE_PROFILES = {"permissive-noncritical", "strict"}
 NONCRITICAL_FINDING_RULES = {
+    "credential.assignment-reference",
+    "credential.signed-url-example",
     "identity.aialra",
     "identity.aialra-confusable",
     "infrastructure.url",
@@ -808,7 +813,103 @@ def is_placeholder(value: str) -> bool:
     normalized = value.strip().strip("{}[]()<>").lower()
     if normalized in PLACEHOLDER_VALUES:
         return True
-    return any(token in normalized for token in ("example", "placeholder", "redacted", "replace_me", "replace-me", "your_"))
+    if value.strip().startswith(("${", "$env:", "%")):
+        return True
+    return any(
+        token in normalized
+        for token in (
+            "example",
+            "placeholder",
+            "redacted",
+            "change-me",
+            "changeme",
+            "replace_me",
+            "replace-me",
+            "your_",
+        )
+    )
+
+
+SOURCE_CODE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".mjs",
+    ".php",
+    ".ps1",
+    ".psm1",
+    ".py",
+    ".pyi",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".vue",
+}
+
+
+def is_synthetic_path(display_path: str) -> bool:
+    normalized = display_path.replace("\\", "/").lower()
+    segments = set(normalized.split("/"))
+    name = normalized.rsplit("/", 1)[-1]
+    return bool(
+        segments.intersection({"example", "examples", "fixture", "fixtures", "test", "tests"})
+        or name.startswith(("test_", "example."))
+        or name.endswith((".example", ".example.json", ".example.yaml", ".example.yml"))
+        or ".example." in name
+    )
+
+
+def is_nonliteral_credential_assignment(match: re.Match[str], text: str, display_path: str, raw: str) -> bool:
+    """Separate executable references and synthetic fixtures from literal credential values."""
+    if is_placeholder(raw):
+        return True
+    raw_start = match.start(1)
+    quoted = raw_start > 0 and text[raw_start - 1] in {"'", '"'}
+    if is_synthetic_path(display_path):
+        return True
+    suffix = Path(display_path.split("!", 1)[0]).suffix.lower()
+    name = Path(display_path.split("!", 1)[0]).name.lower()
+    if suffix in SOURCE_CODE_SUFFIXES and "scan" in name and re.search(r"[\[\]\\^$*+?{}()]", raw):
+        return True
+    if suffix not in SOURCE_CODE_SUFFIXES or quoted:
+        return False
+    if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", raw):
+        return True
+    return any(character in raw for character in ("$", "(", ")", "[", "]", "{", "}", "."))
+
+
+def is_svg_path_geometry(text: str, match: re.Match[str], display_path: str) -> bool:
+    if Path(display_path.split("!", 1)[0]).suffix.lower() != ".svg":
+        return False
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    if line_end < 0:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    relative_start = match.start() - line_start
+    attribute_start = line.rfind(' d="', 0, relative_start)
+    attribute_end = line.find('"', attribute_start + 4) if attribute_start >= 0 else -1
+    return attribute_start >= 0 and attribute_end >= relative_start
+
+
+def is_powershell_static_member_false_positive(text: str, match: re.Match[str], display_path: str) -> bool:
+    if Path(display_path.split("!", 1)[0]).suffix.lower() not in {".ps1", ".psm1"}:
+        return False
+    previous = text[match.start() - 1] if match.start() else ""
+    following = text[match.end()] if match.end() < len(text) else ""
+    return previous == "]" or following.isalpha() or following == "_"
 
 
 def parse_network_literal(rule_id: str, value: str) -> ipaddress._BaseAddress | ipaddress._BaseNetwork | None:
@@ -901,7 +1002,17 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
             continue
         for match in rule.pattern.finditer(scan_value):
             raw = match.group(rule.value_group)
-            if rule.rule_id == "credential.assignment" and is_placeholder(raw):
+            finding_rule = rule
+            if rule.rule_id == "credential.assignment":
+                if is_placeholder(raw):
+                    continue
+                if is_nonliteral_credential_assignment(match, scan_value, display_path, raw):
+                    finding_rule = Rule("credential.assignment-reference", "credential", "review", rule.pattern, rule.value_group)
+            if rule.rule_id == "credential.signed-url" and is_synthetic_path(display_path):
+                finding_rule = Rule("credential.signed-url-example", "credential", "review", rule.pattern, rule.value_group)
+            if rule.rule_id == "identity.phone" and is_svg_path_geometry(scan_value, match, display_path):
+                continue
+            if rule.rule_id == "infrastructure.ipv6" and is_powershell_static_member_false_positive(scan_value, match, display_path):
                 continue
             if rule.rule_id in {"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}:
                 parsed_network = parse_network_literal(rule.rule_id, raw)
@@ -924,7 +1035,7 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
                 surface=surface,
                 object_id=object_id,
                 location=f"{display_path}:{line}:{column}",
-                rule=rule,
+                rule=finding_rule,
                 raw_value=raw,
                 legal=legal,
             )
@@ -1044,6 +1155,61 @@ def scan_tar(
                 )
     except (tarfile.TarError, OSError):
         state.add_coverage(surface, "unreadable", f"invalid-tar:{object_id}")
+
+
+def scan_compressed_stream(
+    state: ScanState,
+    data: bytes,
+    *,
+    surface: str,
+    object_id: str,
+    display_path: str,
+    depth: int,
+    suffix: str,
+) -> None:
+    """Scan a bounded single-file compressed stream or a compressed tar archive."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*"):
+            pass
+    except (tarfile.TarError, OSError):
+        is_tar = False
+    else:
+        is_tar = True
+    if is_tar:
+        scan_tar(
+            state,
+            data,
+            surface=surface,
+            object_id=object_id,
+            display_path=display_path,
+            depth=depth,
+        )
+        return
+
+    try:
+        source = io.BytesIO(data)
+        if suffix == ".gz":
+            stream = gzip.GzipFile(fileobj=source, mode="rb")
+        elif suffix == ".bz2":
+            stream = bz2.BZ2File(source, mode="rb")
+        else:
+            stream = lzma.LZMAFile(source, mode="rb")
+        with stream:
+            expanded = stream.read(MAX_ARCHIVE_EXPANDED_BYTES + 1)
+        if len(expanded) > MAX_ARCHIVE_EXPANDED_BYTES:
+            state.add_coverage(surface, "tool_failed", f"archive-expansion-limit:{object_id}")
+            return
+        member_name = Path(display_path).with_suffix("").name
+        scan_bytes(
+            state,
+            expanded,
+            surface=surface,
+            object_id=f"{object_id}!{member_name}",
+            display_path=f"{display_path}!{member_name}",
+            depth=depth + 1,
+        )
+    except (EOFError, OSError, lzma.LZMAError):
+        state.add_coverage(surface, "unreadable", f"invalid-compressed-stream:{object_id}")
 
 
 def detected_mime(data: bytes, suffix: str) -> str:
@@ -1651,8 +1817,19 @@ def scan_bytes(
     if suffix == ".zip" or (mime == "application/zip" and suffix not in OFFICE_SUFFIXES):
         scan_zip(state, data, surface=surface, object_id=object_id, display_path=display_path, depth=depth)
         return
-    if suffix in {".tar", ".tgz", ".gz", ".bz2", ".xz"}:
+    if suffix in {".tar", ".tgz"}:
         scan_tar(state, data, surface=surface, object_id=object_id, display_path=display_path, depth=depth)
+        return
+    if suffix in {".gz", ".bz2", ".xz"}:
+        scan_compressed_stream(
+            state,
+            data,
+            surface=surface,
+            object_id=object_id,
+            display_path=display_path,
+            depth=depth,
+            suffix=suffix,
+        )
         return
     if suffix in {".7z", ".rar"}:
         if not state.binary_is_approved(object_id, data):
@@ -2041,8 +2218,8 @@ def _scan_working_tree_slice(
             work_state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded", index)
             merge_scan_state(state, work_state)
             return
-        relative, path, kind, _digest = entries[index]
-        object_id = f"working-tree:{relative}"
+        relative, path, kind, digest = entries[index]
+        object_id = f"working-tree:{digest}:{relative}"
         if any(fnmatch.fnmatch(relative, pattern) for pattern in work_state.policy["blocked_paths"]):
             rule = Rule("policy.blocked-path", "data", "block", re.compile(r"$^"))
             work_state.add_finding(surface="working-tree", object_id=object_id, location=relative, rule=rule, raw_value=None, legal=is_legal_path(relative))

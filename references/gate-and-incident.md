@@ -18,6 +18,8 @@ Public summaries contain only both decisions, the release profile, aggregate cou
 
 Office, PDF, images, SVG, audio, video, archives, Notebook files, and native binaries use format-specific layers. A missing layer, unavailable parser, encrypted object, expansion limit, unsupported type, incomplete Git history, or missing LFS entity produces `incomplete`
 
+Tar archives and single-file gzip, bzip2, or xz streams use bounded native parsing. Compressed tar content retains member checks; a single-file stream is decompressed once, limited to the archive expansion budget, and returned to the ordinary recursive scanner
+
 The pinned Gitleaks binary must detect a runtime-generated synthetic credential before it scans repository content. A silent or broken binary produces `gitleaks-runtime-canary-not-detected` and `incomplete`. The canary has a 60-second process timeout; repository scans keep Gitleaks' 300-second internal limit and add a 330-second parent-process timeout
 
 Git scanning covers blob history, author and committer metadata, messages, reference names, annotated tag payloads, notes, and signature payloads. Legal provenance and third-party attribution remain review-only and are never rewritten automatically
