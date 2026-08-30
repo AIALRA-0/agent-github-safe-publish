@@ -7,7 +7,7 @@ description: Audit, sanitize, and gate repository content before it is sent to G
 
 Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits fixed-matrix noncritical risk while preserving it in the report. Keep periodic exposure discovery separate from the exact gate for an intended publication
 
-Stable interface version: `1.1.4`. Resume feature development only for a critical miss, security or parser incompatibility, damaged report or checkpoint migration, or a reproducible incorrect publication decision
+Stable interface version: `1.1.5`. Resume feature development only for a critical miss, security or parser incompatibility, damaged report or checkpoint migration, or a reproducible incorrect publication decision
 
 ## 1. Mandatory publication boundary
 

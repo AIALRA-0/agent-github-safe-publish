@@ -60,7 +60,7 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.4"
+TOOL_VERSION = "1.1.5"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -512,7 +512,7 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
     for approval in policy["approved_locations"]:
         if not isinstance(approval, dict) or not {"rule_id", "object", "approved_by", "reason"}.issubset(approval):
             raise ValueError("Each approved location requires rule_id, object, approved_by, and reason")
-        if any(symbol in approval["object"] for symbol in "*?["):
+        if any(symbol in approval["object"] for symbol in "*?"):
             raise ValueError("Approved locations must be exact and cannot contain wildcards")
 
     for approval in policy["binary_approvals"]:
@@ -530,7 +530,7 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
         required_exception = {"rule_id", "object", "approved_by", "reason", "expires_at", "review_trigger"}
         if not isinstance(exception, dict) or not required_exception.issubset(exception):
             raise ValueError("Each exception requires an exact object, approval, expiry, and review trigger")
-        if any(symbol in exception["object"] for symbol in "*?["):
+        if any(symbol in exception["object"] for symbol in "*?"):
             raise ValueError("Exceptions must target an exact object")
         dt.datetime.fromisoformat(exception["expires_at"].replace("Z", "+00:00"))
 
@@ -550,7 +550,7 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Each risk acceptance requires exact repository, object, evidence, approval, expiry, and review trigger")
         if acceptance["rule_id"] not in NONCRITICAL_FINDING_RULES:
             raise ValueError("Risk acceptances cannot override a critical finding rule")
-        if any(symbol in acceptance["object"] for symbol in "*?["):
+        if any(symbol in acceptance["object"] for symbol in "*?"):
             raise ValueError("Risk acceptances must target an exact object")
         if not all(isinstance(acceptance[field], str) and acceptance[field] for field in required_acceptance):
             raise ValueError("Risk acceptance fields must be non-empty strings")

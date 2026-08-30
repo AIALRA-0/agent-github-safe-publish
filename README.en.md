@@ -10,7 +10,7 @@
 
 <p align="center"><strong>Give every Agent the same redaction, coverage, and stopping rules before any GitHub upload</strong></p>
 
-<p align="center">Stable version <code>v1.1.4</code> · Maintenance status: security and compatibility maintenance</p>
+<p align="center">Stable version <code>v1.1.5</code> · Maintenance status: security and compatibility maintenance</p>
 
 <div align="center">
 
@@ -108,7 +108,7 @@ The runtime needs Python and Git. A fleet audit also needs an authenticated GitH
 
 The `safe_publish.py` command is the unified entry point. Its first name selects an audit, preparation, or gate action; parameters beginning with `--` select inputs, outputs, and the publication profile. A missing required parameter fails before any remote write
 
-Confirm the tool version first. An output of `github-safe-publish 1.1.4` binds later reports to this stable implementation
+Confirm the tool version first. An output of `github-safe-publish 1.1.5` binds later reports to this stable implementation
 
 ```powershell
 python -X utf8 scripts/safe_publish.py --version # Print the stable version without reading a repository or changing the remote
@@ -294,7 +294,7 @@ Table 10.1 Main entry points
 
 ## 11. Maintenance and license
 
-The current stable version is `1.1.4`. Maintenance resumes for a critical miss, parser incompatibility, damaged report or checkpoint, or a reproducible incorrect allow or denial
+The current stable version is `1.1.5`. Maintenance resumes for a critical miss, parser incompatibility, damaged report or checkpoint, or a reproducible incorrect allow or denial
 
 Private policy versions 1, 2, and 3 remain readable. Older policies migrate in memory and the source file is never modified automatically. Reports and checkpoints should finish with the version that created them; rerun the exact gate after a tool-version change
 

@@ -406,6 +406,19 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             subject.validate_policy(policy)
 
+    def test_exact_bracketed_object_is_allowed(self) -> None:
+        policy = synthetic_policy()
+        policy["approved_locations"] = [
+            {
+                "rule_id": "private.brand",
+                "object": "working-tree:docs/Error [TransformError].md",
+                "approved_by": "owner",
+                "reason": "The object is matched by exact string equality",
+            }
+        ]
+        validated = subject.validate_policy(policy)
+        self.assertEqual("working-tree:docs/Error [TransformError].md", validated["approved_locations"][0]["object"])
+
     def test_risk_acceptance_rejects_wildcards_and_critical_rules(self) -> None:
         base = {
             "repository": "ExampleOrg/example",
@@ -422,6 +435,13 @@ class PolicyTests(unittest.TestCase):
         wildcard_policy["risk_acceptances"] = [{**base, "object": "working-tree:*"}]
         with self.assertRaises(ValueError):
             subject.validate_policy(wildcard_policy)
+
+        bracketed_policy = subject.empty_policy()
+        bracketed_policy["risk_acceptances"] = [{**base, "object": "working-tree:docs/Error [TransformError].md"}]
+        self.assertEqual(
+            "working-tree:docs/Error [TransformError].md",
+            subject.validate_policy(bracketed_policy)["risk_acceptances"][0]["object"],
+        )
 
         critical_policy = subject.empty_policy()
         critical_policy["risk_acceptances"] = [{**base, "rule_id": "credential.assignment"}]
