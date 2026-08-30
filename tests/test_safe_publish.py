@@ -944,6 +944,51 @@ class ArtifactTests(unittest.TestCase):
         subject.scan_bytes(embedded_state, embedded_svg, surface="working-tree", object_id="working-tree:embedded.svg", display_path="embedded.svg")
         self.assertTrue(any(item.reason.startswith("invalid-image") for item in embedded_state.coverage))
 
+    def test_invalid_zip_exact_approval_and_digest_change(self) -> None:
+        invalid_zip = b"PK\x03\x04legacy-encoded-synthetic-archive"
+        object_id = "working-tree:legacy.zip"
+        unapproved_state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_bytes(
+            unapproved_state,
+            invalid_zip,
+            surface="working-tree",
+            object_id=object_id,
+            display_path="legacy.zip",
+        )
+        self.assertTrue(any(item.reason.startswith("invalid-zip") for item in unapproved_state.coverage))
+
+        approved_policy = subject.empty_policy()
+        approved_policy["binary_approvals"].append(
+            {
+                "object": object_id,
+                "sha256": subject.sha256_bytes(invalid_zip),
+                "approved_by": "InformationOwner",
+                "reason": "Exact legacy archive reviewed with an independent parser",
+                "inspection_layers": ["manual", "digest", "independent-archive-parser"],
+                "tool_versions": {"github-safe-publish": subject.TOOL_VERSION},
+                "review_trigger": "object digest, parser, or scanner version changes",
+            }
+        )
+        approved_state = subject.ScanState("synthetic", approved_policy)
+        subject.scan_bytes(
+            approved_state,
+            invalid_zip,
+            surface="working-tree",
+            object_id=object_id,
+            display_path="legacy.zip",
+        )
+        self.assertFalse(any(item.reason.startswith("invalid-zip") for item in approved_state.coverage))
+
+        changed_state = subject.ScanState("synthetic", approved_policy)
+        subject.scan_bytes(
+            changed_state,
+            invalid_zip + b"changed",
+            surface="working-tree",
+            object_id=object_id,
+            display_path="legacy.zip",
+        )
+        self.assertTrue(any(item.reason.startswith("invalid-zip") for item in changed_state.coverage))
+
     def test_office_embedded_media_and_macro_are_not_skipped(self) -> None:
         # Embedded media and macro payloads must enter a supported scanner or produce an explicit gap.
         office_buffer = io.BytesIO()

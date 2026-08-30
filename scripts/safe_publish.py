@@ -60,7 +60,7 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.3"
+TOOL_VERSION = "1.1.4"
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -1212,7 +1212,11 @@ def scan_zip(
                     depth=depth + 1,
                 )
     except (zipfile.BadZipFile, RuntimeError, OSError):
-        state.add_coverage(surface, "unreadable", f"invalid-zip:{object_id}")
+        # Some valid legacy archives use filename encodings that Python's ZIP parser rejects.
+        # An information owner may approve only the exact reviewed bytes; any content change
+        # invalidates the approval and restores the fail-closed coverage gap.
+        if not state.binary_is_approved(object_id, data):
+            state.add_coverage(surface, "unreadable", f"invalid-zip:{object_id}")
 
 
 def scan_tar(
