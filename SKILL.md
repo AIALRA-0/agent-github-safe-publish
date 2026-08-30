@@ -57,7 +57,7 @@ Private gate findings and history findings use lossless, content-addressed pages
 
 Complex artifacts run in a reusable isolated process with a 180-second per-object limit. A timeout or worker failure is a critical coverage gap, keeps Git history on the current object, and replaces the worker before any retry
 
-A Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
+A Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. The parent process enforces the same hard limit and terminates a stuck history worker. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
 
 A working-tree time limit follows the same rule. Its checkpoint binds every file path, kind, and content digest, stores findings in verified pages, and retries the current file after any OCR or artifact failure
 
@@ -92,3 +92,4 @@ The local trusted gate is authoritative until a separately approved trusted exec
 - `allow` may auto-merge only when project checks, README checks, an unchanged base, an exact remote tree match, and required branch governance all pass
 - Missing branch protection or required checks returns `BRANCH_PROTECTION_MISSING` and leaves the pull request for review
 - A resumed run must recompute all bound fingerprints; read [the recovery contract](references/recovery.md) before retrying a partial remote operation
+- A scanner crash or missing gate report must atomically produce an `incomplete` checkpoint with `SCANNER_CRASHED` or `GATE_REPORT_MISSING`; it never terminates the batch or reuses a stale report

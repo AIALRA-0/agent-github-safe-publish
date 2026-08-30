@@ -727,6 +727,92 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual("incomplete", subject.decision_for(state))
             self.assertEqual("deny", subject.publication_decision_for(state))
 
+    def test_git_history_hard_timeout_returns_a_stable_issue_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "history.private.json"
+            state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+            real_run = subject.run
+
+            def timeout_worker(command: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+                if "_scan-git-history-worker" in command:
+                    raise subprocess.TimeoutExpired("worker", 1)
+                return real_run(command, *args, **kwargs)
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+                mock.patch.object(subject, "run", side_effect=timeout_worker),
+            ):
+                subject.scan_git_history(
+                    state,
+                    repository,
+                    time_limit_seconds=1,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+            self.assertTrue(any(item.reason == "git-history-hard-time-limit-exceeded" for item in state.coverage))
+            self.assertEqual(["GIT_HISTORY_TIMEOUT"], subject.coverage_issue_codes(state.coverage))
+            self.assertEqual("incomplete", subject.decision_for(state))
+            self.assertEqual("deny", subject.publication_decision_for(state))
+
+    def test_git_history_worker_failure_is_reported_as_scanner_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+            failed = subprocess.CompletedProcess([], 4, "", "")
+            real_run = subject.run
+
+            def fail_worker(command: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+                if "_scan-git-history-worker" in command:
+                    return failed
+                return real_run(command, *args, **kwargs)
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+                mock.patch.object(subject, "run", side_effect=fail_worker),
+            ):
+                subject.scan_git_history(state, repository, time_limit_seconds=5)
+            self.assertTrue(any(item.reason == "git-history-worker-failed" for item in state.coverage))
+            self.assertEqual(["SCANNER_CRASHED"], subject.coverage_issue_codes(state.coverage))
+
+    def test_git_history_worker_completes_a_bounded_slice_and_returns_findings(self) -> None:
+        marker = "SYNTHETIC_HISTORY_WORKER_SECRET_4821"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Synthetic User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "fixture.txt").write_text(f"password={marker}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "fixture.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "add synthetic history fixture"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "history.private.json"
+            state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                subject.scan_git_history(
+                    state,
+                    repository,
+                    time_limit_seconds=30,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+            self.assertEqual("complete", state.history_progress["status"])
+            self.assertTrue(any(item.rule_id == "credential.assignment" for item in state.findings))
+            self.assertFalse(any(item.status not in {"checked", "not_present"} for item in state.coverage))
+            serialized = json.dumps(subject.sorted_findings(state), sort_keys=True)
+            self.assertNotIn(marker, serialized)
+            self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")), serialized)
+
     def test_repository_associated_budget_records_every_unfinished_auxiliary_surface(self) -> None:
         state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
         with mock.patch.object(subject.time, "monotonic", side_effect=[0.0, 1.0]):
@@ -904,6 +990,41 @@ class RepositoryTests(unittest.TestCase):
                 else:
                     os.environ["CODEX_HOME"] = old_codex_home
             repeated_checkpoint = json.loads((repeated_private / "checkpoint.private.json").read_text(encoding="utf-8"))
+            missing_private = codex_home / "private" / "github-safe-publish" / "managed-missing"
+            args.private_output_dir = str(missing_private)
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                with (
+                    mock.patch.object(subject, "remote_branch_commit", return_value=base),
+                    mock.patch.object(subject, "doctor_report", return_value={"decision": "pass", "fingerprint": "d" * 64}),
+                    mock.patch.object(subject, "ensure_gitleaks", return_value=root / "gitleaks"),
+                    mock.patch.object(subject, "command_gate", return_value=0),
+                ):
+                    missing_exit_code = subject.command_managed_publish(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            missing_checkpoint = json.loads((missing_private / "checkpoint.private.json").read_text(encoding="utf-8"))
+
+            crashed_private = codex_home / "private" / "github-safe-publish" / "managed-crashed"
+            args.private_output_dir = str(crashed_private)
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                with (
+                    mock.patch.object(subject, "remote_branch_commit", return_value=base),
+                    mock.patch.object(subject, "doctor_report", return_value={"decision": "pass", "fingerprint": "d" * 64}),
+                    mock.patch.object(subject, "ensure_gitleaks", return_value=root / "gitleaks"),
+                    mock.patch.object(subject, "command_gate", side_effect=RuntimeError("synthetic crash")),
+                ):
+                    crashed_exit_code = subject.command_managed_publish(args)
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+            crashed_checkpoint = json.loads((crashed_private / "checkpoint.private.json").read_text(encoding="utf-8"))
             remote_branches = subprocess.run(
                 ["git", "for-each-ref", "--format=%(refname)", "refs/heads"],
                 cwd=remote,
@@ -914,6 +1035,12 @@ class RepositoryTests(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertEqual(0, repeated_exit_code)
+        self.assertEqual(4, missing_exit_code)
+        self.assertEqual(["GATE_REPORT_MISSING"], missing_checkpoint["issue_codes"])
+        self.assertEqual("incomplete", missing_checkpoint["state"])
+        self.assertEqual(4, crashed_exit_code)
+        self.assertEqual(["SCANNER_CRASHED"], crashed_checkpoint["issue_codes"])
+        self.assertEqual("incomplete", crashed_checkpoint["state"])
         self.assertEqual("gated", checkpoint["state"])
         self.assertEqual(first_candidate_commit, repeated_checkpoint["candidate_commit"])
         self.assertRegex(checkpoint["candidate_tree_sha256"], r"^[0-9a-f]{64}$")
