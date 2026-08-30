@@ -1,20 +1,22 @@
 # Managed publication contract
 
-## 1 Trigger
+## 1. Trigger
 
 Use `managed-publish` only after the user authorizes a GitHub push, publication, synchronization, mirror, open-source transfer, or Release operation
 
 The command has no schedule and performs no periodic audit
 
-## 2 Inputs and private state
+## 2. Inputs and private state
 
 The caller supplies the source repository, GitHub repository name, current base commit, repository-external private policy, private output directory, validation commands, README auditor, and publication intent
 
 The private checkpoint binds the base commit, candidate Git tree object, candidate index SHA-256, binary patch SHA-256, scanner SHA-256, policy fingerprint, report fingerprint, and validation outcomes
 
-`--resume` may reuse only the isolated candidate and its separately bound working-tree and Git-history checkpoints in the same private output directory. A changed source base, policy, scanner, candidate, or complete inventory produces a new fingerprint and requires a new gate
+`--resume` may reuse only the isolated candidate in the same private output directory. A changed source base, policy, scanner, or candidate produces a new fingerprint and requires a new gate
 
-## 3 Publication decisions
+## 3. Publication decisions
+
+<div align="center">
 
 | Decision | Remote action |
 |---|---|
@@ -23,11 +25,15 @@ The private checkpoint binds the base commit, candidate Git tree object, candida
 | `deny` | Keep evidence local and perform no remote write |
 | `incomplete` | Keep evidence local and repair the missing parser, validation, or coverage |
 
+Table 3.1 Remote action for each publication decision
+
+</div>
+
 The command never pushes directly to the default branch and never uses an administrator bypass
 
 On Windows, validation runs through a noninteractive PowerShell wrapper that returns the inner native exit code. A PowerShell command failure without a native exit code returns `1`
 
-## 4 Auto-merge boundary
+## 4. Auto-merge boundary
 
 Auto-merge requires a strict `allow`, complete project and README validation, an unchanged remote base, an exact remote tree match, and required status checks enforced by branch protection or an active ruleset
 

@@ -22,6 +22,7 @@ import importlib
 import io
 import ipaddress
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import platform
@@ -59,14 +60,22 @@ SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
 GITLEAKS_VERSION = "8.30.1"
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
+DEFAULT_MAX_INLINE_TEXT_BYTES = 1 * 1024 * 1024
 DEFAULT_IMAGE_OCR_BUDGET_SECONDS = 300
+DEFAULT_OCR_UNIT_TIMEOUT_SECONDS = 120
+DEFAULT_ARTIFACT_UNIT_TIMEOUT_SECONDS = 180
+DEFAULT_ASSOCIATED_SURFACE_BUDGET_SECONDS = 300
+DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS = 60
+DEFAULT_RELEASE_ASSET_BUDGET_SECONDS = 300
 DEFAULT_LOCAL_FILE_BUDGET_SECONDS = 600
-DEFAULT_GATE_WORKTREE_BUDGET_SECONDS = 900
 DEFAULT_GATE_HISTORY_BUDGET_SECONDS = 900
-DEFAULT_WORKTREE_CHECKPOINT_INTERVAL = 1_000
 DEFAULT_HISTORY_CHECKPOINT_INTERVAL = 10_000
+DEFAULT_GATE_WORKTREE_BUDGET_SECONDS = 900
+DEFAULT_WORKTREE_CHECKPOINT_INTERVAL = 100
+HISTORY_CHECKPOINT_SCHEMA_VERSION = 2
 WORKTREE_CHECKPOINT_SCHEMA_VERSION = 1
-HISTORY_CHECKPOINT_SCHEMA_VERSION = 1
+OCR_CHECKPOINT_SCHEMA_VERSION = 1
+DEFAULT_FINDING_PAGE_SIZE = 10_000
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_ARCHIVE_EXPANDED_BYTES = 250 * 1024 * 1024
 MAX_ARCHIVE_DEPTH = 3
@@ -74,7 +83,6 @@ MAX_ARRAY_MEMBERS = 1_024
 MAX_ARRAY_ELEMENTS = 25_000_000
 MAX_ARRAY_BYTES = 128 * 1024 * 1024
 MAX_ARRAY_TEXT_BYTES = 5 * 1024 * 1024
-MAX_FINDINGS = 50_000
 MAX_RAW_CANDIDATES_PER_STATE = 100_000
 MAX_PRIVATE_CANDIDATE_ATTEMPTS = 250_000
 VERIFIED_GITLEAKS: set[str] = set()
@@ -82,6 +90,8 @@ PACKAGE_CACHE: dict[str, tuple[list[dict[str, Any]], str | None]] = {}
 RAPID_OCR_ENGINE: Any | None = None
 IMAGE_EXTRACTION_CACHE: dict[str, tuple[list[tuple[str, str]], set[str], list[tuple[str, str]]]] = {}
 RESTRICTED_PRIVATE_PATHS: set[str] = set()
+IN_ARTIFACT_WORKER = False
+PRIVATE_ROOT_OVERRIDE: Path | None = None
 
 
 class SameOriginLinkParser(HTMLParser):
@@ -111,7 +121,46 @@ SVG_DATA_URI_PATTERN = re.compile(r'''(?:href|xlink:href)\s*=\s*["']data:([^;,"'
 SVG_MIME_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 SAFE_STANDARD_URLS = {"http://www.w3.org/2000/svg", "http://www.w3.org/1999/xlink"}
 RELEASE_PROFILES = {"permissive-noncritical", "strict"}
-NONCRITICAL_FINDING_RULES = {"infrastructure.url"}
+NONCRITICAL_FINDING_RULES = {
+    "identity.aialra",
+    "identity.aialra-confusable",
+    "infrastructure.url",
+}
+REPOSITORY_ASSOCIATED_SURFACES = {
+    "actions-artifact-content",
+    "actions-artifacts",
+    "actions-cache-content",
+    "actions-cache-metadata",
+    "actions-caches",
+    "actions-job-summaries",
+    "actions-logs",
+    "actions-permissions",
+    "actions-retention",
+    "actions-secret-metadata",
+    "actions-variables",
+    "branch-protection",
+    "container-images",
+    "deployment-statuses",
+    "deployments",
+    "discussion-comments",
+    "discussions",
+    "environments",
+    "github-pages",
+    "github-pages-rendered",
+    "immutable-releases-setting",
+    "issue-comments",
+    "issues",
+    "labels",
+    "milestones",
+    "package-content",
+    "package-metadata",
+    "packages",
+    "pull-comments",
+    "pull-requests",
+    "pull-reviews",
+    "rulesets",
+    "wiki",
+}
 NONCRITICAL_COVERAGE_SURFACES = {
     "actions-artifact-content",
     "actions-job-summaries",
@@ -127,7 +176,7 @@ NONCRITICAL_COVERAGE_SURFACES = {
     "pull-requests",
     "pull-reviews",
     "wiki",
-}
+} | REPOSITORY_ASSOCIATED_SURFACES
 ZERO_WIDTH_TRANSLATION = str.maketrans("", "", "\u200b\u200c\u200d\u2060\ufeff")
 CONFUSABLE_TRANSLATION = str.maketrans({"Α": "A", "А": "A", "Ι": "I", "І": "I", "і": "i", "ⅼ": "l"})
 ENCODED_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9+/=])(?:(?:%[0-9A-Fa-f]{2}){6,}|[0-9A-Fa-f]{12,}|[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])")
@@ -215,7 +264,7 @@ GENERIC_RULES = (
     Rule("identity.aialra", "identity", "review", re.compile(r"(?i)(?<![A-Za-z0-9])aialra(?![A-Za-z0-9])")),
     Rule("identity.aialra-confusable", "identity", "review", re.compile(r"(?i)(?<!\w)(?:a|[ΑА])(?:i|[ΙІі])(?:a|[ΑА])(?:l|[ΙІ])r(?:a|[ΑА])(?!\w)")),
     Rule("infrastructure.ipv4", "infrastructure", "block", re.compile(r"(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?!\d)")),
-    Rule("infrastructure.ipv6", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])")),
+    Rule("infrastructure.ipv6", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f:])(?=[0-9a-f:]{2,39}(?![0-9a-f:]))(?=(?:[0-9a-f]*:){2})[0-9a-f:]+")),
     Rule("infrastructure.cidr", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f:.])(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{2,})/(?:\d|[1-9]\d|1[01]\d|12[0-8])(?!\d)")),
     Rule("infrastructure.mac", "infrastructure", "block", re.compile(r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])")),
     Rule("infrastructure.hostname-port", "infrastructure", "review", re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:internal|local|lan|corp|home|test):\d{1,5}\b")),
@@ -285,6 +334,8 @@ def get_codex_home() -> Path:
 
 
 def private_root() -> Path:
+    if PRIVATE_ROOT_OVERRIDE is not None:
+        return PRIVATE_ROOT_OVERRIDE
     return (get_codex_home() / "private" / "github-safe-publish").resolve()
 
 
@@ -509,8 +560,79 @@ def load_policy_from_env(variable: str) -> dict[str, Any]:
     return validate_policy(decoded)
 
 
+class OcrCheckpointStore:
+    """Persist redacted OCR scan deltas so another process can resume safely."""
+
+    def __init__(self, path: Path, binding: dict[str, Any]) -> None:
+        self.path = ensure_private_path(path)
+        self.binding = binding
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        restrict_private_path(self.path.parent, directory=True)
+        existed = self.path.exists()
+        self.connection = sqlite3.connect(self.path)
+        self.connection.execute("PRAGMA journal_mode=DELETE")
+        self.connection.execute("PRAGMA synchronous=FULL")
+        self.connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS results ("
+            "task_key TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL, findings_json TEXT NOT NULL, "
+            "coverage_json TEXT NOT NULL, completed_at TEXT NOT NULL)"
+        )
+        encoded = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        row = self.connection.execute("SELECT value FROM metadata WHERE key='binding'").fetchone()
+        if row is not None and row[0] != encoded:
+            self.connection.close()
+            raise ValueError("OCR checkpoint binding mismatch")
+        self.connection.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES('binding', ?)", (encoded,))
+        self.connection.commit()
+        if existed:
+            # The first creator already restricted this file below a restricted directory. Reapplying
+            # Windows ACLs while another scanner holds the SQLite file can fail because of file locking.
+            RESTRICTED_PRIVATE_PATHS.add(os.path.normcase(str(self.path.resolve())))
+        else:
+            restrict_private_path(self.path)
+
+    def load(self, task_key: str, content_sha256: str) -> tuple[list[Finding], list[Coverage]] | None:
+        row = self.connection.execute(
+            "SELECT findings_json, coverage_json FROM results WHERE task_key=? AND content_sha256=?",
+            (task_key, content_sha256),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            findings = [Finding(**item) for item in json.loads(row[0])]
+            coverage = [Coverage(**item) for item in json.loads(row[1])]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("OCR checkpoint result is invalid")
+        return findings, coverage
+
+    def save(
+        self,
+        task_key: str,
+        content_sha256: str,
+        findings: list[Finding],
+        coverage: list[Coverage],
+    ) -> None:
+        findings_json = json.dumps([item.public_dict() for item in findings], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        coverage_json = json.dumps([item.as_dict() for item in coverage], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.connection.execute(
+            "INSERT OR REPLACE INTO results(task_key, content_sha256, findings_json, coverage_json, completed_at) VALUES(?,?,?,?,?)",
+            (task_key, content_sha256, findings_json, coverage_json, utc_now()),
+        )
+        self.connection.commit()
+
+    def close(self) -> None:
+        self.connection.close()
+
+
 class ScanState:
-    def __init__(self, repository: str, policy: dict[str, Any] | None, collect_raw: bool = False) -> None:
+    def __init__(
+        self,
+        repository: str,
+        policy: dict[str, Any] | None,
+        collect_raw: bool = False,
+        ocr_store: OcrCheckpointStore | None = None,
+    ) -> None:
         self.repository = repository
         self.policy = policy or empty_policy()
         self.collect_raw = collect_raw
@@ -529,9 +651,18 @@ class ScanState:
             budget = 0
         self.image_ocr_budget_seconds = max(0, budget)
         self.image_ocr_started_at: float | None = None
-        self.worktree_progress: dict[str, Any] | None = None
         self.history_progress: dict[str, Any] | None = None
+        self.worktree_progress: dict[str, Any] | None = None
+        self.ocr_store = ocr_store
         self._private_rules = self._compile_private_rules()
+
+    def replay_redacted_result(self, findings: list[Finding], coverage: list[Coverage]) -> None:
+        for finding in findings:
+            key = (finding.object, finding.location, finding.rule_id, finding.status)
+            if key not in self._finding_keys:
+                self._finding_keys.add(key)
+                self.findings.append(finding)
+        self.coverage.extend(coverage)
 
     def register_object(self, object_id: str, data: bytes) -> None:
         """Keep an in-memory whole-object digest for exact private risk acceptance checks."""
@@ -585,16 +716,12 @@ class ScanState:
         legal: bool,
     ) -> None:
         severity, status = self._handling_status(rule.rule_id, object_id, rule.severity, legal)
-        if len(self.findings) >= MAX_FINDINGS:
-            if not any(item.reason == "finding-limit-exceeded" for item in self.coverage):
-                self.add_coverage(surface, "tool_failed", "finding-limit-exceeded")
-        else:
-            key = (object_id, location, rule.rule_id, status)
-            if key not in self._finding_keys:
-                self._finding_keys.add(key)
-                self.findings.append(
-                    Finding(self.repository, surface, object_id, location, rule.rule_id, rule.category, severity, status, legal)
-                )
+        key = (object_id, location, rule.rule_id, status)
+        if key not in self._finding_keys:
+            self._finding_keys.add(key)
+            self.findings.append(
+                Finding(self.repository, surface, object_id, location, rule.rule_id, rule.category, severity, status, legal)
+            )
         if self.collect_raw and raw_value is not None:
             candidate_key = (self.repository, surface, object_id, rule.rule_id, raw_value)
             if candidate_key not in self._candidate_keys:
@@ -683,6 +810,31 @@ def is_placeholder(value: str) -> bool:
     return any(token in normalized for token in ("example", "placeholder", "redacted", "replace_me", "replace-me", "your_"))
 
 
+def parse_network_literal(rule_id: str, value: str) -> ipaddress._BaseAddress | ipaddress._BaseNetwork | None:
+    try:
+        if rule_id == "infrastructure.ipv4":
+            return ipaddress.IPv4Address(value)
+        if rule_id == "infrastructure.ipv6":
+            return ipaddress.IPv6Address(value)
+        if rule_id == "infrastructure.cidr":
+            return ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None
+    return None
+
+
+def is_public_example_address(value: ipaddress._BaseAddress) -> bool:
+    if value.is_loopback or value.is_unspecified or value.is_multicast:
+        return True
+    documentation_networks = (
+        ipaddress.ip_network("192.0.2.0/24"),
+        ipaddress.ip_network("198.51.100.0/24"),
+        ipaddress.ip_network("203.0.113.0/24"),
+        ipaddress.ip_network("2001:db8::/32"),
+    )
+    return any(value in network for network in documentation_networks if value.version == network.version)
+
+
 def rule_can_match(rule_id: str, text: str, lowered: str) -> bool:
     """Avoid running expensive regex engines when a required literal is absent."""
     if rule_id == "credential.private-key":
@@ -750,9 +902,15 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
             raw = match.group(rule.value_group)
             if rule.rule_id == "credential.assignment" and is_placeholder(raw):
                 continue
+            if rule.rule_id in {"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}:
+                parsed_network = parse_network_literal(rule.rule_id, raw)
+                if parsed_network is None:
+                    continue
+                if isinstance(parsed_network, (ipaddress.IPv4Address, ipaddress.IPv6Address)) and is_public_example_address(parsed_network):
+                    continue
             if rule.rule_id == "identity.aialra-confusable" and raw.lower() == "aialra":
                 continue
-            if rule.rule_id == "identity.email" and raw.lower().endswith("@example.invalid"):
+            if rule.rule_id == "identity.email" and raw.lower().rsplit("@", 1)[-1] in {"example.com", "example.net", "example.org", "example.invalid"}:
                 continue
             if rule.rule_id == "infrastructure.url" and re.match(r"(?i)^https?://(?:[^/]+\.)?example\.invalid(?:[/:?#]|$)", raw):
                 continue
@@ -907,6 +1065,118 @@ def rapid_ocr_engine() -> Any:
     return RAPID_OCR_ENGINE
 
 
+def direct_ocr(image_data: bytes, *, multi_frame: bool) -> list[tuple[int, int, str]]:
+    from PIL import Image, ImageSequence
+    import numpy as np
+
+    engine = rapid_ocr_engine()
+    extracted: list[tuple[int, int, str]] = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        image = Image.open(io.BytesIO(image_data))
+    with image:
+        frames = ImageSequence.Iterator(image) if multi_frame else [image]
+        for frame_index, frame in enumerate(frames):
+            result, _ = engine(np.asarray(frame.convert("RGB")))
+            for text_index, row in enumerate(result or []):
+                if len(row) >= 2 and isinstance(row[1], str):
+                    extracted.append((frame_index, text_index, row[1]))
+    return extracted
+
+
+def ocr_worker_loop(connection: Any) -> None:
+    """Keep one OCR engine isolated while processing bounded units over a private pipe."""
+    try:
+        while True:
+            request = connection.recv()
+            if request is None:
+                return
+            image_data, multi_frame = request
+            try:
+                extracted = direct_ocr(image_data, multi_frame=multi_frame)
+                connection.send(("ok", extracted))
+            except Exception:
+                connection.send(("error", []))
+    except (EOFError, OSError):
+        return
+    finally:
+        connection.close()
+
+
+class OcrProcessRunner:
+    """Reuse an isolated OCR engine and replace it after any timeout or crash."""
+
+    def __init__(self) -> None:
+        self.process: Any | None = None
+        self.connection: Any | None = None
+
+    def _start(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=True)
+        process = context.Process(target=ocr_worker_loop, args=(child,))
+        process.daemon = True
+        process.start()
+        child.close()
+        self.process = process
+        self.connection = parent
+
+    def _stop(self, *, graceful: bool) -> None:
+        process, connection = self.process, self.connection
+        self.process, self.connection = None, None
+        if process is None:
+            return
+        if graceful and connection is not None and process.is_alive():
+            try:
+                connection.send(None)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+        process.join(timeout=10 if graceful else 0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
+        if connection is not None:
+            connection.close()
+
+    def run(self, image_data: bytes, *, multi_frame: bool, timeout_seconds: int) -> list[tuple[int, int, str]]:
+        if self.process is None or not self.process.is_alive() or self.connection is None:
+            self._stop(graceful=False)
+            self._start()
+        assert self.connection is not None
+        try:
+            self.connection.send((image_data, multi_frame))
+            if not self.connection.poll(timeout_seconds):
+                self._stop(graceful=False)
+                raise TimeoutError("OCR unit exceeded its time limit")
+            status, extracted = self.connection.recv()
+        except (BrokenPipeError, EOFError, OSError):
+            self._stop(graceful=False)
+            raise RuntimeError("OCR worker failed")
+        if status != "ok":
+            raise RuntimeError("OCR worker failed")
+        return [(int(frame), int(index), str(text)) for frame, index, text in extracted]
+
+    def close(self) -> None:
+        self._stop(graceful=True)
+
+
+OCR_PROCESS_RUNNER = OcrProcessRunner()
+atexit.register(OCR_PROCESS_RUNNER.close)
+
+
+def bounded_ocr(image_data: bytes, *, multi_frame: bool) -> list[tuple[int, int, str]]:
+    """Run one OCR unit with a hard timeout in a reusable isolated process."""
+    if IN_ARTIFACT_WORKER:
+        return direct_ocr(image_data, multi_frame=multi_frame)
+    try:
+        timeout_seconds = max(1, int(os.environ.get("SAFE_PUBLISH_OCR_UNIT_TIMEOUT_SECONDS", DEFAULT_OCR_UNIT_TIMEOUT_SECONDS)))
+    except ValueError:
+        timeout_seconds = DEFAULT_OCR_UNIT_TIMEOUT_SECONDS
+    return OCR_PROCESS_RUNNER.run(image_data, multi_frame=multi_frame, timeout_seconds=timeout_seconds)
+
+
 def normalized_barcode_values(result: Any) -> list[str]:
     """Normalize OpenCV barcode results without depending on one tuple ABI."""
     if not isinstance(result, tuple):
@@ -922,6 +1192,37 @@ def normalized_barcode_values(result: Any) -> list[str]:
         return []
     values = [decoded] if isinstance(decoded, str) else list(decoded)
     return [value for value in values if isinstance(value, str) and value]
+
+
+def ocr_task_key(kind: str, surface: str, object_id: str, unit: str = "") -> str:
+    return json.dumps([kind, surface, object_id, unit], ensure_ascii=False, separators=(",", ":"))
+
+
+def replay_ocr_result(state: ScanState, task_key: str, content_sha256: str) -> bool:
+    if state.ocr_store is None:
+        return False
+    cached = state.ocr_store.load(task_key, content_sha256)
+    if cached is None:
+        return False
+    state.replay_redacted_result(*cached)
+    return True
+
+
+def save_ocr_result(
+    state: ScanState,
+    task_key: str,
+    content_sha256: str,
+    finding_start: int,
+    coverage_start: int,
+) -> None:
+    if state.ocr_store is None:
+        return
+    state.ocr_store.save(
+        task_key,
+        content_sha256,
+        state.findings[finding_start:],
+        state.coverage[coverage_start:],
+    )
 
 
 def extract_image_layers(data: bytes, *, allow_ocr: bool = True) -> tuple[list[tuple[str, str]], set[str], list[tuple[str, str]]]:
@@ -982,22 +1283,11 @@ def extract_image_layers(data: bytes, *, allow_ocr: bool = True) -> tuple[list[t
         failures.append(("unreadable", "image-ocr-budget-exceeded"))
         return extracted, layers, failures
     try:
-        from PIL import Image, ImageSequence
-        import numpy as np
-
-        engine = rapid_ocr_engine()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            image = Image.open(io.BytesIO(data))
-        with image:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                for frame_index, frame in enumerate(ImageSequence.Iterator(image)):
-                    result, _ = engine(np.asarray(frame.convert("RGB")))
-                    for text_index, row in enumerate(result or []):
-                        if len(row) >= 2 and isinstance(row[1], str):
-                            extracted.append((f"ocr:{frame_index}:{text_index}", row[1]))
+        for frame_index, text_index, text in bounded_ocr(data, multi_frame=True):
+            extracted.append((f"ocr:{frame_index}:{text_index}", text))
         layers.add("ocr")
+    except TimeoutError:
+        failures.append(("tool_failed", "image-ocr-unit-timeout"))
     except Exception:
         failures.append(("tool_failed", "image-ocr-parser-unavailable"))
     result = (extracted, layers, failures)
@@ -1008,6 +1298,12 @@ def extract_image_layers(data: bytes, *, allow_ocr: bool = True) -> tuple[list[t
 def scan_image_content(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str) -> None:
     if state.binary_is_approved(object_id, data):
         return
+    digest = sha256_bytes(data)
+    task_key = ocr_task_key("image", surface, object_id)
+    if replay_ocr_result(state, task_key, digest):
+        return
+    finding_start = len(state.findings)
+    coverage_start = len(state.coverage)
     cached = sha256_bytes(data) in IMAGE_EXTRACTION_CACHE
     if not cached and state.image_ocr_started_at is None:
         state.image_ocr_started_at = time.monotonic()
@@ -1025,6 +1321,7 @@ def scan_image_content(state: ScanState, data: bytes, *, surface: str, object_id
         state.add_coverage(surface, status, f"{reason}:{object_id}")
     if {"metadata", "qr", "barcode", "ocr"}.issubset(layers):
         state.add_coverage(surface, "checked", f"image-layers:{object_id}", 1)
+        save_ocr_result(state, task_key, digest, finding_start, coverage_start)
 
 
 def scan_pdf_content(state: ScanState, data: bytes, *, surface: str, object_id: str, display_path: str) -> None:
@@ -1048,27 +1345,35 @@ def scan_pdf_content(state: ScanState, data: bytes, *, surface: str, object_id: 
                 state.add_coverage(surface, "unreadable", f"pdf-page-unreadable:{object_id}:{index + 1}")
         try:
             import fitz
-            import numpy as np
-            if state.image_ocr_started_at is None:
-                state.image_ocr_started_at = time.monotonic()
-            engine: Any | None = None
             ocr_page_count = 0
+            digest = sha256_bytes(data)
             document = fitz.open(stream=data, filetype="pdf")
+            total_page_count = len(document)
             with document:
                 for index, page in enumerate(document):
+                    page_number = index + 1
+                    task_key = ocr_task_key("pdf-page", surface, object_id, str(page_number))
+                    if replay_ocr_result(state, task_key, digest):
+                        ocr_page_count += 1
+                        continue
+                    if state.image_ocr_started_at is None:
+                        state.image_ocr_started_at = time.monotonic()
                     if time.monotonic() - state.image_ocr_started_at > state.image_ocr_budget_seconds:
                         state.add_coverage(surface, "unreadable", f"pdf-page-image-ocr-budget-exceeded:{object_id}")
                         break
-                    if engine is None:
-                        engine = rapid_ocr_engine()
+                    finding_start = len(state.findings)
+                    coverage_start = len(state.coverage)
                     pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                    pixels = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)
-                    result, _ = engine(pixels)
+                    page_image = pixmap.tobytes("png")
+                    extracted = bounded_ocr(page_image, multi_frame=False)
                     ocr_page_count += 1
-                    for text_index, row in enumerate(result or []):
-                        if len(row) >= 2 and isinstance(row[1], str):
-                            scan_text(state, row[1], surface=surface, object_id=f"{object_id}:page-image:{index + 1}:{text_index}", display_path=f"{display_path}!page-image:{index + 1}:{text_index}")
-            state.add_coverage(surface, "checked", f"pdf-page-image-ocr:{object_id}", ocr_page_count)
+                    for _frame_index, text_index, text in extracted:
+                        scan_text(state, text, surface=surface, object_id=f"{object_id}:page-image:{page_number}:{text_index}", display_path=f"{display_path}!page-image:{page_number}:{text_index}")
+                    save_ocr_result(state, task_key, digest, finding_start, coverage_start)
+            if ocr_page_count == total_page_count:
+                state.add_coverage(surface, "checked", f"pdf-page-image-ocr:{object_id}", ocr_page_count)
+        except TimeoutError:
+            state.add_coverage(surface, "tool_failed", f"pdf-page-image-ocr-unit-timeout:{object_id}")
         except Exception:
             state.add_coverage(surface, "tool_failed", f"pdf-page-image-ocr-unavailable:{object_id}")
         attachments = getattr(reader, "attachments", {}) or {}
@@ -1330,6 +1635,9 @@ def scan_bytes(
             raw_value=None,
             legal=is_legal_path(display_path),
         )
+    if pointer_text is not None and len(data) > DEFAULT_MAX_INLINE_TEXT_BYTES:
+        state.add_coverage(surface, "unreadable", f"oversized-text-object:{object_id}")
+        return
     if depth > MAX_ARCHIVE_DEPTH:
         state.add_coverage(surface, "tool_failed", f"archive-depth-limit:{object_id}")
         return
@@ -1400,6 +1708,194 @@ def scan_bytes(
     scan_text(state, text, surface=surface, object_id=object_id, display_path=display_path)
 
 
+def complex_artifact(data: bytes, display_path: str) -> bool:
+    suffix = Path(display_path.split("!")[-1]).suffix.lower()
+    if suffix in OFFICE_SUFFIXES | IMAGE_SUFFIXES | MEDIA_SUFFIXES | ARCHIVE_SUFFIXES | DATABASE_SUFFIXES | OPAQUE_SUFFIXES | NUMPY_SUFFIXES | {".pdf", ".svg"}:
+        return True
+    mime = detected_mime(data, suffix)
+    return mime != "application/octet-stream" or decode_text(data) is None
+
+
+def artifact_may_require_ocr(data: bytes, display_path: str) -> bool:
+    suffix = Path(display_path.split("!")[-1]).suffix.lower()
+    if suffix in OFFICE_SUFFIXES | IMAGE_SUFFIXES | MEDIA_SUFFIXES | ARCHIVE_SUFFIXES | {".pdf", ".svg"}:
+        return True
+    return detected_mime(data, suffix) in {"application/pdf", "application/zip", "media/container", "image/svg+xml", "image/png", "image/jpeg", "image/gif"}
+
+
+def artifact_worker_loop(connection: Any) -> None:
+    """Scan complex objects in a reusable process so one parser cannot exceed the object budget."""
+    global IN_ARTIFACT_WORKER, PRIVATE_ROOT_OVERRIDE
+    IN_ARTIFACT_WORKER = True
+    try:
+        while True:
+            request = connection.recv()
+            if request is None:
+                return
+            repository, policy, collect_raw, data, surface, object_id, display_path, private_root_path, ocr_path, ocr_binding, ocr_budget_remaining = request
+            store: OcrCheckpointStore | None = None
+            try:
+                PRIVATE_ROOT_OVERRIDE = Path(private_root_path).expanduser().resolve()
+                if ocr_path and ocr_binding:
+                    store = OcrCheckpointStore(Path(ocr_path), ocr_binding)
+                worker_state = ScanState(repository, policy, collect_raw=collect_raw, ocr_store=store)
+                if ocr_budget_remaining is not None:
+                    worker_state.image_ocr_budget_seconds = max(0, int(ocr_budget_remaining))
+                    if worker_state.image_ocr_budget_seconds == 0:
+                        worker_state.image_ocr_started_at = time.monotonic() - 1
+                scan_bytes(
+                    worker_state,
+                    data,
+                    surface=surface,
+                    object_id=object_id,
+                    display_path=display_path,
+                )
+                connection.send((
+                    "ok",
+                    [item.public_dict() for item in worker_state.findings],
+                    [item.as_dict() for item in worker_state.coverage],
+                    worker_state.object_sha256,
+                    worker_state.raw_candidates if collect_raw else [],
+                ))
+            except Exception:
+                connection.send(("error", [], [], {}, []))
+            finally:
+                if store is not None:
+                    store.close()
+    except (EOFError, OSError):
+        return
+    finally:
+        connection.close()
+
+
+class ArtifactProcessRunner:
+    """Reuse one isolated artifact scanner and replace it after a timeout or crash."""
+
+    def __init__(self) -> None:
+        self.process: Any | None = None
+        self.connection: Any | None = None
+
+    def _start(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=True)
+        process = context.Process(target=artifact_worker_loop, args=(child,))
+        process.daemon = True
+        process.start()
+        child.close()
+        self.process = process
+        self.connection = parent
+
+    def _stop(self, *, graceful: bool) -> None:
+        process, connection = self.process, self.connection
+        self.process, self.connection = None, None
+        if process is None:
+            return
+        if graceful and connection is not None and process.is_alive():
+            try:
+                connection.send(None)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+        process.join(timeout=10 if graceful else 0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
+        if connection is not None:
+            connection.close()
+
+    def run(
+        self,
+        state: ScanState,
+        data: bytes,
+        *,
+        surface: str,
+        object_id: str,
+        display_path: str,
+        ocr_budget_remaining: int | None,
+    ) -> None:
+        try:
+            timeout_seconds = max(1, int(os.environ.get("SAFE_PUBLISH_ARTIFACT_UNIT_TIMEOUT_SECONDS", DEFAULT_ARTIFACT_UNIT_TIMEOUT_SECONDS)))
+        except ValueError:
+            timeout_seconds = DEFAULT_ARTIFACT_UNIT_TIMEOUT_SECONDS
+        if self.process is None or not self.process.is_alive() or self.connection is None:
+            self._stop(graceful=False)
+            self._start()
+        assert self.connection is not None
+        ocr_path = str(state.ocr_store.path) if state.ocr_store is not None else None
+        ocr_binding = state.ocr_store.binding if state.ocr_store is not None else None
+        try:
+            self.connection.send((
+                state.repository,
+                state.policy,
+                state.collect_raw,
+                data,
+                surface,
+                object_id,
+                display_path,
+                str(private_root()),
+                ocr_path,
+                ocr_binding,
+                ocr_budget_remaining,
+            ))
+            if not self.connection.poll(timeout_seconds):
+                self._stop(graceful=False)
+                state.add_coverage(surface, "tool_failed", f"artifact-unit-timeout:{object_id}")
+                return
+            status, findings, coverage, object_sha256, raw_candidates = self.connection.recv()
+        except (BrokenPipeError, EOFError, OSError):
+            self._stop(graceful=False)
+            state.add_coverage(surface, "tool_failed", f"artifact-worker-failed:{object_id}")
+            return
+        if status != "ok":
+            state.add_coverage(surface, "tool_failed", f"artifact-worker-failed:{object_id}")
+            return
+        temporary_state = ScanState(state.repository, state.policy, collect_raw=state.collect_raw)
+        temporary_state.findings = [Finding(**item) for item in findings]
+        temporary_state._finding_keys = {
+            (item.object, item.location, item.rule_id, item.status) for item in temporary_state.findings
+        }
+        temporary_state.coverage = [Coverage(**item) for item in coverage]
+        temporary_state.object_sha256 = {str(key): str(value) for key, value in object_sha256.items()}
+        temporary_state.raw_candidates = [item for item in raw_candidates if isinstance(item, dict)]
+        merge_scan_state(state, temporary_state)
+
+    def close(self) -> None:
+        self._stop(graceful=True)
+
+
+ARTIFACT_PROCESS_RUNNER = ArtifactProcessRunner()
+atexit.register(ARTIFACT_PROCESS_RUNNER.close)
+
+
+def scan_bytes_bounded(
+    state: ScanState,
+    data: bytes,
+    *,
+    surface: str,
+    object_id: str,
+    display_path: str,
+) -> None:
+    if len(data) <= DEFAULT_MAX_FILE_BYTES and complex_artifact(data, display_path):
+        ocr_budget_remaining: int | None = None
+        if artifact_may_require_ocr(data, display_path):
+            if state.image_ocr_started_at is None:
+                state.image_ocr_started_at = time.monotonic()
+            elapsed = time.monotonic() - state.image_ocr_started_at
+            ocr_budget_remaining = max(0, int(state.image_ocr_budget_seconds - elapsed))
+        ARTIFACT_PROCESS_RUNNER.run(
+            state,
+            data,
+            surface=surface,
+            object_id=object_id,
+            display_path=display_path,
+            ocr_budget_remaining=ocr_budget_remaining,
+        )
+        return
+    scan_bytes(state, data, surface=surface, object_id=object_id, display_path=display_path)
+
+
 def iter_working_tree(source: Path) -> Iterable[tuple[str, Path]]:
     git_files = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], source, text=False)
     if git_files.returncode == 0:
@@ -1427,92 +1923,6 @@ def indexed_gitlinks(source: Path) -> set[str]:
     return gitlinks
 
 
-def working_tree_inventory(source: Path) -> tuple[list[tuple[str, Path]], bytes]:
-    entries = list(iter_working_tree(source))
-    digest = hashlib.sha256()
-    for relative, path in entries:
-        digest.update(relative.encode("utf-8", errors="surrogateescape"))
-        digest.update(b"\x00")
-        try:
-            if path.is_symlink():
-                digest.update(b"symlink\x00")
-                digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
-            else:
-                digest.update(b"file\x00")
-                with path.open("rb") as handle:
-                    while chunk := handle.read(1024 * 1024):
-                        digest.update(chunk)
-        except (OSError, PermissionError):
-            digest.update(b"unreadable")
-        digest.update(b"\x00")
-    return entries, digest.digest()
-
-
-def worktree_checkpoint_binding(
-    state: ScanState,
-    source: Path,
-    inventory_digest: bytes,
-    object_count: int,
-) -> dict[str, Any]:
-    return {
-        "repository": state.repository,
-        "source_commit": git_head(source),
-        "object_inventory_sha256": inventory_digest.hex(),
-        "object_count": object_count,
-        "scanner_sha256": state.scanner_sha256,
-        "policy_fingerprint": policy_fingerprint(state.policy),
-        "collect_raw": state.collect_raw,
-    }
-
-
-def default_worktree_checkpoint_path(binding: dict[str, Any]) -> Path:
-    encoded = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return private_root() / "worktree-checkpoints" / f"{sha256_bytes(encoded)}.private.json"
-
-
-def worktree_checkpoint_document(
-    state: ScanState,
-    binding: dict[str, Any],
-    *,
-    next_object_index: int,
-) -> dict[str, Any]:
-    return {
-        "worktree_checkpoint_schema_version": WORKTREE_CHECKPOINT_SCHEMA_VERSION,
-        "binding": binding,
-        "next_object_index": next_object_index,
-        "updated_at": utc_now(),
-        "findings": [item.public_dict() for item in state.findings],
-        "coverage": [item.as_dict() for item in state.coverage],
-        "object_sha256": state.object_sha256,
-        "raw_candidates": state.raw_candidates if state.collect_raw else [],
-    }
-
-
-def restore_worktree_checkpoint(state: ScanState, document: dict[str, Any]) -> int:
-    for item in document.get("findings", []):
-        finding = Finding(**item)
-        key = (finding.object, finding.location, finding.rule_id, finding.status)
-        if key not in state._finding_keys:
-            state._finding_keys.add(key)
-            state.findings.append(finding)
-    state.coverage.extend(Coverage(**item) for item in document.get("coverage", []))
-    state.object_sha256.update({str(key): str(value) for key, value in document.get("object_sha256", {}).items()})
-    if state.collect_raw:
-        state.raw_candidates.extend(item for item in document.get("raw_candidates", []) if isinstance(item, dict))
-        state._candidate_keys.update(
-            (
-                str(item.get("repository", "")),
-                str(item.get("surface", "")),
-                str(item.get("object", "")),
-                str(item.get("rule_id", "")),
-                str(item.get("raw_value", "")),
-            )
-            for item in state.raw_candidates
-        )
-        state._raw_candidate_total = len(state.raw_candidates)
-    return max(0, int(document.get("next_object_index", 0)))
-
-
 def _scan_working_tree_slice(
     state: ScanState,
     source: Path,
@@ -1522,98 +1932,162 @@ def _scan_working_tree_slice(
     checkpoint_interval: int = DEFAULT_WORKTREE_CHECKPOINT_INTERVAL,
 ) -> None:
     started = time.monotonic()
-    worktree_state = ScanState(state.repository, state.policy, collect_raw=state.collect_raw)
-    entries, inventory_digest = working_tree_inventory(source)
-    binding = worktree_checkpoint_binding(state, source, inventory_digest, len(entries))
+    gitlinks = indexed_gitlinks(source)
+    entries: list[tuple[str, Path, str, str]] = []
+    for relative, path in iter_working_tree(source):
+        try:
+            if relative in gitlinks:
+                kind, digest = "gitlink", ""
+            elif path.is_symlink():
+                kind, digest = "symlink", sha256_bytes(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            else:
+                kind, digest = "file", sha256_bytes(path.read_bytes())
+            entries.append((relative, path, kind, digest))
+        except (OSError, PermissionError):
+            state.add_coverage("working-tree", "permission_denied", f"file-inventory-unreadable:{relative}")
+            return
+        if time_limit_seconds is not None and time.monotonic() - started >= time_limit_seconds:
+            state.add_coverage("working-tree", "tool_failed", "working-tree-inventory-time-limit-exceeded")
+            return
+    inventory = json.dumps(
+        [[relative, kind, digest] for relative, _path, kind, digest in entries],
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    binding = {
+        "repository": state.repository,
+        "source_commit": git_head(source),
+        "inventory_sha256": sha256_bytes(inventory),
+        "file_count": len(entries),
+        "scanner_sha256": state.scanner_sha256,
+        "policy_fingerprint": policy_fingerprint(state.policy),
+        "collect_raw": state.collect_raw,
+    }
     resolved_checkpoint = (
         ensure_private_path(checkpoint_path or default_worktree_checkpoint_path(binding))
         if checkpoint_path is not None or time_limit_seconds is not None
         else None
     )
-    next_object_index = 0
+    work_state = ScanState(state.repository, state.policy, collect_raw=state.collect_raw, ocr_store=state.ocr_store)
+    next_file_index = 0
     resumed = False
+    complete = False
     if resolved_checkpoint is not None and resolved_checkpoint.exists():
         try:
             document = json.loads(resolved_checkpoint.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            state.add_coverage("working-tree", "tool_failed", "working-tree-checkpoint-invalid")
+            if document.get("worktree_checkpoint_schema_version") != WORKTREE_CHECKPOINT_SCHEMA_VERSION or document.get("binding") != binding:
+                raise ValueError("Working-tree checkpoint binding mismatch")
+            finding_records = read_private_record_pages(resolved_checkpoint, document.get("finding_pages", {}))
+            work_state.findings = [Finding(**item) for item in finding_records]
+            work_state._finding_keys = {(item.object, item.location, item.rule_id, item.status) for item in work_state.findings}
+            work_state.coverage = [Coverage(**item) for item in document.get("coverage", [])]
+            work_state.object_sha256 = {str(key): str(value) for key, value in document.get("object_sha256", {}).items()}
+            if work_state.collect_raw:
+                work_state.raw_candidates = [item for item in document.get("raw_candidates", []) if isinstance(item, dict)]
+            next_file_index = max(0, int(document.get("next_file_index", 0)))
+            complete = bool(document.get("complete", False))
+            if next_file_index > len(entries):
+                raise ValueError("Working-tree checkpoint index is invalid")
+            resumed = True
+        except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+            state.add_coverage("working-tree", "tool_failed", "working-tree-checkpoint-invalid-or-mismatched")
             return
-        if (
-            document.get("worktree_checkpoint_schema_version") != WORKTREE_CHECKPOINT_SCHEMA_VERSION
-            or document.get("binding") != binding
-        ):
-            state.add_coverage("working-tree", "tool_failed", "working-tree-checkpoint-binding-mismatch")
-            return
-        try:
-            next_object_index = restore_worktree_checkpoint(worktree_state, document)
-        except (TypeError, ValueError, KeyError):
-            state.add_coverage("working-tree", "tool_failed", "working-tree-checkpoint-invalid")
-            return
-        if next_object_index > len(entries):
-            state.add_coverage("working-tree", "tool_failed", "working-tree-checkpoint-invalid")
-            return
-        resumed = True
-    state.worktree_progress = {
-        "status": "complete" if next_object_index == len(entries) else "in_progress",
-        "processed_object_count": next_object_index,
-        "total_object_count": len(entries),
-        "resumed": resumed,
-    }
-    if next_object_index == len(entries):
-        merge_scan_state(state, worktree_state)
-        return
 
-    def time_exceeded() -> bool:
-        return time_limit_seconds is not None and time.monotonic() - started >= time_limit_seconds
-
-    def save_checkpoint(current_index: int) -> None:
+    def save_checkpoint(current_index: int, is_complete: bool) -> None:
         if resolved_checkpoint is None:
             return
+        pages = write_private_record_pages(
+            resolved_checkpoint,
+            [item.public_dict() for item in work_state.findings],
+            kind="worktree-findings",
+        )
         write_json(
             resolved_checkpoint,
-            worktree_checkpoint_document(worktree_state, binding, next_object_index=current_index),
+            {
+                "worktree_checkpoint_schema_version": WORKTREE_CHECKPOINT_SCHEMA_VERSION,
+                "binding": binding,
+                "next_file_index": current_index,
+                "complete": is_complete,
+                "updated_at": utc_now(),
+                "finding_pages": pages,
+                "coverage": [item.as_dict() for item in work_state.coverage],
+                "object_sha256": work_state.object_sha256,
+                "raw_candidates": work_state.raw_candidates if work_state.collect_raw else [],
+            },
             private=True,
         )
         state.worktree_progress = {
-            "status": "complete" if current_index == len(entries) else "in_progress",
-            "processed_object_count": current_index,
-            "total_object_count": len(entries),
+            "status": "complete" if is_complete else "in_progress",
+            "processed_file_count": current_index,
+            "total_file_count": len(entries),
             "resumed": resumed,
         }
 
-    gitlinks = indexed_gitlinks(source)
-    for index in range(next_object_index, len(entries)):
-        if time_exceeded():
-            save_checkpoint(index)
-            worktree_state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded", index)
-            merge_scan_state(state, worktree_state)
+    state.worktree_progress = {
+        "status": "complete" if complete else "in_progress",
+        "processed_file_count": next_file_index,
+        "total_file_count": len(entries),
+        "resumed": resumed,
+    }
+    if complete:
+        merge_scan_state(state, work_state)
+        return
+
+    for index in range(next_file_index, len(entries)):
+        if time_limit_seconds is not None and time.monotonic() - started >= time_limit_seconds:
+            save_checkpoint(index, False)
+            work_state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded", index)
+            merge_scan_state(state, work_state)
             return
-        relative, path = entries[index]
+        relative, path, kind, _digest = entries[index]
         object_id = f"working-tree:{relative}"
-        if any(fnmatch.fnmatch(relative, pattern) for pattern in worktree_state.policy["blocked_paths"]):
+        if any(fnmatch.fnmatch(relative, pattern) for pattern in work_state.policy["blocked_paths"]):
             rule = Rule("policy.blocked-path", "data", "block", re.compile(r"$^"))
-            worktree_state.add_finding(surface="working-tree", object_id=object_id, location=relative, rule=rule, raw_value=None, legal=is_legal_path(relative))
+            work_state.add_finding(surface="working-tree", object_id=object_id, location=relative, rule=rule, raw_value=None, legal=is_legal_path(relative))
         # The submodule scanner handles gitlinks and .gitmodules; reading the directory as a file is invalid.
-        if relative not in gitlinks:
-            try:
-                if path.is_symlink():
-                    target = os.readlink(path)
-                    scan_text(worktree_state, target, surface="working-tree", object_id=object_id, display_path=relative)
-                    resolved = path.resolve()
-                    try:
-                        resolved.relative_to(source.resolve())
-                    except ValueError:
-                        worktree_state.add_coverage("working-tree", "unreadable", f"external-symlink:{object_id}")
-                else:
-                    scan_bytes(worktree_state, path.read_bytes(), surface="working-tree", object_id=object_id, display_path=relative)
-            except (OSError, PermissionError):
-                worktree_state.add_coverage("working-tree", "permission_denied", f"file-unreadable:{object_id}")
-        next_object_index = index + 1
-        if checkpoint_interval > 0 and next_object_index % checkpoint_interval == 0:
-            save_checkpoint(next_object_index)
-    worktree_state.add_coverage("working-tree", "checked", object_count=len(entries))
-    save_checkpoint(len(entries))
-    merge_scan_state(state, worktree_state)
+        if kind == "gitlink":
+            next_file_index = index + 1
+            if checkpoint_interval > 0 and next_file_index % checkpoint_interval == 0:
+                save_checkpoint(next_file_index, False)
+            continue
+        try:
+            coverage_start = len(work_state.coverage)
+            if kind == "symlink":
+                target = os.readlink(path)
+                scan_text(work_state, target, surface="working-tree", object_id=object_id, display_path=relative)
+                resolved = path.resolve()
+                try:
+                    resolved.relative_to(source.resolve())
+                except ValueError:
+                    work_state.add_coverage("working-tree", "unreadable", f"external-symlink:{object_id}")
+            else:
+                scan_bytes_bounded(work_state, path.read_bytes(), surface="working-tree", object_id=object_id, display_path=relative)
+            transient = [
+                item for item in work_state.coverage[coverage_start:]
+                if item.reason.startswith((
+                    "image-ocr-budget-exceeded:",
+                    "pdf-page-image-ocr-budget-exceeded:",
+                    "image-ocr-unit-timeout:",
+                    "pdf-page-image-ocr-unit-timeout:",
+                    "artifact-unit-timeout:",
+                    "artifact-worker-failed:",
+                ))
+            ]
+            if transient:
+                work_state.coverage = [*work_state.coverage[:coverage_start], *[item for item in work_state.coverage[coverage_start:] if item not in transient]]
+                save_checkpoint(index, False)
+                work_state.coverage.extend(transient)
+                merge_scan_state(state, work_state)
+                return
+        except (OSError, PermissionError):
+            work_state.add_coverage("working-tree", "permission_denied", f"file-unreadable:{object_id}")
+        next_file_index = index + 1
+        if checkpoint_interval > 0 and next_file_index % checkpoint_interval == 0:
+            save_checkpoint(next_file_index, False)
+    work_state.add_coverage("working-tree", "checked", object_count=len(entries))
+    save_checkpoint(len(entries), True)
+    merge_scan_state(state, work_state)
 
 
 def worktree_worker_result_document(state: ScanState) -> dict[str, Any]:
@@ -1627,15 +2101,58 @@ def worktree_worker_result_document(state: ScanState) -> dict[str, Any]:
 
 
 def restore_worktree_worker_result(state: ScanState, document: dict[str, Any]) -> None:
-    restore_worktree_checkpoint(state, document)
+    findings = [Finding(**item) for item in document.get("findings", [])]
+    coverage = [Coverage(**item) for item in document.get("coverage", [])]
+    state.replay_redacted_result(findings, coverage)
+    state.object_sha256.update({str(key): str(value) for key, value in document.get("object_sha256", {}).items()})
+    if state.collect_raw:
+        for candidate in document.get("raw_candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            key = (
+                str(candidate.get("repository", "")),
+                str(candidate.get("surface", "")),
+                str(candidate.get("object", "")),
+                str(candidate.get("rule_id", "")),
+                str(candidate.get("raw_value", "")),
+            )
+            if key not in state._candidate_keys:
+                state._candidate_keys.add(key)
+                state.raw_candidates.append(candidate)
+        state._raw_candidate_total = max(state._raw_candidate_total, len(state.raw_candidates))
     progress = document.get("worktree_progress")
     if isinstance(progress, dict):
-        state.worktree_progress = {
-            "status": str(progress.get("status", "in_progress")),
-            "processed_object_count": max(0, int(progress.get("processed_object_count", 0))),
-            "total_object_count": max(0, int(progress.get("total_object_count", 0))),
-            "resumed": bool(progress.get("resumed", False)),
-        }
+        state.worktree_progress = progress
+
+
+def command_scan_worktree_worker(args: argparse.Namespace) -> int:
+    task_path = ensure_private_path(Path(args.task).expanduser().resolve())
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    result_path = ensure_private_path(Path(task["result"]).expanduser().resolve())
+    source = Path(task["source"]).expanduser().resolve()
+    policy = validate_policy(task["policy"])
+    store: OcrCheckpointStore | None = None
+    try:
+        if task.get("ocr_path") and task.get("ocr_binding"):
+            store = OcrCheckpointStore(Path(task["ocr_path"]), task["ocr_binding"])
+        worker_state = ScanState(
+            str(task["repository"]),
+            policy,
+            collect_raw=bool(task.get("collect_raw", False)),
+            ocr_store=store,
+        )
+        _scan_working_tree_slice(
+            worker_state,
+            source,
+            time_limit_seconds=int(task["slice_time_limit_seconds"]),
+            checkpoint_path=Path(task["checkpoint"]) if task.get("checkpoint") else None,
+            checkpoint_interval=max(1, int(task.get("checkpoint_interval", DEFAULT_WORKTREE_CHECKPOINT_INTERVAL))),
+        )
+        write_json(result_path, worktree_worker_result_document(worker_state), private=True)
+    finally:
+        if store is not None:
+            store.close()
+    return 0
 
 
 def scan_working_tree(
@@ -1656,15 +2173,10 @@ def scan_working_tree(
         )
         return
 
-    entries, inventory_digest = working_tree_inventory(source)
-    binding = worktree_checkpoint_binding(state, source, inventory_digest, len(entries))
-    resolved_checkpoint = ensure_private_path(checkpoint_path or default_worktree_checkpoint_path(binding))
     worker_root = ensure_private_path(private_root() / "worktree-workers")
     worker_root.mkdir(parents=True, exist_ok=True)
     restrict_private_path(worker_root, directory=True)
-    token = sha256_bytes(
-        f"{os.getpid()}:{time.time_ns()}:{resolved_checkpoint}".encode("utf-8", errors="surrogateescape")
-    )
+    token = sha256_bytes(f"{os.getpid()}:{time.time_ns()}:{source}".encode("utf-8", errors="surrogateescape"))
     task_path = worker_root / f"{token}.task.private.json"
     result_path = worker_root / f"{token}.result.private.json"
     write_json(
@@ -1674,8 +2186,11 @@ def scan_working_tree(
             "policy": state.policy,
             "collect_raw": state.collect_raw,
             "source": str(source),
-            "checkpoint": str(resolved_checkpoint),
+            "checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
             "checkpoint_interval": max(1, min(checkpoint_interval, 5)),
+            "slice_time_limit_seconds": max(0, time_limit_seconds - 1),
+            "ocr_path": str(state.ocr_store.path) if state.ocr_store is not None else None,
+            "ocr_binding": state.ocr_store.binding if state.ocr_store is not None else None,
             "result": str(result_path),
         },
         private=True,
@@ -1687,28 +2202,14 @@ def scan_working_tree(
                 timeout_seconds=max(1, time_limit_seconds),
             )
         except subprocess.TimeoutExpired:
-            if resolved_checkpoint.exists():
-                try:
-                    partial = json.loads(resolved_checkpoint.read_text(encoding="utf-8"))
-                    if partial.get("binding") == binding:
-                        next_index = restore_worktree_checkpoint(state, partial)
-                        state.worktree_progress = {
-                            "status": "in_progress",
-                            "processed_object_count": next_index,
-                            "total_object_count": len(entries),
-                            "resumed": next_index > 0,
-                        }
-                except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
-                    pass
-            state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded")
+            state.add_coverage("working-tree", "tool_failed", "working-tree-hard-time-limit-exceeded")
             return
         if worker.returncode != 0 or not result_path.is_file():
             state.add_coverage("working-tree", "tool_failed", "working-tree-worker-failed")
             return
         try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-            restore_worktree_worker_result(state, result)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+            restore_worktree_worker_result(state, json.loads(result_path.read_text(encoding="utf-8")))
+        except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
             state.add_coverage("working-tree", "tool_failed", "working-tree-worker-result-invalid")
     finally:
         for temporary in (task_path, result_path):
@@ -1745,6 +2246,76 @@ def merge_scan_state(target: ScanState, source: ScanState) -> None:
     target._raw_candidate_total = max(target._raw_candidate_total, len(target.raw_candidates))
 
 
+def write_private_record_pages(
+    base_path: Path,
+    records: list[dict[str, Any]],
+    *,
+    kind: str,
+    page_size: int = DEFAULT_FINDING_PAGE_SIZE,
+) -> dict[str, Any]:
+    resolved = ensure_private_path(base_path)
+    pages: list[dict[str, Any]] = []
+    for offset in range(0, len(records), page_size):
+        page_records = records[offset:offset + page_size]
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": kind,
+            "page_index": len(pages) + 1,
+            "records": page_records,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = sha256_bytes(encoded)
+        page_name = f".{resolved.stem}.{kind}-{len(pages) + 1:05d}-{digest[:16]}.private.json"
+        page_path = resolved.with_name(page_name)
+        write_json(page_path, payload, private=True)
+        pages.append({"file": page_name, "sha256": digest, "record_count": len(page_records)})
+    return {
+        "kind": kind,
+        "record_count": len(records),
+        "page_size": page_size,
+        "page_count": len(pages),
+        "pages": pages,
+    }
+
+
+def write_paginated_private_report(path: Path, report: dict[str, Any]) -> dict[str, Any]:
+    """Write a private report manifest whose findings are losslessly stored in verified pages."""
+    resolved = ensure_private_path(path)
+    records = list(report.get("findings", []))
+    finding_pages = write_private_record_pages(
+        resolved,
+        records,
+        kind="gate-findings",
+    )
+    manifest = {key: value for key, value in report.items() if key != "findings"}
+    manifest["finding_pages"] = finding_pages
+    write_json(resolved, manifest, private=True)
+    return manifest
+
+
+def read_private_record_pages(base_path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    resolved = ensure_private_path(base_path)
+    records: list[dict[str, Any]] = []
+    for page in manifest.get("pages", []):
+        page_path = ensure_private_path(resolved.with_name(str(page["file"])))
+        encoded = page_path.read_bytes()
+        if sha256_bytes(encoded.rstrip(b"\r\n")) != page["sha256"]:
+            # write_json adds one newline; verify the canonical payload when the byte digest differs.
+            document = json.loads(encoded.decode("utf-8"))
+            canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if sha256_bytes(canonical) != page["sha256"]:
+                raise ValueError("Private finding page digest mismatch")
+        else:
+            document = json.loads(encoded.decode("utf-8"))
+        page_records = document.get("records", [])
+        if not isinstance(page_records, list) or len(page_records) != int(page["record_count"]):
+            raise ValueError("Private finding page is invalid")
+        records.extend(item for item in page_records if isinstance(item, dict))
+    if len(records) != int(manifest.get("record_count", -1)):
+        raise ValueError("Private finding page count mismatch")
+    return records
+
+
 def history_checkpoint_binding(
     state: ScanState,
     source: Path,
@@ -1762,9 +2333,29 @@ def history_checkpoint_binding(
     }
 
 
+def ocr_checkpoint_binding(repository: str, source: Path, policy: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "ocr_checkpoint_schema_version": OCR_CHECKPOINT_SCHEMA_VERSION,
+        "repository": repository,
+        "source_commit": git_head(source),
+        "scanner_sha256": sha256_bytes(Path(__file__).read_bytes()),
+        "policy_fingerprint": policy_fingerprint(policy),
+    }
+
+
+def default_ocr_checkpoint_path(binding: dict[str, Any]) -> Path:
+    encoded = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return private_root() / "ocr-checkpoints" / f"{sha256_bytes(encoded)}.private.sqlite"
+
+
 def default_history_checkpoint_path(binding: dict[str, Any]) -> Path:
     encoded = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return private_root() / "history-checkpoints" / f"{sha256_bytes(encoded)}.private.json"
+
+
+def default_worktree_checkpoint_path(binding: dict[str, Any]) -> Path:
+    encoded = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return private_root() / "worktree-checkpoints" / f"{sha256_bytes(encoded)}.private.json"
 
 
 def history_checkpoint_document(
@@ -1774,6 +2365,7 @@ def history_checkpoint_document(
     phase: str,
     next_object_index: int,
     blob_count: int,
+    finding_pages: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "history_checkpoint_schema_version": HISTORY_CHECKPOINT_SCHEMA_VERSION,
@@ -1782,15 +2374,18 @@ def history_checkpoint_document(
         "next_object_index": next_object_index,
         "blob_count": blob_count,
         "updated_at": utc_now(),
-        "findings": [item.public_dict() for item in state.findings],
+        "finding_pages": finding_pages,
         "coverage": [item.as_dict() for item in state.coverage],
         "object_sha256": state.object_sha256,
         "raw_candidates": state.raw_candidates if state.collect_raw else [],
     }
 
 
-def restore_history_checkpoint(state: ScanState, document: dict[str, Any]) -> tuple[str, int, int]:
-    for item in document.get("findings", []):
+def restore_history_checkpoint(state: ScanState, checkpoint_path: Path, document: dict[str, Any]) -> tuple[str, int, int]:
+    finding_records = document.get("findings", [])
+    if "finding_pages" in document:
+        finding_records = read_private_record_pages(checkpoint_path, document["finding_pages"])
+    for item in finding_records:
         finding = Finding(**item)
         key = (finding.object, finding.location, finding.rule_id, finding.status)
         if key not in state._finding_keys:
@@ -1827,7 +2422,17 @@ def scan_git_history(
     checkpoint_interval: int = DEFAULT_HISTORY_CHECKPOINT_INTERVAL,
 ) -> None:
     started = time.monotonic()
-    history_state = ScanState(state.repository, state.policy, collect_raw=state.collect_raw)
+    inventory_timeout = (
+        max(1, time_limit_seconds)
+        if time_limit_seconds is not None and time_limit_seconds > 0
+        else None
+    )
+    history_state = ScanState(
+        state.repository,
+        state.policy,
+        collect_raw=state.collect_raw,
+        ocr_store=state.ocr_store,
+    )
 
     def time_exceeded() -> bool:
         return time_limit_seconds is not None and time.monotonic() - started >= time_limit_seconds
@@ -1836,7 +2441,7 @@ def scan_git_history(
         shallow = run(
             ["git", "rev-parse", "--is-shallow-repository"],
             source,
-            timeout_seconds=max(1, time_limit_seconds) if time_limit_seconds is not None else None,
+            timeout_seconds=inventory_timeout,
         )
     except subprocess.TimeoutExpired:
         state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded")
@@ -1852,7 +2457,7 @@ def scan_git_history(
             ["git", "rev-list", "--objects", "--all"],
             source,
             text=False,
-            timeout_seconds=max(1, time_limit_seconds) if time_limit_seconds is not None else None,
+            timeout_seconds=inventory_timeout,
         )
     except subprocess.TimeoutExpired:
         state.add_coverage("git-history", "tool_failed", "git-history-time-limit-exceeded")
@@ -1890,7 +2495,7 @@ def scan_git_history(
             state.add_coverage("git-history", "tool_failed", "git-history-checkpoint-binding-mismatch")
             return
         try:
-            phase, next_object_index, blob_count = restore_history_checkpoint(history_state, document)
+            phase, next_object_index, blob_count = restore_history_checkpoint(history_state, resolved_checkpoint, document)
         except (TypeError, ValueError, KeyError):
             state.add_coverage("git-history", "tool_failed", "git-history-checkpoint-invalid")
             return
@@ -1911,6 +2516,11 @@ def scan_git_history(
     def save_checkpoint(current_phase: str, current_index: int) -> None:
         if resolved_checkpoint is None:
             return
+        finding_pages = write_private_record_pages(
+            resolved_checkpoint,
+            [item.public_dict() for item in history_state.findings],
+            kind="history-findings",
+        )
         write_json(
             resolved_checkpoint,
             history_checkpoint_document(
@@ -1919,6 +2529,7 @@ def scan_git_history(
                 phase=current_phase,
                 next_object_index=current_index,
                 blob_count=blob_count,
+                finding_pages=finding_pages,
             ),
             private=True,
         )
@@ -1973,13 +2584,39 @@ def scan_git_history(
                     elif object_type == "blob":
                         blob_count += 1
                         display = path or f"blob-{oid[:12]}"
-                        scan_bytes(
+                        coverage_start = len(history_state.coverage)
+                        scan_bytes_bounded(
                             history_state,
                             content,
                             surface="git-history",
                             object_id=f"git:{oid}:{display}",
                             display_path=display,
                         )
+                        transient_ocr_gaps = [
+                            item
+                            for item in history_state.coverage[coverage_start:]
+                            if item.reason.startswith((
+                                "image-ocr-budget-exceeded:",
+                                "pdf-page-image-ocr-budget-exceeded:",
+                                "image-ocr-unit-timeout:",
+                                "pdf-page-image-ocr-unit-timeout:",
+                                "artifact-unit-timeout:",
+                                "artifact-worker-failed:",
+                            ))
+                        ]
+                        if transient_ocr_gaps:
+                            history_state.coverage = [
+                                *history_state.coverage[:coverage_start],
+                                *[
+                                    item
+                                    for item in history_state.coverage[coverage_start:]
+                                    if item not in transient_ocr_gaps
+                                ],
+                            ]
+                            save_checkpoint("objects", index)
+                            history_state.coverage.extend(transient_ocr_gaps)
+                            merge_scan_state(state, history_state)
+                            return
                 next_object_index = index + 1
                 if checkpoint_interval > 0 and next_object_index % checkpoint_interval == 0:
                     save_checkpoint("objects", next_object_index)
@@ -2378,8 +3015,6 @@ def publication_decision_for(
     for finding in unresolved:
         if finding_risk_level(finding) == "critical":
             return "deny"
-        if risk_acceptance_status(state, finding) != "active":
-            return "deny"
     return "allow" if audit_decision == "pass" else "allow_with_risk"
 
 
@@ -2395,6 +3030,37 @@ def sorted_findings(state: ScanState) -> list[dict[str, Any]]:
             record["risk_acceptance"] = risk_acceptance_status(state, item)
         result.append(record)
     return result
+
+
+def gate_result_explanation(
+    decision: str,
+    publication_decision: str,
+    summary: dict[str, int],
+) -> dict[str, str]:
+    if summary["critical_finding_count"]:
+        match_reason = "At least one unresolved finding matched a fixed critical rule"
+    elif summary["critical_coverage_gap_count"]:
+        match_reason = "At least one required publication surface was not completely inspected"
+    elif summary["noncritical_finding_count"] or summary["noncritical_coverage_gap_count"]:
+        match_reason = "Only fixed-matrix noncritical findings or auxiliary-surface gaps remain"
+    else:
+        match_reason = "Every declared publication surface was checked and no unresolved finding remains"
+    if publication_decision == "deny":
+        publication_effect = "The exact GitHub write must stop"
+        next_step = "Repair the critical finding or restore the missing required coverage, then rerun the gate on the identical source"
+    elif publication_decision == "allow_with_risk":
+        publication_effect = "The exact GitHub write may continue after explicit authorization while the noncritical risk remains reported"
+        next_step = "Retain the private report and review the noncritical items without blocking this publication"
+    else:
+        publication_effect = "The exact GitHub write may continue after explicit authorization"
+        next_step = "Verify the remote commit and required checks after the write"
+    return {
+        "count_source": "finding counts come from normalized scanner records; coverage-gap counts come from declared surfaces whose status is neither checked nor not_present",
+        "match_reason": match_reason,
+        "publication_effect": publication_effect,
+        "next_step": next_step,
+        "strict_audit_context": f"The strict audit decision is {decision}; it remains separate from the publication decision",
+    }
 
 
 def gate_report(
@@ -2413,6 +3079,18 @@ def gate_report(
     )
     findings = sorted_findings(state)
     coverage = consolidated_coverage(state.coverage)
+    summary = {
+        "finding_count": len(state.findings),
+        "block_count": sum(item.status == "block" for item in state.findings),
+        "review_count": sum(item.status == "review" for item in state.findings),
+        "approved_count": sum(item.status in {"approved", "excepted"} for item in state.findings),
+        "coverage_gap_count": sum(item.status not in {"checked", "not_present"} for item in state.coverage),
+        "critical_finding_count": sum(item["risk_level"] == "critical" for item in findings),
+        "noncritical_finding_count": sum(item["risk_level"] == "noncritical" for item in findings),
+        "accepted_risk_count": sum(item.get("risk_acceptance") == "active" for item in findings),
+        "critical_coverage_gap_count": sum(item["risk_level"] == "critical" for item in coverage),
+        "noncritical_coverage_gap_count": sum(item["risk_level"] == "noncritical" for item in coverage),
+    }
     report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -2430,30 +3108,20 @@ def gate_report(
             "python": platform.python_version(),
         },
         "policy_fingerprint": policy_fingerprint(policy),
-        "worktree_progress": (
-            {key: value for key, value in state.worktree_progress.items() if key != "resumed"}
-            if state.worktree_progress is not None
-            else None
-        ),
         "history_progress": (
             {key: value for key, value in state.history_progress.items() if key != "resumed"}
             if state.history_progress is not None
             else None
         ),
+        "worktree_progress": (
+            {key: value for key, value in state.worktree_progress.items() if key != "resumed"}
+            if state.worktree_progress is not None
+            else None
+        ),
         "coverage": coverage,
         "findings": findings,
-        "summary": {
-            "finding_count": len(state.findings),
-            "block_count": sum(item.status == "block" for item in state.findings),
-            "review_count": sum(item.status == "review" for item in state.findings),
-            "approved_count": sum(item.status in {"approved", "excepted"} for item in state.findings),
-            "coverage_gap_count": sum(item.status not in {"checked", "not_present"} for item in state.coverage),
-            "critical_finding_count": sum(item["risk_level"] == "critical" for item in findings),
-            "noncritical_finding_count": sum(item["risk_level"] == "noncritical" for item in findings),
-            "accepted_risk_count": sum(item.get("risk_acceptance") == "active" for item in findings),
-            "critical_coverage_gap_count": sum(item["risk_level"] == "critical" for item in coverage),
-            "noncritical_coverage_gap_count": sum(item["risk_level"] == "noncritical" for item in coverage),
-        },
+        "summary": summary,
+        "result_explanation": gate_result_explanation(decision, publication_decision, summary),
     }
     stable = {key: value for key, value in report.items() if key not in {"generated_at", "report_fingerprint"}}
     report["report_fingerprint"] = sha256_bytes(json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
@@ -2490,46 +3158,65 @@ def command_gate(args: argparse.Namespace) -> int:
             policy_error = True
     except (OSError, ValueError):
         policy_error = True
-    state = ScanState(repository, policy)
+    ocr_store: OcrCheckpointStore | None = None
+    ocr_binding = ocr_checkpoint_binding(repository, source, policy)
+    try:
+        requested_ocr_checkpoint = getattr(args, "ocr_checkpoint", None)
+        ocr_path = (
+            Path(requested_ocr_checkpoint).expanduser().resolve()
+            if requested_ocr_checkpoint
+            else default_ocr_checkpoint_path(ocr_binding)
+        )
+        ocr_store = OcrCheckpointStore(ocr_path, ocr_binding)
+    except (OSError, RuntimeError, ValueError):
+        ocr_store = None
+    state = ScanState(repository, policy, ocr_store=ocr_store)
+    if ocr_store is None:
+        state.add_coverage("ocr-checkpoint", "tool_failed", "ocr-checkpoint-unavailable-or-invalid")
     if policy_error:
         state.add_coverage("private-policy", "unreadable", "private-policy-unavailable-or-invalid")
     elif args.generic_only:
         state.add_coverage("private-policy", "unreadable", "generic-only-cannot-pass-publication")
     else:
         state.add_coverage("private-policy", "checked", object_count=len(policy["identifiers"]) if policy else 0)
-    if not source.is_dir():
-        state.add_coverage("working-tree", "unreadable", "source-directory-unavailable")
-    else:
-        scan_working_tree(
-            state,
-            source,
-            time_limit_seconds=getattr(args, "worktree_time_limit_seconds", DEFAULT_GATE_WORKTREE_BUDGET_SECONDS),
-            checkpoint_path=(
-                Path(args.worktree_checkpoint).expanduser().resolve()
-                if getattr(args, "worktree_checkpoint", None)
-                else None
-            ),
-            checkpoint_interval=getattr(args, "worktree_checkpoint_interval", DEFAULT_WORKTREE_CHECKPOINT_INTERVAL),
-        )
-        worktree_slice_incomplete = any(
-            item.reason == "working-tree-time-limit-exceeded" for item in state.coverage
-        )
-        if not worktree_slice_incomplete:
-            scan_git_history(
+    try:
+        if not source.is_dir():
+            state.add_coverage("working-tree", "unreadable", "source-directory-unavailable")
+        else:
+            scan_working_tree(
                 state,
                 source,
-                time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
+                time_limit_seconds=getattr(args, "worktree_time_limit_seconds", DEFAULT_GATE_WORKTREE_BUDGET_SECONDS),
                 checkpoint_path=(
-                    Path(args.git_history_checkpoint).expanduser().resolve()
-                    if getattr(args, "git_history_checkpoint", None)
+                    Path(args.worktree_checkpoint).expanduser().resolve()
+                    if getattr(args, "worktree_checkpoint", None)
                     else None
                 ),
-                checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
+                checkpoint_interval=getattr(args, "worktree_checkpoint_interval", DEFAULT_WORKTREE_CHECKPOINT_INTERVAL),
             )
-            scan_submodules(state, source)
-            scan_lfs(state, source)
-            run_gitleaks(state, source, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
-    scan_release_paths(state, [Path(item).expanduser().resolve() for item in args.release_asset])
+            worktree_incomplete = any(
+                item.surface == "working-tree" and item.status not in {"checked", "not_present"}
+                for item in state.coverage
+            )
+            if not worktree_incomplete:
+                scan_git_history(
+                    state,
+                    source,
+                    time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
+                    checkpoint_path=(
+                        Path(args.git_history_checkpoint).expanduser().resolve()
+                        if getattr(args, "git_history_checkpoint", None)
+                        else None
+                    ),
+                    checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
+                )
+                scan_submodules(state, source)
+                scan_lfs(state, source)
+                run_gitleaks(state, source, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
+        scan_release_paths(state, [Path(item).expanduser().resolve() for item in args.release_asset])
+    finally:
+        if ocr_store is not None:
+            ocr_store.close()
     report = gate_report(
         state,
         source,
@@ -2537,7 +3224,7 @@ def command_gate(args: argparse.Namespace) -> int:
         release_profile=args.release_profile,
         force_incomplete=force_incomplete,
     )
-    write_json(Path(args.report), report)
+    write_paginated_private_report(Path(args.report), report)
     if args.public_summary:
         write_json(
             Path(args.public_summary),
@@ -2551,9 +3238,10 @@ def command_gate(args: argparse.Namespace) -> int:
                 "scanner_sha256": report["scanner_versions"]["safe_publish_sha256"],
                 "policy_fingerprint": report["policy_fingerprint"],
                 "report_fingerprint": report["report_fingerprint"],
-                "worktree_progress": report["worktree_progress"],
                 "history_progress": report["history_progress"],
+                "worktree_progress": report["worktree_progress"],
                 "summary": report["summary"],
+                "result_explanation": report["result_explanation"],
             },
         )
     print(
@@ -2563,6 +3251,7 @@ def command_gate(args: argparse.Namespace) -> int:
                 "publication_decision": report["publication_decision"],
                 "release_profile": report["release_profile"],
                 **report["summary"],
+                "result_explanation": report["result_explanation"],
             },
             sort_keys=True,
         )
@@ -2893,10 +3582,11 @@ def command_managed_publish(args: argparse.Namespace) -> int:
         source=str(candidate), repository=args.repository, policy=args.policy, policy_b64_env=None,
         generic_only=False, release_asset=args.release_asset, gitleaks_path=str(gitleaks_binary),
         release_profile=args.release_profile, report=str(report_path), public_summary=args.public_summary,
+        git_history_checkpoint=str(output_dir / "git-history-checkpoint.private.json"),
         worktree_checkpoint=str(output_dir / "worktree-checkpoint.private.json"),
+        ocr_checkpoint=str(output_dir / "ocr-checkpoint.private.sqlite"),
         worktree_time_limit_seconds=getattr(args, "worktree_time_limit_seconds", DEFAULT_GATE_WORKTREE_BUDGET_SECONDS),
         worktree_checkpoint_interval=getattr(args, "worktree_checkpoint_interval", DEFAULT_WORKTREE_CHECKPOINT_INTERVAL),
-        git_history_checkpoint=str(output_dir / "git-history-checkpoint.private.json"),
         git_history_time_limit_seconds=getattr(args, "git_history_time_limit_seconds", DEFAULT_GATE_HISTORY_BUDGET_SECONDS),
         git_history_checkpoint_interval=getattr(args, "git_history_checkpoint_interval", DEFAULT_HISTORY_CHECKPOINT_INTERVAL),
     )
@@ -3172,7 +3862,10 @@ def command_prepare(args: argparse.Namespace) -> int:
 
 
 def gh_json(endpoint: str) -> tuple[Any | None, str | None]:
-    result = run(["gh", "api", "--paginate", endpoint])
+    try:
+        result = run(["gh", "api", "--paginate", endpoint], timeout_seconds=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None, "tool_failed"
     if result.returncode != 0:
         lowered = result.stderr.lower()
         if "403" in lowered or "resource not accessible" in lowered:
@@ -3216,34 +3909,22 @@ def api_items(endpoint: str, field: str | None = None) -> tuple[list[dict[str, A
 
 def gh_download(endpoint: str, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> tuple[bytes | None, str | None]:
     try:
-        process = subprocess.Popen(
+        result = run(
             ["gh", "api", endpoint, "-H", "Accept: application/octet-stream"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            text=False,
+            timeout_seconds=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
         )
-        assert process.stdout is not None
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = process.stdout.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                process.kill()
-                process.wait(timeout=30)
-                return None, "unreadable"
-            chunks.append(chunk)
-        _, stderr = process.communicate(timeout=30)
-        if process.returncode != 0:
-            lowered = stderr.decode("utf-8", errors="ignore").lower()
+        if result.returncode != 0:
+            lowered = result.stderr.decode("utf-8", errors="ignore").lower()
             if "403" in lowered or "resource not accessible" in lowered:
                 return None, "permission_denied"
             if "404" in lowered or "not found" in lowered or "410" in lowered:
                 return None, "not_present"
             return None, "tool_failed"
-        return b"".join(chunks), None
-    except (OSError, subprocess.SubprocessError, AssertionError):
+        if len(result.stdout) > max_bytes:
+            return None, "unreadable"
+        return result.stdout, None
+    except (OSError, subprocess.SubprocessError):
         return None, "tool_failed"
 
 
@@ -3336,7 +4017,24 @@ def scan_remote_records(state: ScanState, records: list[dict[str, Any]], *, surf
     state.add_coverage(surface, "checked" if records else "not_present", object_count=count)
 
 
-def audit_repository_associated_surfaces(state: ScanState, owner: str, repository: str, repo_metadata: dict[str, Any]) -> None:
+def audit_repository_associated_surfaces(
+    state: ScanState,
+    owner: str,
+    repository: str,
+    repo_metadata: dict[str, Any],
+    *,
+    time_limit_seconds: int = DEFAULT_ASSOCIATED_SURFACE_BUDGET_SECONDS,
+) -> None:
+    deadline = time.monotonic() + max(1, time_limit_seconds)
+
+    def stop_when_budget_expires() -> bool:
+        if time.monotonic() < deadline:
+            return False
+        observed = {item.surface for item in state.coverage}
+        for surface in sorted(REPOSITORY_ASSOCIATED_SURFACES - observed):
+            state.add_coverage(surface, "tool_failed", "repository-associated-time-limit-exceeded")
+        return True
+
     base = f"repos/{owner}/{repository}"
     endpoints = (
         ("issues", f"{base}/issues?state=all&per_page=100", None, ("title", "body", "labels", "milestone.title", "milestone.description")),
@@ -3351,12 +4049,16 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
         ("actions-artifacts", f"{base}/actions/artifacts?per_page=100", "artifacts", ("name", "workflow_run.head_branch")),
     )
     for surface, endpoint, field, fields in endpoints:
+        if stop_when_budget_expires():
+            return
         records, error = api_items(endpoint, field)
         if error:
             state.add_coverage(surface, error, f"{surface}-enumeration-failed")
         else:
             scan_remote_records(state, records, surface=surface, prefix=surface, fields=fields)
 
+    if stop_when_budget_expires():
+        return
     deployments, deployments_error = api_items(f"{base}/deployments?per_page=100")
     if deployments_error:
         state.add_coverage("deployment-statuses", deployments_error, "deployment-status-enumeration-failed")
@@ -3365,6 +4067,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
     else:
         status_count = 0
         for deployment in deployments:
+            if stop_when_budget_expires():
+                return
             deployment_id = deployment.get("id")
             statuses, error = api_items(f"{base}/deployments/{deployment_id}/statuses?per_page=100")
             if error:
@@ -3374,6 +4078,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
             scan_remote_records(state, statuses, surface="deployment-statuses", prefix=f"deployment:{deployment_id}:status", fields=("description", "environment_url", "log_url"))
         state.add_coverage("deployment-statuses", "checked", object_count=status_count)
 
+    if stop_when_budget_expires():
+        return
     artifacts, artifacts_error = api_items(f"{base}/actions/artifacts?per_page=100", "artifacts")
     if artifacts_error:
         state.add_coverage("actions-artifact-content", artifacts_error, "artifact-enumeration-failed")
@@ -3382,6 +4088,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
     else:
         checked_artifacts = 0
         for artifact in artifacts:
+            if stop_when_budget_expires():
+                return
             artifact_id = artifact.get("id")
             size = int(artifact.get("size_in_bytes") or 0)
             if size > DEFAULT_MAX_FILE_BYTES:
@@ -3396,12 +4104,16 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
             checked_artifacts += 1
         state.add_coverage("actions-artifact-content", "checked", object_count=checked_artifacts)
 
+    if stop_when_budget_expires():
+        return
     pulls, pulls_error = api_items(f"{base}/pulls?state=all&per_page=100")
     if pulls_error:
         state.add_coverage("pull-reviews", pulls_error, "pull-review-enumeration-failed")
     else:
         review_count = 0
         for pull in pulls:
+            if stop_when_budget_expires():
+                return
             number = pull.get("number")
             reviews, error = api_items(f"{base}/pulls/{number}/reviews?per_page=100")
             if error:
@@ -3414,6 +4126,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
         elif review_count == 0 and not any(item.surface == "pull-reviews" and item.status not in {"checked", "not_present"} for item in state.coverage):
             state.add_coverage("pull-reviews", "not_present")
 
+    if stop_when_budget_expires():
+        return
     # Discussions use GraphQL because no repository REST endpoint provides their bodies and comments.
     query = "query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){discussions(first:100,after:$endCursor){nodes{id title body comments(first:100){nodes{id body}pageInfo{hasNextPage endCursor}}}pageInfo{hasNextPage endCursor}}}}"
     discussion_result = run(["gh", "api", "graphql", "--paginate", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={repository}"])
@@ -3442,6 +4156,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
         except (json.JSONDecodeError, AttributeError):
             state.add_coverage("discussions", "tool_failed", "discussion-response-invalid")
 
+    if stop_when_budget_expires():
+        return
     pages, pages_error = gh_json(f"{base}/pages")
     if pages_error:
         status = "not_present" if pages_error == "tool_failed" and not repo_metadata.get("has_pages") else pages_error
@@ -3456,6 +4172,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
         else:
             state.add_coverage("github-pages-rendered", "unreadable", "pages-rendered-url-unavailable")
 
+    if stop_when_budget_expires():
+        return
     # Wiki is a separate Git repository. A failed clone is not treated as absence when the repository advertises Wiki support.
     if repo_metadata.get("has_wiki"):
         with tempfile.TemporaryDirectory(prefix="safe-publish-wiki-") as temporary:
@@ -3471,6 +4189,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
     else:
         state.add_coverage("wiki", "not_present")
 
+    if stop_when_budget_expires():
+        return
     runs, runs_error = api_items(f"{base}/actions/runs?per_page=100", "workflow_runs")
     if runs_error:
         state.add_coverage("actions-logs", runs_error, "workflow-run-enumeration-failed")
@@ -3480,6 +4200,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
     else:
         checked = 0
         for workflow_run in runs:
+            if stop_when_budget_expires():
+                return
             run_id = workflow_run.get("id")
             log_data, download_error = gh_download(f"{base}/actions/runs/{run_id}/logs")
             if download_error or log_data is None:
@@ -3491,6 +4213,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
         state.add_coverage("actions-logs", "checked", object_count=checked)
         state.add_coverage("actions-job-summaries", "unreadable", "job-summary-api-unavailable", len(runs))
 
+    if stop_when_budget_expires():
+        return
     # Cache contents are not downloadable through a stable repository API; metadata remains auditable.
     caches, caches_error = api_items(f"{base}/actions/caches?per_page=100", "actions_caches")
     if caches_error:
@@ -3499,6 +4223,8 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
         scan_remote_records(state, caches, surface="actions-cache-metadata", prefix="cache", fields=("key", "ref"))
         state.add_coverage("actions-cache-content", "unreadable" if caches else "not_present", "cache-content-api-unavailable" if caches else "", len(caches))
 
+    if stop_when_budget_expires():
+        return
     # Secrets are intentionally unreadable; names and selected settings are the only declared surface.
     secrets, secrets_error = api_items(f"{base}/actions/secrets?per_page=100", "secrets")
     if secrets_error:
@@ -3506,12 +4232,16 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
     else:
         scan_remote_records(state, secrets, surface="actions-secret-metadata", prefix="actions-secret", fields=("name",))
 
+    if stop_when_budget_expires():
+        return
     rulesets, rulesets_error = api_items(f"{base}/rulesets?per_page=100")
     if rulesets_error:
         state.add_coverage("rulesets", rulesets_error, "ruleset-enumeration-failed")
     else:
         scan_remote_records(state, rulesets, surface="rulesets", prefix="ruleset", fields=("name", "target", "enforcement"))
 
+    if stop_when_budget_expires():
+        return
     actions_permissions, permissions_error = gh_json(f"{base}/actions/permissions")
     if permissions_error:
         state.add_coverage("actions-permissions", permissions_error, "actions-permission-read-failed")
@@ -3538,9 +4268,13 @@ def audit_repository_associated_surfaces(state: ScanState, owner: str, repositor
     else:
         state.add_coverage("branch-protection", "not_present")
 
+    if stop_when_budget_expires():
+        return
     package_count = 0
     package_error: str | None = None
     for package_type in ("container", "npm", "maven", "rubygems", "nuget"):
+        if stop_when_budget_expires():
+            return
         if package_type not in PACKAGE_CACHE:
             PACKAGE_CACHE[package_type] = api_items(f"user/packages?package_type={package_type}&per_page=100")
         packages, error = PACKAGE_CACHE[package_type]
@@ -3581,7 +4315,15 @@ def prepare_mirror(owner: str, repository: str, local_source: Path | None, mirro
     return mirror, None
 
 
-def download_release_assets(owner: str, repository: str, state: ScanState, download_root: Path) -> None:
+def download_release_assets(
+    owner: str,
+    repository: str,
+    state: ScanState,
+    download_root: Path,
+    *,
+    time_limit_seconds: int = DEFAULT_RELEASE_ASSET_BUDGET_SECONDS,
+) -> None:
+    deadline = time.monotonic() + max(1, time_limit_seconds)
     releases, error = gh_json(f"repos/{owner}/{repository}/releases?per_page=100")
     if error:
         state.add_coverage("release-assets", error, "release-enumeration-failed")
@@ -3600,7 +4342,15 @@ def download_release_assets(owner: str, repository: str, state: ScanState, downl
         state.add_coverage("release-assets", "not_present")
         return
     checked = 0
-    for release_id, name, url, size in assets:
+    for asset_index, (release_id, name, url, size) in enumerate(assets):
+        if time.monotonic() >= deadline:
+            state.add_coverage(
+                "release-assets",
+                "tool_failed",
+                "release-asset-time-limit-exceeded",
+                len(assets) - asset_index,
+            )
+            break
         object_id = f"release:{release_id}:{name}"
         if size > DEFAULT_MAX_FILE_BYTES:
             state.add_coverage("release-assets", "unreadable", f"oversized-release-asset:{object_id}")
@@ -4156,9 +4906,21 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
             run_gitleaks(state, prepared, Path(args.gitleaks_path).resolve() if args.gitleaks_path else None)
         scan_metadata(state, repo)
         with tempfile.TemporaryDirectory(prefix="safe-publish-release-") as release_temporary:
-            download_release_assets(args.owner, name, state, Path(release_temporary))
+            download_release_assets(
+                args.owner,
+                name,
+                state,
+                Path(release_temporary),
+                time_limit_seconds=getattr(args, "release_time_limit_seconds", DEFAULT_RELEASE_ASSET_BUDGET_SECONDS),
+            )
         if args.surface_profile == "repository-associated":
-            audit_repository_associated_surfaces(state, args.owner, name, repo)
+            audit_repository_associated_surfaces(
+                state,
+                args.owner,
+                name,
+                repo,
+                time_limit_seconds=getattr(args, "associated_time_limit_seconds", DEFAULT_ASSOCIATED_SURFACE_BUDGET_SECONDS),
+            )
         remote_refs = run(["git", "for-each-ref", "--format=%(refname) %(objectname)"], prepared) if prepared else None
         ref_count = len(remote_refs.stdout.splitlines()) if remote_refs and remote_refs.returncode == 0 else 0
         if prepared and (not remote_refs or remote_refs.returncode != 0):
@@ -4191,6 +4953,12 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
     profile_exclusions = ["gists", "github-projects", "codespaces", "billing-data", "external-clones", "other-accounts"]
     if args.surface_profile == "publication":
         profile_exclusions.extend(["issues", "pull-requests", "comments", "reviews", "discussions", "wiki", "github-pages", "actions-logs", "actions-artifacts", "packages", "container-images", "caches", "deployments"])
+    fleet_result_explanation = {
+        "count_source": "repository_count comes from unique authenticated owner repository IDs; candidate_count comes from the lossless private candidate store; decision_counts come from one strict report per repository",
+        "match_reason": "Each strict decision reflects unresolved rule matches and declared surface coverage for that repository",
+        "publication_effect": "A periodic fleet audit reports exposure but never authorizes or blocks an exact GitHub write by itself",
+        "next_step": "Run the exact publication gate for each intended source commit and release asset before any remote write",
+    }
     fleet_report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -4202,6 +4970,7 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
         "policy_fingerprint": current_policy_fingerprint,
         "scanner_versions": {"safe_publish": "3", "safe_publish_sha256": current_scanner_hash, "gitleaks": GITLEAKS_VERSION, "python": platform.python_version(), "image_ocr_budget_seconds": DEFAULT_IMAGE_OCR_BUDGET_SECONDS},
         "declared_exclusions": profile_exclusions,
+        "result_explanation": fleet_result_explanation,
         "repositories": detailed,
     }
     candidate_count = candidate_store.write_document(candidates_output)
@@ -4231,6 +5000,7 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
             "repository_security_setting_counts": {},
             "user_level_push_protection": "unknown",
             "legacy_local_inventory": aggregate_local_inventory(local_map),
+            "result_explanation": fleet_result_explanation,
         }
         for item in detailed:
             for finding in item["findings"]:
@@ -4248,44 +5018,13 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
             security_key = f"{security.get('secret_scanning', 'unknown')}::{security.get('secret_scanning_push_protection', 'unknown')}"
             public_summary["repository_security_setting_counts"][security_key] = public_summary["repository_security_setting_counts"].get(security_key, 0) + 1
         write_json(Path(args.public_summary), public_summary)
-    print(json.dumps({"repository_count": len(detailed), "candidate_count": candidate_count, "decision_counts": decision_counts}, sort_keys=True))
+    print(json.dumps({"repository_count": len(detailed), "candidate_count": candidate_count, "decision_counts": decision_counts, "result_explanation": fleet_result_explanation}, sort_keys=True))
     return 0 if len(detailed) == len(owned_by_id) else 4
-
-
-def command_scan_worktree_worker(args: argparse.Namespace) -> int:
-    task_path = ensure_private_path(Path(args.task))
-    try:
-        task = json.loads(task_path.read_text(encoding="utf-8"))
-        source = Path(task["source"]).expanduser().resolve()
-        checkpoint = ensure_private_path(Path(task["checkpoint"]))
-        result_path = ensure_private_path(Path(task["result"]))
-        policy = validate_policy(task["policy"])
-        repository = str(task["repository"])
-        collect_raw = bool(task.get("collect_raw", False))
-        interval = max(1, min(int(task.get("checkpoint_interval", 1)), 100))
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return 2
-    worker_state = ScanState(repository, policy, collect_raw=collect_raw)
-    if not source.is_dir():
-        worker_state.add_coverage("working-tree", "unreadable", "source-directory-unavailable")
-    else:
-        _scan_working_tree_slice(
-            worker_state,
-            source,
-            checkpoint_path=checkpoint,
-            checkpoint_interval=interval,
-        )
-    write_json(result_path, worktree_worker_result_document(worker_state), private=True)
-    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit and gate a sanitized GitHub publication without exposing raw matches")
     subcommands = parser.add_subparsers(dest="command", required=True)
-
-    worktree_worker = subcommands.add_parser("_scan-worktree-worker", help=argparse.SUPPRESS)
-    worktree_worker.add_argument("--task", required=True)
-    worktree_worker.set_defaults(handler=command_scan_worktree_worker)
 
     audit = subcommands.add_parser("audit-fleet", help="Audit an authenticated GitHub owner's finite repository fleet")
     audit.add_argument("--owner", required=True)
@@ -4296,6 +5035,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--public-summary")
     audit.add_argument("--gitleaks-path")
     audit.add_argument("--history-time-limit-seconds", type=int, default=300)
+    audit.add_argument("--associated-time-limit-seconds", type=int, default=DEFAULT_ASSOCIATED_SURFACE_BUDGET_SECONDS)
+    audit.add_argument("--release-time-limit-seconds", type=int, default=DEFAULT_RELEASE_ASSET_BUDGET_SECONDS)
     audit.add_argument("--surface-profile", choices=("publication", "repository-associated"), default="publication")
     audit.add_argument("--resume", action="store_true")
     audit.add_argument("--cache-mirrors", action="store_true", help="Retain private mirrors for an explicitly approved secure cache")
@@ -4317,6 +5058,10 @@ def build_parser() -> argparse.ArgumentParser:
     local_worker.add_argument("--result", required=True)
     local_worker.add_argument("--no-raw", action="store_true")
     local_worker.set_defaults(handler=command_audit_local_session_worker)
+
+    worktree_worker = subcommands.add_parser("_scan-worktree-worker", help=argparse.SUPPRESS)
+    worktree_worker.add_argument("--task", required=True)
+    worktree_worker.set_defaults(handler=command_scan_worktree_worker)
 
     compile_policy = subcommands.add_parser("compile-policy", help="Compile a repository-scoped v3 policy from the private master policy")
     compile_policy.add_argument("--policy", required=True)
@@ -4348,10 +5093,11 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--release-asset", action="append", default=[])
     gate.add_argument("--gitleaks-path")
     gate.add_argument("--release-profile", choices=tuple(sorted(RELEASE_PROFILES)), default="permissive-noncritical")
+    gate.add_argument("--git-history-checkpoint")
     gate.add_argument("--worktree-checkpoint")
+    gate.add_argument("--ocr-checkpoint")
     gate.add_argument("--worktree-time-limit-seconds", type=int, default=DEFAULT_GATE_WORKTREE_BUDGET_SECONDS)
     gate.add_argument("--worktree-checkpoint-interval", type=int, default=DEFAULT_WORKTREE_CHECKPOINT_INTERVAL)
-    gate.add_argument("--git-history-checkpoint")
     gate.add_argument("--git-history-time-limit-seconds", type=int, default=DEFAULT_GATE_HISTORY_BUDGET_SECONDS)
     gate.add_argument("--git-history-checkpoint-interval", type=int, default=DEFAULT_HISTORY_CHECKPOINT_INTERVAL)
     gate.add_argument("--report", required=True)
@@ -4385,10 +5131,10 @@ def build_parser() -> argparse.ArgumentParser:
     managed.add_argument("--release-asset", action="append", default=[])
     managed.add_argument("--gitleaks-path")
     managed.add_argument("--release-profile", choices=tuple(sorted(RELEASE_PROFILES)), default="permissive-noncritical")
-    managed.add_argument("--worktree-time-limit-seconds", type=int, default=DEFAULT_GATE_WORKTREE_BUDGET_SECONDS)
-    managed.add_argument("--worktree-checkpoint-interval", type=int, default=DEFAULT_WORKTREE_CHECKPOINT_INTERVAL)
     managed.add_argument("--git-history-time-limit-seconds", type=int, default=DEFAULT_GATE_HISTORY_BUDGET_SECONDS)
     managed.add_argument("--git-history-checkpoint-interval", type=int, default=DEFAULT_HISTORY_CHECKPOINT_INTERVAL)
+    managed.add_argument("--worktree-time-limit-seconds", type=int, default=DEFAULT_GATE_WORKTREE_BUDGET_SECONDS)
+    managed.add_argument("--worktree-checkpoint-interval", type=int, default=DEFAULT_WORKTREE_CHECKPOINT_INTERVAL)
     managed.add_argument("--resume", action="store_true")
     managed.set_defaults(handler=command_managed_publish)
     return parser

@@ -1,6 +1,6 @@
 # Local exposure audit
 
-## 1 Scope
+## 1. Scope
 
 `audit-local` reads accessible JSONL session records under `CODEX_HOME/sessions` and `CODEX_HOME/archived_sessions`, deduplicates them by `session_meta.id`, and scans every string field including messages, tool output, and attachment references
 
@@ -8,7 +8,7 @@ It also reads saved project roots from the Codex desktop state. Git projects con
 
 Deleted conversations, other machines, other accounts, unavailable attachments, corrupt records, and unreadable roots remain explicit coverage gaps
 
-## 2 Private evidence
+## 2. Private evidence
 
 Raw candidates are deduplicated in a temporary private SQLite database, then written once to `candidates.private.json`. The temporary database and its journal files are removed after the document is complete
 
@@ -18,7 +18,7 @@ Windows applies a current-user access control list. Other systems require owner-
 
 The public summary contains only counts and statuses. It excludes session titles, source values, source-value hashes, repository names, and private paths
 
-## 3 Recovery
+## 3. Recovery
 
 Use `--checkpoint` and `--resume` for multi-gigabyte histories. Version 3 stores file tokens, deduplicated session summaries, completed saved-project summaries, finding counts, candidate-budget state, the scanner digest, and the policy fingerprint; it never stores message text or candidate values
 

@@ -28,7 +28,7 @@
 >
 > Loading the Skill activates audit and stopping rules; it does not authorize a remote write
 
-## 1 Problem and design
+## 1. Problem and design
 
 Agents often apply different sanitization standards. Common misses extend beyond passwords and tokens to addresses, personal sites, accounts, UIDs, contacts, databases, Git history, image pixels, document properties, and distribution assets
 
@@ -39,7 +39,7 @@ This project separates two complementary workflows:
 
 Both workflows share the same sensitive-data classes and private policy, so an ordinary publication does not rescan all Codex history
 
-## 2 Automatic invocation
+## 2. Automatic invocation
 
 `agents/openai.yaml` enables implicit invocation. The Skill description covers `push`, `publish`, `upload`, `sync`, `mirror`, `open-source`, and `Release`
 
@@ -65,9 +65,9 @@ flowchart TD
 
 Figure 2.1 Strict audit, graded release, and periodic exposure audit
 
-## 3 Decision model
+## 3. Decision model
 
-Table 3.1 Strict audit decisions
+<div align="center">
 
 | Decision | What it establishes | Required action |
 | --- | --- | --- |
@@ -76,21 +76,33 @@ Table 3.1 Strict audit decisions
 | `block` | A confirmed policy violation remains | Repair it; risk acceptance cannot override a critical issue |
 | `incomplete` | Policy, permission, object, tool, or format coverage is insufficient | Record the gap and let the publication matrix determine whether the surface is critical |
 
+Table 3.1 Strict audit decisions
+
+</div>
+
 Coverage gaps take precedence and produce `incomplete`; zero findings cannot cover an unread surface
 
-Table 3.2 Publication decisions
+<div align="center">
 
 | Publication decision | Condition | Command result |
 | --- | --- | --- |
 | `allow` | The strict audit is `pass` | Success, with separate write authorization still required |
-| `allow_with_risk` | Only reviewed noncritical findings or auxiliary-surface gaps remain | Success with the full risk report preserved |
+| `allow_with_risk` | Only fixed-matrix noncritical findings or auxiliary-surface gaps remain | Success with the full risk report preserved; per-object acceptance is not required |
 | `deny` | A credential, private identity, real data, legal issue, critical infrastructure, unclassified candidate, or critical coverage failure remains | Failure and no write |
+
+Table 3.2 Publication decisions
+
+</div>
 
 The default profile is `permissive-noncritical`; `strict` returns `allow` only for a strict audit `pass`
 
-## 4 Quick start
+The fixed noncritical rules currently include ordinary public URLs, project homepages, and public `AIALRA` brand text. Network-shaped text that the standard address parser rejects is not reported; loopback, unspecified, multicast, and documentation-reserved addresses are treated as public examples. Valid private network addresses, exact private identifiers, and credentials remain critical
 
-The runtime needs Python and Git. A fleet audit also needs an authenticated GitHub CLI
+## 4. Quick start
+
+The runtime needs Python and Git. A fleet audit also needs an authenticated GitHub CLI, the command-line interface used to read repositories visible to the current account. Expired authentication stops the audit and records a coverage gap
+
+The `safe_publish.py` command is the unified entry point. Its first name selects an audit, preparation, or gate action; parameters beginning with `--` select inputs, outputs, and the publication profile. A missing required parameter fails before any remote write
 
 ```powershell
 python -X utf8 scripts/safe_publish.py --help # Lists every supported command with stable UTF-8 decoding on Windows
@@ -111,14 +123,14 @@ python -X utf8 scripts/safe_publish.py compile-policy --policy "$env:CODEX_HOME/
 Audit repository-associated GitHub surfaces:
 
 ```powershell
-python -X utf8 scripts/safe_publish.py audit-fleet --owner ExampleOrg --local-root "<LOCAL_ROOT>" --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --surface-profile repository-associated --resume --output "$env:CODEX_HOME/private/github-safe-publish/fleet.private.json" --candidates-output "$env:CODEX_HOME/private/github-safe-publish/fleet-candidates.private.json" --public-summary .\fleet-summary.public.json # Pagination, permission, or download failures remain incomplete
+python -X utf8 scripts/safe_publish.py audit-fleet --owner ExampleOrg --local-root "<LOCAL_ROOT>" --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --surface-profile repository-associated --history-time-limit-seconds 300 --release-time-limit-seconds 300 --associated-time-limit-seconds 300 --resume --output "$env:CODEX_HOME/private/github-safe-publish/fleet.private.json" --candidates-output "$env:CODEX_HOME/private/github-safe-publish/fleet-candidates.private.json" --public-summary .\fleet-summary.public.json # Gives Git history, Release assets, and repository-associated surfaces separate bounded slices; timeout remains incomplete
 ```
 
 Create and gate a disposable publication copy:
 
 ```powershell
 python -X utf8 scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMIT> --destination ..\example-publication-copy --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --mode preserve-history --report "$env:CODEX_HOME/private/github-safe-publish/prepare.private.json" # Preserves existing public history for an update
-python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --worktree-time-limit-seconds 900 --worktree-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.worktree.private.json" --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # A working-tree or history slice saves progress and denies publication; an identical rerun resumes
+python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --worktree-time-limit-seconds 900 --worktree-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.worktree.private.json" --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --ocr-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.ocr.private.sqlite" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # A bounded slice saves progress and denies publication; an identical rerun resumes
 ```
 
 Run the read-only runtime diagnosis for the current repository:
@@ -137,11 +149,11 @@ See [`managed-publish.md`](references/managed-publish.md), [`runtime.md`](refere
 
 On Windows, project validation propagates the inner process exit code. A nonzero native exit or a PowerShell command error stops managed publication instead of being reported as a pass
 
-## 5 Coverage
+## 5. Coverage
 
-### 5.1 Sensitive-data classes
+### 5.1. Sensitive-data classes
 
-Table 5.1 Default classes and handling
+<div align="center">
 
 | Class | Typical content | Default handling |
 | --- | --- | --- |
@@ -152,7 +164,11 @@ Table 5.1 Default classes and handling
 | Artifacts | Images, PDF, Office, Notebook, archives, media, binaries, LFS, and Release assets | Fully parse or require an exact reviewed digest |
 | Legal records | LICENSE, NOTICE, CITATION, copyright, third-party attribution, and provenance | Human review only; never replace automatically |
 
-### 5.2 Files and Git
+Table 5.1 Default classes and handling
+
+</div>
+
+### 5.2. Files and Git
 
 Content signatures and extensions jointly select the analyzer
 
@@ -164,23 +180,31 @@ Content signatures and extensions jointly select the analyzer
 - Media: container and stream properties, convertible subtitles, attachments, and embedded cover art; parser or extraction failure returns `incomplete`
 - Native binaries: format properties, printable strings, and debug paths; parser failure returns `incomplete`
 
-Image OCR receives a 300-second budget per repository by default; after the budget, metadata, QR, and barcode checks continue while the pixel layer becomes `incomplete`; a trusted local run may change the budget with `SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS`
+Image OCR receives a 300-second budget per repository and a separate 120-second limit for each image or PDF page. Normal units reuse one isolated worker and its loaded model; a unit timeout kills and replaces the worker. Exceeding either limit makes the pixel layer `incomplete` and keeps history on the current object. Completed units save redacted results in a private SQLite checkpoint, so an identical later run reuses them and continues with the remainder. A trusted local run may change the limits with `SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS` and `SAFE_PUBLISH_OCR_UNIT_TIMEOUT_SECONDS`
 
 Each local session file runs in an isolated child process with a 600-second default budget. A child crash or timeout isolates only that file and returns `incomplete` instead of terminating the fleet. Gitleaks keeps its 300-second internal limit and receives a 330-second parent-process hard timeout
 
-An exact gate limits working-tree and Git-history work to separate 900-second slices per run by default and atomically saves redacted findings, coverage, and the next object position in separate private checkpoints. An identical repository, source commit, complete object inventory, scanner, and policy resumes from those points. Any changed binding returns `incomplete` and `deny` without overwriting the old evidence
+An exact gate limits Git-history work to 900 seconds per run by default and atomically saves redacted findings, coverage, and the next object position in a private checkpoint. OCR budget exhaustion keeps the history position on the unfinished object. An identical repository, source commit, complete object inventory, scanner, and policy resumes from that point. Any changed binding returns `incomplete` and `deny` without overwriting the old evidence
 
-The default checkpoint locations are below `CODEX_HOME/private/github-safe-publish/worktree-checkpoints/` and `CODEX_HOME/private/github-safe-publish/history-checkpoints/`. Point `CODEX_HOME` at an approved cold-storage root, or pass explicit `--worktree-checkpoint` and `--git-history-checkpoint` paths below that private root, when evidence must stay in cold storage
+The working tree has the same 900-second default slice. Its checkpoint binds every file path, kind, and content digest plus the next file index. A total-time, OCR, or complex-artifact failure keeps the index on the current file for an identical retry
 
-### 5.3 Repository-associated GitHub surfaces
+Direct pattern scanning is limited to 1 MiB for one decodable text object, where MiB means a mebibyte of $1024^2$ bytes. A larger object records `oversized-text-object` and denies publication so one abnormal text object cannot consume the processor without a bound
+
+Private gate reports and history checkpoints preserve every finding in content-addressed pages of 10,000 records. Resume verifies each page digest and the exact total count; a mismatch returns `incomplete` instead of accepting truncated evidence
+
+Images, PDF, Office, archives, media, NumPy, and opaque binaries run in a reusable isolated parser process with a 180-second per-object limit. A timeout or worker failure keeps history on the current object and returns a critical coverage gap. Trusted local runs may change the limit with `SAFE_PUBLISH_ARTIFACT_UNIT_TIMEOUT_SECONDS`
+
+The default checkpoint location is below `CODEX_HOME/private/github-safe-publish/history-checkpoints/`. Point `CODEX_HOME` at an approved cold-storage root, or pass an explicit `--git-history-checkpoint` below that private root, when evidence must stay in cold storage
+
+### 5.3. Repository-associated GitHub surfaces
 
 The `repository-associated` profile covers collaboration text, Release metadata and assets, Wiki, Pages metadata, retained Actions logs and artifacts, variables, environments, deployments, cache metadata, package and container access, security settings, rulesets, and Actions permissions
 
 Gists, GitHub Projects, Codespaces, billing data, external clones, and other accounts are outside that finite set
 
-## 6 Private policy
+## 6. Private policy
 
-Version 3 retains eight top-level fields: `schema_version`, `identifiers`, `replacements`, `approved_locations`, `blocked_paths`, `binary_approvals`, `exceptions`, and `risk_acceptances`
+Version 3 retains eight top-level fields: `schema_version`, `identifiers`, `replacements`, `approved_locations`, `blocked_paths`, `binary_approvals`, `exceptions`, and `risk_acceptances`. A risk acceptance records that an exact noncritical object was reviewed; it is not required for `allow_with_risk`. When the object, scanner, or expiry changes, the acceptance becomes inactive and the risk remains visible
 
 Identifiers declare normalization and scope. Binary approvals bind the exact object digest to inspection layers, tool versions, reviewer, reason, and review trigger. Exceptions bind a rule and exact object to an approver, reason, expiry, and review trigger
 
@@ -194,7 +218,9 @@ Raw candidates, policy, checkpoints, and detailed reports stay below `CODEX_HOME
 
 A local audit attempts at most 250,000 private candidates. The checkpoint persists the attempt count and exhaustion state. After exhaustion, non-raw rule and coverage checks continue, but the result remains `incomplete`
 
-## 7 Continuous integration
+## 7. Continuous integration
+
+Continuous integration, or CI, automatically runs checks for each code change. This repository uses GitHub Actions to display generic scan results; a failed workflow is visible to maintainers but cannot replace the trusted local gate that has the private policy
 
 The [reusable workflow](.github/workflows/reusable-safe-publish.yml) runs public generic rules only and remains shadow evidence
 
@@ -202,7 +228,7 @@ Private policy never enters GitHub Actions controlled by an ordinary repository 
 
 The trusted local gate remains authoritative until a separately approved trusted runner exists. A repository owner must approve any later ruleset or branch-protection requirement per repository
 
-## 8 Verification
+## 8. Verification
 
 Tests generate synthetic fixtures at runtime and do not write real credentials or private identifiers into Git history
 
@@ -212,11 +238,20 @@ python -X utf8 "<SKILL_CREATOR>/scripts/quick_validate.py" . # Validates the Ski
 python "<README_STANDARDIZER>/scripts/audit_readme.py" . --scan-repository # Audits bilingual structure, links, visuals, secret shapes, and local-path leakage
 ```
 
+Every security result includes four redacted explanations:
+
+- `count_source` identifies which records produced finding and coverage-gap counts
+- `match_reason` states why the rules produced the strict audit result
+- `publication_effect` states whether the current result permits publication or stops the write
+- `next_step` identifies the repair, review, or remote verification that follows
+
+These explanations stay beside the strict machine fields so a reader can understand the count source, match cause, and publication consequence before using internal status names
+
 Automated tests establish only declared synthetic cases and machine contracts. Real binary meaning, information ownership, and remote authorization still require human review
 
 Gitleaks remains pinned to `v8.30.1`. Because that release has a platform-specific silent-detection report [6], the first use of each binary in a process runs a synthetic credential canary. A missed canary, a canary longer than 60 seconds, or a repository process longer than 330 seconds returns `incomplete`
 
-## 9 Safety boundaries
+## 9. Safety boundaries
 
 The tool never automatically rewrites authors, tags, signatures, legal records, or public history; revokes credentials; force-pushes; cleans GitHub caches; coordinates forks; replaces an existing Release; modifies repository settings; or publishes candidate values and private evidence
 
@@ -224,9 +259,9 @@ Detailed reports retain the strict audit and complete risk classification. Publi
 
 A credential that may remain valid or has already been public stops ordinary publication. The credential owner revokes or rotates it before separately approved history remediation
 
-## 10 Repository map
+## 10. Repository map
 
-Table 10.1 Main entry points
+<div align="center">
 
 | Path | Purpose |
 | --- | --- |
@@ -239,13 +274,17 @@ Table 10.1 Main entry points
 | [`.github/workflows/reusable-safe-publish.yml`](.github/workflows/reusable-safe-publish.yml) | Public shadow gate without private policy |
 | [`tests/`](tests) | Synthetic regression and invocation contracts |
 
-## 11 Maintenance and license
+Table 10.1 Main entry points
+
+</div>
+
+## 11. Maintenance and license
 
 Never paste a candidate value, credential, or private policy into a public Issue. Submit a non-sensitive request for a private reporting channel
 
 This repository currently has no license file. Public visibility does not grant permission to copy, modify, redistribute, or use the project commercially; obtain permission from the repository owner first
 
-## 12 References
+## 12. References
 
 [1] GitHub, [Remediating a leaked secret](https://docs.github.com/en/code-security/tutorials/remediate-leaked-secrets/remediating-a-leaked-secret)
 

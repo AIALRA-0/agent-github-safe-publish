@@ -1,12 +1,12 @@
 # Private policy contract
 
-## 1 Storage boundary
+## 1. Storage boundary
 
 Keep `candidates.private.json`, the master policy, compiled repository policies, checkpoints, and detailed reports below `CODEX_HOME/private/github-safe-publish/`. Never commit, upload, paste, publicly summarize, or hash raw candidate values into public artifacts
 
 The gate rejects a policy located inside the source repository. Repository-controlled files cannot add approvals, replacements, or exceptions
 
-## 2 Version 3 fields
+## 2. Version 3 fields
 
 Every policy contains `schema_version`, `identifiers`, `replacements`, `approved_locations`, `blocked_paths`, `binary_approvals`, `exceptions`, and `risk_acceptances`
 
@@ -20,7 +20,7 @@ Each risk acceptance requires `repository`, `rule_id`, `object`, `object_sha256`
 
 Version 1 and version 2 policies remain readable through in-memory migration. The source file is not modified automatically
 
-## 3 Candidate review and compilation
+## 3. Candidate review and compilation
 
 The information owner classifies raw candidates locally. Use literal rules for confirmed private values; use regular expressions only after a bounded false-positive test
 

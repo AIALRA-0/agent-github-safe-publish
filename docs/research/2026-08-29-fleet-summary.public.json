@@ -1,0 +1,72 @@
+{
+  "schema_version": "3",
+  "generated_at": "2026-08-30T02:58:36.725765+00:00",
+  "repository_count": 98,
+  "visibility_counts": {
+    "private": 21,
+    "public": 77
+  },
+  "fork_count": 10,
+  "archived_count": 2,
+  "strict_decision_counts": {
+    "incomplete": 98
+  },
+  "finding_counts": {
+    "total": 491821,
+    "critical": 256258,
+    "noncritical": 235563
+  },
+  "coverage_gap_counts": {
+    "total": 29530,
+    "critical": 27374,
+    "noncritical": 2156
+  },
+  "scanner_sha256_values": [
+    "0f30296eea8e525024ffcc74b44c6ed3313fc44eb17edfe49ebf4572ebfe1b0a",
+    "2d54c37c9500b1a667d99f085dbb7dfa9fbf624d2dd18f436c5fc388fa9800a6"
+  ],
+  "limitation_counts": {
+    "artifact-download-failed": 364,
+    "artifact-unit-timeout": 23,
+    "binary-format-parser-unavailable": 1,
+    "cache-content-api-unavailable": 14,
+    "encrypted-pdf": 1,
+    "git-history-time-limit-exceeded": 8,
+    "gitleaks-process-timeout": 1,
+    "image-ocr-budget-exceeded": 27228,
+    "image-ocr-parser-unavailable": 2,
+    "invalid-image": 16,
+    "invalid-svg": 4,
+    "invalid-tar": 38,
+    "issue-comments-enumeration-failed": 1,
+    "issues-enumeration-failed": 1,
+    "job-summary-api-unavailable": 37,
+    "oversized-actions-artifact": 30,
+    "oversized-object": 12,
+    "oversized-release-asset": 7,
+    "pages-resource-download-failed": 2,
+    "pdf-page-image-ocr-budget-exceeded": 1,
+    "pull-comments-enumeration-failed": 1,
+    "pull-requests-enumeration-failed": 1,
+    "release-asset-time-limit-exceeded": 1,
+    "release-enumeration-failed": 1,
+    "repository-associated-time-limit-exceeded": 33,
+    "repository-package-enumeration-failed": 97,
+    "shallow-history": 15,
+    "unspecified": 2,
+    "workflow-log-download-failed": 1584,
+    "workflow-run-enumeration-failed": 4
+  },
+  "result_explanation": {
+    "count_source": "Live owner repository IDs were joined with completed bounded audit shards and deduplicated by immutable repository ID",
+    "match_reason": "Findings and coverage gaps are preserved from the selected repository record; unfinished associated surfaces are recorded as noncritical time-limit gaps",
+    "publication_effect": "This fleet audit remains strict evidence and does not independently decide an exact publication",
+    "next_step": "Use an exact prepare and gate run for each publication; only critical findings or critical coverage gaps deny the upload"
+  },
+  "privacy": {
+    "contains_candidate_values": false,
+    "contains_repository_names": false,
+    "contains_object_paths": false,
+    "contains_value_hashes": false
+  }
+}

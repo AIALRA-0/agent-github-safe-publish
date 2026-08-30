@@ -113,6 +113,36 @@ class PatternTests(unittest.TestCase):
         )
         self.assertEqual([], state.findings)
 
+    def test_invalid_network_shapes_and_documentation_addresses_are_not_reported(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        subject.scan_text(
+            state,
+            "fragment abcd:1234:ef00 range dead:beef/64 docs 192.0.2.44 and 2001:db8::42",
+            surface="working-tree",
+            object_id="working-tree:network-examples.txt",
+            display_path="network-examples.txt",
+        )
+        network_rules = {
+            finding.rule_id
+            for finding in state.findings
+            if finding.rule_id in {"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}
+        }
+        self.assertEqual(set(), network_rules)
+
+    def test_valid_private_network_literals_remain_critical(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        private_network_text = "host 10." + "24.1.8 network 10." + "24.0.0/16 ipv6 fd00:" + "1234:5678::42"
+        subject.scan_text(
+            state,
+            private_network_text,
+            surface="working-tree",
+            object_id="working-tree:private-network.txt",
+            display_path="private-network.txt",
+        )
+        network_rules = {finding.rule_id for finding in state.findings}
+        self.assertTrue({"infrastructure.ipv4", "infrastructure.ipv6", "infrastructure.cidr"}.issubset(network_rules))
+        self.assertEqual("deny", subject.publication_decision_for(state))
+
 
 class PolicyTests(unittest.TestCase):
     def test_v1_and_v2_policies_migrate_to_v3_in_memory(self) -> None:
@@ -262,15 +292,15 @@ class PublicationDecisionTests(unittest.TestCase):
         acceptance.update(updates)
         state.policy["risk_acceptances"] = [acceptance]
 
-    def test_confirmed_public_url_allows_with_risk_but_strict_profile_denies(self) -> None:
+    def test_public_url_allows_with_risk_without_manual_acceptance_but_strict_profile_denies(self) -> None:
         state, finding = self._url_state()
         self.assertEqual("review", subject.decision_for(state))
-        self.assertEqual("deny", subject.publication_decision_for(state))
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
         self._accept_url(state, finding)
         self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
         self.assertEqual("deny", subject.publication_decision_for(state, release_profile="strict"))
 
-    def test_expired_changed_object_or_changed_scanner_reopens_denial(self) -> None:
+    def test_expired_changed_object_or_changed_scanner_keeps_noncritical_risk_visible(self) -> None:
         cases = (
             {"expires_at": "2000-01-01T00:00:00Z"},
             {"object_sha256": "1" * 64},
@@ -280,7 +310,7 @@ class PublicationDecisionTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 state, finding = self._url_state()
                 self._accept_url(state, finding, **changes)
-                self.assertEqual("deny", subject.publication_decision_for(state))
+                self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
 
     def test_critical_findings_and_critical_coverage_always_deny(self) -> None:
         secret_state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
@@ -303,6 +333,18 @@ class PublicationDecisionTests(unittest.TestCase):
         state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
         state.add_coverage("actions-logs", "tool_failed", "synthetic-optional-tool-failure")
         self.assertEqual("incomplete", subject.decision_for(state))
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
+
+    def test_public_brand_is_reported_but_does_not_block_permissive_publication(self) -> None:
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        subject.scan_text(
+            state,
+            "Public project brand: AIALRA",
+            surface="working-tree",
+            object_id="working-tree:README.md",
+            display_path="README.md",
+        )
+        self.assertEqual("review", subject.decision_for(state))
         self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
 
     def test_exact_approval_can_produce_clean_allow(self) -> None:
@@ -341,6 +383,11 @@ class PublicationDecisionTests(unittest.TestCase):
         self.assertEqual("block", report["decision"])
         self.assertEqual("deny", report["publication_decision"])
         self.assertEqual("permissive-noncritical", report["release_profile"])
+        self.assertEqual(
+            {"count_source", "match_reason", "publication_effect", "next_step", "strict_audit_context"},
+            set(report["result_explanation"]),
+        )
+        self.assertIn("must stop", report["result_explanation"]["publication_effect"])
         self.assertNotIn(marker, encoded)
         self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")), encoded)
 
@@ -376,7 +423,8 @@ class PublicationDecisionTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             source.mkdir()
-            report_path = root / "gate.private.json"
+            codex_home = root / "codex-home"
+            report_path = codex_home / "private" / "github-safe-publish" / "gate.private.json"
             public_path = root / "gate.public.json"
             args = subject.argparse.Namespace(
                 source=str(source),
@@ -390,13 +438,16 @@ class PublicationDecisionTests(unittest.TestCase):
                 report=str(report_path),
                 public_summary=str(public_path),
             )
+            standard_output = io.StringIO()
             with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
                 mock.patch.object(subject, "load_policy", return_value=subject.validate_policy(policy)),
                 mock.patch.object(subject, "scan_working_tree", side_effect=scan_working_tree),
                 mock.patch.object(subject, "scan_git_history", side_effect=checked_surface("git-history")),
                 mock.patch.object(subject, "scan_submodules", side_effect=checked_surface("submodules")),
                 mock.patch.object(subject, "scan_lfs", side_effect=checked_surface("git-lfs")),
                 mock.patch.object(subject, "run_gitleaks", side_effect=checked_surface("gitleaks")),
+                redirect_stdout(standard_output),
             ):
                 exit_code = subject.command_gate(args)
 
@@ -405,7 +456,13 @@ class PublicationDecisionTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual("review", report["decision"])
             self.assertEqual("allow_with_risk", report["publication_decision"])
+            self.assertNotIn("findings", report)
+            self.assertEqual(1, report["finding_pages"]["record_count"])
             self.assertEqual("allow_with_risk", public["publication_decision"])
+            self.assertIn("count_source", public["result_explanation"])
+            self.assertIn("may continue", public["result_explanation"]["publication_effect"])
+            command_result = json.loads(standard_output.getvalue().splitlines()[-1])
+            self.assertIn("result_explanation", command_result)
             public_text = public_path.read_text(encoding="utf-8")
             self.assertNotIn("README.md", public_text)
             self.assertNotIn("infrastructure.url", public_text)
@@ -416,7 +473,8 @@ class PublicationDecisionTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             source.mkdir()
-            report_path = root / "gate.private.json"
+            codex_home = root / "codex-home"
+            report_path = codex_home / "private" / "github-safe-publish" / "gate.private.json"
             args = subject.argparse.Namespace(
                 source=str(source),
                 repository="ExampleOrg/example",
@@ -434,6 +492,7 @@ class PublicationDecisionTests(unittest.TestCase):
                 state.add_coverage("working-tree", "tool_failed", "working-tree-time-limit-exceeded")
 
             with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
                 mock.patch.object(subject, "load_policy", return_value=subject.empty_policy()),
                 mock.patch.object(subject, "scan_working_tree", side_effect=timed_out_worktree),
                 mock.patch.object(subject, "scan_git_history") as history,
@@ -453,6 +512,20 @@ class PublicationDecisionTests(unittest.TestCase):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_oversized_text_object_fails_closed_before_unbounded_pattern_scanning(self) -> None:
+        state = subject.ScanState("synthetic", subject.empty_policy())
+        with mock.patch.object(subject, "DEFAULT_MAX_INLINE_TEXT_BYTES", 100):
+            subject.scan_bytes(
+                state,
+                b"A" * 101,
+                surface="working-tree",
+                object_id="working-tree:large.txt",
+                display_path="large.txt",
+            )
+        self.assertTrue(any(item.reason.startswith("oversized-text-object:") for item in state.coverage))
+        self.assertEqual("incomplete", subject.decision_for(state))
+        self.assertEqual("deny", subject.publication_decision_for(state))
+
     def test_barcode_result_normalizes_three_and_four_value_opencv_abis(self) -> None:
         self.assertEqual(["SYNTHETIC-CODE"], subject.normalized_barcode_values(("SYNTHETIC-CODE", "CODE128", None)))
         self.assertEqual(
@@ -623,6 +696,86 @@ class ArtifactTests(unittest.TestCase):
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_worktree_hard_timeout_returns_a_recoverable_critical_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "worktree.private.json"
+            state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+            real_run = subject.run
+
+            def timeout_worker(command: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+                if "_scan-worktree-worker" in command:
+                    raise subprocess.TimeoutExpired("worker", 1)
+                return real_run(command, *args, **kwargs)
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+                mock.patch.object(subject, "run", side_effect=timeout_worker),
+            ):
+                subject.scan_working_tree(
+                    state,
+                    repository,
+                    time_limit_seconds=1,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+            self.assertTrue(any(item.reason == "working-tree-hard-time-limit-exceeded" for item in state.coverage))
+            self.assertEqual("incomplete", subject.decision_for(state))
+            self.assertEqual("deny", subject.publication_decision_for(state))
+
+    def test_repository_associated_budget_records_every_unfinished_auxiliary_surface(self) -> None:
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        with mock.patch.object(subject.time, "monotonic", side_effect=[0.0, 1.0]):
+            subject.audit_repository_associated_surfaces(
+                state,
+                "ExampleOrg",
+                "example",
+                {},
+                time_limit_seconds=1,
+            )
+        covered = {item.surface for item in state.coverage}
+        self.assertEqual(subject.REPOSITORY_ASSOCIATED_SURFACES, covered)
+        self.assertTrue(all(item.reason == "repository-associated-time-limit-exceeded" for item in state.coverage))
+        self.assertTrue(all(subject.coverage_risk_level(item) == "noncritical" for item in state.coverage))
+        self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
+
+    def test_remote_download_timeout_returns_tool_failure_without_output(self) -> None:
+        with mock.patch.object(subject, "run", side_effect=subprocess.TimeoutExpired("gh", 60)):
+            data, error = subject.gh_download("synthetic/download")
+        self.assertIsNone(data)
+        self.assertEqual("tool_failed", error)
+
+    def test_release_asset_budget_records_unfinished_assets_without_downloading_them(self) -> None:
+        releases = [{
+            "id": 1,
+            "assets": [
+                {"name": "one.zip", "url": "synthetic/one", "size": 10},
+                {"name": "two.zip", "url": "synthetic/two", "size": 10},
+            ],
+        }]
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch.object(subject, "gh_json", return_value=(releases, None)),
+            mock.patch.object(subject.time, "monotonic", side_effect=[0.0, 1.0]),
+            mock.patch.object(subject, "gh_download") as download,
+        ):
+            subject.download_release_assets(
+                "ExampleOrg",
+                "example",
+                state,
+                Path(temporary),
+                time_limit_seconds=1,
+            )
+        download.assert_not_called()
+        gap = next(item for item in state.coverage if item.reason == "release-asset-time-limit-exceeded")
+        self.assertEqual(2, gap.object_count)
+        self.assertEqual("incomplete", subject.decision_for(state))
+
     @unittest.skipUnless(os.name == "nt", "Windows validation exit propagation")
     def test_windows_validation_propagates_native_exit_codes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1020,77 +1173,11 @@ class RepositoryTests(unittest.TestCase):
 
             # Fleet auditing records a bounded failure instead of claiming unscanned history is clean.
             bounded_state = subject.ScanState("synthetic", subject.empty_policy())
-            subject.scan_git_history(bounded_state, repository, time_limit_seconds=0)
+            bounded_home = Path(temporary) / "bounded-home"
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(bounded_home)}):
+                subject.scan_git_history(bounded_state, repository, time_limit_seconds=0)
             self.assertTrue(any(item.reason == "git-history-time-limit-exceeded" for item in bounded_state.coverage))
             self.assertEqual("incomplete", subject.decision_for(bounded_state))
-
-    def test_working_tree_checkpoint_resumes_and_rejects_changed_bindings(self) -> None:
-        marker = "SYNTHETIC_WORKTREE_CHECKPOINT_SECRET_8127"
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            repository = root / "worktree"
-            repository.mkdir()
-            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
-            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
-            (repository / "secret.txt").write_text("password=" + marker + "\n", encoding="utf-8")
-            subprocess.run(["git", "add", "secret.txt"], cwd=repository, check=True)
-            subprocess.run(["git", "commit", "-m", "add resumable worktree fixture"], cwd=repository, check=True, capture_output=True)
-
-            codex_home = root / "cold"
-            checkpoint = codex_home / "private" / "github-safe-publish" / "worktree.private.json"
-            previous_codex_home = os.environ.get("CODEX_HOME")
-            os.environ["CODEX_HOME"] = str(codex_home)
-            try:
-                partial = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
-                subject.scan_working_tree(
-                    partial,
-                    repository,
-                    time_limit_seconds=0,
-                    checkpoint_path=checkpoint,
-                    checkpoint_interval=1,
-                )
-                self.assertEqual("incomplete", subject.decision_for(partial))
-                self.assertEqual("deny", subject.publication_decision_for(partial))
-                self.assertTrue(checkpoint.is_file())
-                checkpoint_before_resume = checkpoint.read_bytes()
-                checkpoint_text = checkpoint_before_resume.decode("utf-8")
-                self.assertNotIn(marker, checkpoint_text)
-                self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")), checkpoint_text)
-
-                resumed = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
-                subject.scan_working_tree(
-                    resumed,
-                    repository,
-                    time_limit_seconds=10,
-                    checkpoint_path=checkpoint,
-                    checkpoint_interval=1,
-                )
-                self.assertEqual("complete", resumed.worktree_progress["status"])
-                self.assertTrue(resumed.worktree_progress["resumed"])
-                self.assertTrue(any(item.rule_id == "credential.assignment" for item in resumed.findings))
-                self.assertFalse(any(item.reason == "working-tree-time-limit-exceeded" for item in resumed.coverage))
-
-                one_shot = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
-                subject.scan_working_tree(one_shot, repository)
-                normalized = lambda state: sorted(
-                    (item.surface, item.object, item.location, item.rule_id, item.status) for item in state.findings
-                )
-                self.assertEqual(normalized(one_shot), normalized(resumed))
-
-                completed_checkpoint = checkpoint.read_bytes()
-                (repository / "secret.txt").write_text("password=" + marker + "-changed\n", encoding="utf-8")
-                stale = subject.ScanState("ExampleOrg/worktree", subject.empty_policy())
-                subject.scan_working_tree(stale, repository, checkpoint_path=checkpoint)
-                self.assertTrue(any(item.reason == "working-tree-checkpoint-binding-mismatch" for item in stale.coverage))
-                self.assertEqual("incomplete", subject.decision_for(stale))
-                self.assertEqual("deny", subject.publication_decision_for(stale))
-                self.assertEqual(completed_checkpoint, checkpoint.read_bytes())
-            finally:
-                if previous_codex_home is None:
-                    os.environ.pop("CODEX_HOME", None)
-                else:
-                    os.environ["CODEX_HOME"] = previous_codex_home
 
     def test_full_history_checkpoint_resumes_and_rejects_changed_bindings(self) -> None:
         marker = "SYNTHETIC_CHECKPOINT_SECRET_7391"
@@ -1302,6 +1389,197 @@ class RepositoryTests(unittest.TestCase):
             findings.append(subject.sorted_findings(state))
         self.assertEqual(decisions[0], decisions[1])
         self.assertEqual(findings[0], findings[1])
+
+
+class ResumeAndPaginationTests(unittest.TestCase):
+    def test_artifact_worker_reuses_an_open_ocr_checkpoint(self) -> None:
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>synthetic</text></svg>'
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary) / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "ocr.private.sqlite"
+            binding = {"schema": 1, "repository": "ExampleOrg/example", "source_commit": "b" * 40}
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                store = subject.OcrCheckpointStore(checkpoint, binding)
+                state = subject.ScanState("ExampleOrg/example", subject.empty_policy(), ocr_store=store)
+                subject.scan_bytes_bounded(
+                    state,
+                    svg,
+                    surface="working-tree",
+                    object_id="working-tree:diagram.svg",
+                    display_path="diagram.svg",
+                )
+                subject.ARTIFACT_PROCESS_RUNNER.close()
+                store.close()
+            self.assertFalse(any(item.reason.startswith("artifact-worker-failed") for item in state.coverage))
+            self.assertFalse(any(item.reason.startswith("artifact-unit-timeout") for item in state.coverage))
+
+    def test_worktree_worker_completes_a_bounded_slice_and_returns_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "secret.txt").write_text("password=SYNTHETIC_WORKTREE_WORKER\n", encoding="utf-8")
+            subprocess.run(["git", "add", "secret.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "add bounded worker fixture"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "worktree.private.json"
+            state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                subject.scan_working_tree(
+                    state,
+                    repository,
+                    time_limit_seconds=30,
+                    checkpoint_path=checkpoint,
+                    checkpoint_interval=1,
+                )
+            self.assertEqual("complete", state.worktree_progress["status"])
+            self.assertTrue(any(item.rule_id == "credential.assignment" for item in state.findings))
+            self.assertTrue(any(item.surface == "working-tree" and item.status == "checked" for item in state.coverage))
+
+    def test_parent_repository_ocr_budget_is_passed_to_artifact_worker(self) -> None:
+        state = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+        state.image_ocr_budget_seconds = 10
+        state.image_ocr_started_at = time.monotonic() - 20
+        with mock.patch.object(subject.ARTIFACT_PROCESS_RUNNER, "run") as isolated:
+            subject.scan_bytes_bounded(
+                state,
+                b"\x89PNG\r\n\x1a\nsynthetic",
+                surface="working-tree",
+                object_id="working-tree:image.png",
+                display_path="image.png",
+            )
+        self.assertEqual(0, isolated.call_args.kwargs["ocr_budget_remaining"])
+
+    def test_worktree_checkpoint_retries_current_file_and_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "image.png").write_bytes(b"synthetic-image")
+            subprocess.run(["git", "add", "image.png"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "add worktree fixture"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "worktree.private.json"
+            calls = 0
+
+            def budget_once(state: subject.ScanState, data: bytes, **kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    state.add_coverage("working-tree", "unreadable", "image-ocr-budget-exceeded:synthetic")
+                else:
+                    state.add_coverage("working-tree", "checked", "image-layers:synthetic", 1)
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+                with mock.patch.object(subject, "scan_bytes_bounded", side_effect=budget_once):
+                    subject.scan_working_tree(first, repository, checkpoint_path=checkpoint, checkpoint_interval=1)
+                self.assertEqual("in_progress", first.worktree_progress["status"])
+                self.assertEqual(0, first.worktree_progress["processed_file_count"])
+
+                second = subject.ScanState("ExampleOrg/example", subject.empty_policy())
+                with mock.patch.object(subject, "scan_bytes_bounded", side_effect=budget_once):
+                    subject.scan_working_tree(second, repository, checkpoint_path=checkpoint, checkpoint_interval=1)
+                self.assertEqual("complete", second.worktree_progress["status"])
+                self.assertTrue(second.worktree_progress["resumed"])
+                self.assertFalse(any(item.reason.startswith("image-ocr-budget-exceeded") for item in second.coverage))
+
+    def test_image_ocr_checkpoint_replays_across_scan_states_without_raw_text(self) -> None:
+        marker = "SYNTHETIC_OCR_SECRET_8042"
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary) / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "ocr.private.sqlite"
+            binding = {"schema": 1, "repository": "ExampleOrg/example", "source_commit": "a" * 40}
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first_store = subject.OcrCheckpointStore(checkpoint, binding)
+                first = subject.ScanState("ExampleOrg/example", subject.empty_policy(), ocr_store=first_store)
+                with mock.patch.object(
+                    subject,
+                    "extract_image_layers",
+                    return_value=([("ocr:0:0", "password=" + marker)], {"metadata", "qr", "barcode", "ocr"}, []),
+                ):
+                    subject.scan_image_content(
+                        first,
+                        b"synthetic-image",
+                        surface="working-tree",
+                        object_id="working-tree:image.png",
+                        display_path="image.png",
+                    )
+                first_store.close()
+
+                second_store = subject.OcrCheckpointStore(checkpoint, binding)
+                second = subject.ScanState("ExampleOrg/example", subject.empty_policy(), ocr_store=second_store)
+                second.image_ocr_budget_seconds = 0
+                with mock.patch.object(subject, "extract_image_layers", side_effect=AssertionError("OCR should replay")):
+                    subject.scan_image_content(
+                        second,
+                        b"synthetic-image",
+                        surface="working-tree",
+                        object_id="working-tree:image.png",
+                        display_path="image.png",
+                    )
+                second_store.close()
+
+            self.assertEqual(subject.sorted_findings(first), subject.sorted_findings(second))
+            self.assertFalse(any(item.reason.startswith("image-ocr-budget-exceeded") for item in second.coverage))
+            checkpoint_bytes = checkpoint.read_bytes()
+            self.assertNotIn(marker.encode("utf-8"), checkpoint_bytes)
+            self.assertNotIn(subject.sha256_bytes(marker.encode("utf-8")).encode("ascii"), checkpoint_bytes)
+
+    def test_private_record_pages_round_trip_without_loss(self) -> None:
+        records = [{"record": index} for index in range(25)]
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary) / "codex-home"
+            base = codex_home / "private" / "github-safe-publish" / "report.private.json"
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                manifest = subject.write_private_record_pages(base, records, kind="test-findings", page_size=10)
+                restored = subject.read_private_record_pages(base, manifest)
+            self.assertEqual(25, manifest["record_count"])
+            self.assertEqual(3, manifest["page_count"])
+            self.assertEqual(records, restored)
+
+    def test_history_checkpoint_retries_object_when_ocr_budget_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "history"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "owner@example.invalid"], cwd=repository, check=True)
+            (repository / "image.png").write_bytes(b"synthetic-image")
+            subprocess.run(["git", "add", "image.png"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-m", "add resumable image"], cwd=repository, check=True, capture_output=True)
+            codex_home = root / "codex-home"
+            checkpoint = codex_home / "private" / "github-safe-publish" / "history.private.json"
+            calls = 0
+
+            def budget_once(state: subject.ScanState, data: bytes, **kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    state.add_coverage("git-history", "unreadable", "image-ocr-budget-exceeded:synthetic")
+                else:
+                    state.add_coverage("git-history", "checked", "image-layers:synthetic", 1)
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                with mock.patch.object(subject, "scan_bytes_bounded", side_effect=budget_once):
+                    subject.scan_git_history(first, repository, checkpoint_path=checkpoint, checkpoint_interval=1)
+                self.assertEqual("in_progress", first.history_progress["status"])
+                first_index = first.history_progress["processed_object_count"]
+
+                second = subject.ScanState("ExampleOrg/history", subject.empty_policy())
+                with mock.patch.object(subject, "scan_bytes_bounded", side_effect=budget_once):
+                    subject.scan_git_history(second, repository, checkpoint_path=checkpoint, checkpoint_interval=1)
+                self.assertEqual("complete", second.history_progress["status"])
+                self.assertGreaterEqual(second.history_progress["processed_object_count"], first_index)
+                self.assertFalse(any(item.reason.startswith("image-ocr-budget-exceeded") for item in second.coverage))
 
 
 if __name__ == "__main__":

@@ -5,20 +5,22 @@ description: Audit, sanitize, and gate repository content before it is sent to G
 
 # GitHub Safe Publish
 
-Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits only reviewed noncritical risk. Keep periodic exposure discovery separate from the exact gate for an intended publication
+Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits fixed-matrix noncritical risk while preserving it in the report. Keep periodic exposure discovery separate from the exact gate for an intended publication
 
-## 1 Mandatory publication boundary
+## 1. Mandatory publication boundary
 
 - Invoke this Skill as soon as a task may transfer repository content or artifacts to GitHub
 - Loading the Skill never authorizes a write
 - Before a write, create an isolated copy from the exact source commit and run `gate` against its working tree, visible Git history, LFS entities, submodules, and proposed Release assets
-- Exact gates limit working-tree and Git-history slices to 900 seconds each by default and save separate private resumable checkpoints. Resume only when the repository, source commit, complete object inventory, scanner, and policy bindings still match
+- Exact gates limit both working-tree and Git-history slices to 900 seconds by default and save separate private resumable checkpoints. Resume only when the repository, exact inventory, scanner, and policy bindings still match
+- Image and PDF page OCR saves only redacted results in a private SQLite checkpoint. Repeated identical runs reuse completed units and continue uncached units until pixel coverage is complete
 - Read both results from the exact copy: `decision` remains the strict audit result, while `publication_decision` controls the separately authorized write
-- The default `permissive-noncritical` profile continues only for `allow` or `allow_with_risk`; `deny` stops the write
+- Read `result_explanation` with both decisions. It must explain where counts came from, why rules matched, how publication is affected, and what happens next without exposing matched values
+- The default `permissive-noncritical` profile continues for `allow` or `allow_with_risk`; fixed-matrix noncritical findings do not require per-object acceptance, while `deny` stops the write
 - Use the `strict` profile for high-sensitivity repositories, incident response, or final red-team review; it permits only a strict audit `pass`
 - Read [the global invocation policy](references/global-invocation-policy.md) when installing or validating fleet-wide discovery
 
-## 2 Choose the operating mode
+## 2. Choose the operating mode
 
 - Exact publication: use `prepare` and `gate`; this is the only mode whose `publication_decision` can permit a separately authorized write
 - Managed publication: use `managed-publish` only after explicit GitHub write authorization; it creates an isolated candidate, runs declared validations, executes the exact gate, and routes the result through a pull request. Read [the managed publication contract](references/managed-publish.md)
@@ -30,7 +32,7 @@ Use one private policy and two explicit decisions across Agents: a strict audit 
 
 Periodic exposure audit results describe existing risk. They never authorize deletion, remote remediation, history rewriting, credential rotation, or publication
 
-## 3 Private policy and evidence
+## 3. Private policy and evidence
 
 - Load private policy from outside the source repository; repository-controlled files cannot broaden approvals
 - Version 3 adds exact, expiring `risk_acceptances`; versions 1 and 2 remain readable through in-memory migration
@@ -41,7 +43,7 @@ Periodic exposure audit results describe existing risk. They never authorize del
 - Never print, upload, hash into a public report, or place raw candidates in GitHub Actions
 - Read [the private policy contract](references/private-policy.md) before candidate approval or policy compilation
 
-## 4 Required inspection behavior
+## 4. Required inspection behavior
 
 Check credentials, personal and contact information, addresses, sites, accounts, UIDs, device identifiers, URLs, domains, IP and MAC addresses, host names, ports, cloud resources, local paths, databases, backups, real records, logs, prompts, Agent transcripts, and full tool output
 
@@ -51,11 +53,17 @@ Apply Unicode normalization and bounded decoding only as declared by the private
 
 Unsupported formats, missing parsers, encrypted or oversized objects, missing LFS data, incomplete history, pagination failure, permission denial, and unavailable declared surfaces still produce the strict audit result `incomplete`
 
-A working-tree or Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. A working-tree timeout defers history, LFS, submodule, and Gitleaks work until the next identical resume instead of repeating those expensive layers for every partial slice. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
+Private gate findings and history findings use lossless, content-addressed pages. Page count, record count, and digest verification must agree before evidence is accepted; never truncate findings to make a report fit
+
+Complex artifacts run in a reusable isolated process with a 180-second per-object limit. A timeout or worker failure is a critical coverage gap, keeps Git history on the current object, and replaces the worker before any retry
+
+A Git-history time limit returns `incomplete` and publication `deny` for that slice while preserving redacted progress below `CODEX_HOME/private/github-safe-publish/`. A later identical run resumes from the saved object index. An invalid checkpoint or any binding mismatch also returns `incomplete` and `deny`; never delete or replace a stale checkpoint implicitly
+
+A working-tree time limit follows the same rule. Its checkpoint binds every file path, kind, and content digest, stores findings in verified pages, and retries the current file after any OCR or artifact failure
 
 For exact publication, failures in the working tree, Git history, LFS, submodules, proposed Release assets, private policy, or Gitleaks remain critical and produce publication `deny`. A declared auxiliary remote surface that is not transferred by the exact publication may produce `allow_with_risk`
 
-Image OCR uses a bounded per-repository runtime budget. Budget exhaustion is a coverage gap and produces `incomplete`; a partial pixel scan never permits publication
+Image OCR uses a bounded per-repository runtime budget and a separate 120-second process limit for each image or PDF page. A reusable isolated worker keeps the model loaded; a unit timeout kills and replaces that worker. Budget exhaustion or a unit timeout is a coverage gap and produces `incomplete`; the history checkpoint remains on the unfinished object, while completed units resume from the private OCR checkpoint. A partial pixel scan never permits publication
 
 Local session files run in isolated child processes with a 600-second default budget. A child crash, timeout, invalid result, or candidate-collection limit produces `incomplete` for the affected audit and must not terminate or pass the remaining fleet
 
@@ -63,22 +71,23 @@ Gitleaks uses both its 300-second internal limit and a 330-second parent-process
 
 Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and provenance as protected legal records. They require exact human review and are never replaced automatically
 
-## 5 Incident and mutation boundary
+## 5. Incident and mutation boundary
 
 - A credential that may remain valid or has been public is an incident; revoke or rotate it before repository cleanup
 - Require repository-specific approval for history rewriting, force-pushing, cache cleanup, Release replacement, ruleset changes, and credential rotation
 - Never rewrite authors, tags, signatures, legal records, history, or an existing Release automatically
 - Read [gate and incident handling](references/gate-and-incident.md) before any publication decision or credential response
 
-## 6 Continuous integration
+## 6. Continuous integration
 
 Repository-controlled GitHub Actions run public generic rules only and remain shadow evidence. They cannot receive the private master policy or return publication `allow`
 
 The local trusted gate is authoritative until a separately approved trusted execution environment exists. A repository owner must approve any later ruleset or branch-protection requirement out of band
 
-## 7 Managed pull requests
+## 7. Managed remote publication
 
-- Never push directly to the default branch and never use an administrator bypass
+- Use a pull request by default and never use an administrator bypass
+- Push directly to the default branch only when the current user explicitly requests that exact route, the update is fast-forward, the exact gate permits publication, and required repository checks have passed
 - `allow_with_risk` may create a pull request after explicit authorization, but it never auto-merges
 - `allow` may auto-merge only when project checks, README checks, an unchanged base, an exact remote tree match, and required branch governance all pass
 - Missing branch protection or required checks returns `BRANCH_PROTECTION_MISSING` and leaves the pull request for review
