@@ -249,7 +249,16 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             candidate = Path(workflow.candidate_manifest.candidate_path)
             (candidate / "README.md").write_text("changed\n", encoding="utf-8")
             git(candidate, "add", ".")
-            git(candidate, "commit", "-m", "unexpected")
+            git(
+                candidate,
+                "-c",
+                "user.name=Example Attacker",
+                "-c",
+                "user.email=attacker@example.invalid",
+                "commit",
+                "-m",
+                "unexpected",
+            )
             verified = verify_compiler(source, policy_path, output)
             self.assertEqual("operator_attention", verified.status)
             self.assertIn("bound manifest", verified.pause_reason)
