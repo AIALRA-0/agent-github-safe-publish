@@ -1,379 +1,173 @@
 <div align="center">
 
-<img src="docs/assets/readme-hero.svg" alt="GitHub 安全发布把私有策略、严格审计、分级放行和单独授权连接成统一流程" />
+<img src="docs/assets/readme-hero.svg" alt="只读私有源经过审计、修复、验证、认证后形成可精确发布的公开候选" />
 
-<p>图 1 GitHub 安全发布的统一边界</p>
-
-</div>
-
-<h1 align="center">GitHub 安全发布</h1>
-
-<p align="center"><strong>把可能含有私人内容的源项目编译成安全、可验证并可发布的公开衍生项目</strong></p>
-
-<p align="center">稳定版本 <code>v1.1.7</code> · 预览版本 <code>v2.0.0-alpha.2</code> · 维护状态：安全发布编译器重构</p>
-
-<div align="center">
-
-<p>
-  <a href="#2-自动触发"><img src="docs/assets/badges/trigger.svg" alt="GitHub 外部传输自动触发统一规则"></a>
-  <a href="#3-判定模型"><img src="docs/assets/badges/decision.svg" alt="严格报告全部问题，只让关键风险阻止发布"></a>
-  <a href="#6-私有策略"><img src="docs/assets/badges/privacy.svg" alt="候选原文和私有策略只保存在本机"></a>
-  <a href="README.en.md"><img src="docs/assets/badges/language.svg" alt="切换到英文说明"></a>
-</p>
-
-<p><a href="README.en.md">English</a> · <a href="#4-快速开始">快速开始</a> · <a href="#5-覆盖范围">覆盖范围</a> · <a href="#8-验证">验证</a> · <a href="#9-安全边界">安全边界</a></p>
+图 1 安全发布编译器把不安全对象变成修复任务，而不是终止整个项目
 
 </div>
+
+<h1 align="center">GitHub 安全发布编译器</h1>
+
+<p align="center"><strong>把可能含有凭据、私人信息、真实数据和私有依赖的项目，转换成安全、可验证并能够继续发布的公开衍生项目</strong></p>
+
+<p align="center">稳定旧版 <code>v1.1.7</code> · 当前预览 <code>v2.0.0-beta.1</code> · 维护状态：v2 真实项目验证</p>
+
+<p align="center"><a href="README.en.md">English</a> · <a href="#3-第一次成功">第一次成功</a> · <a href="#4-转换范围">转换范围</a> · <a href="SECURITY.md">安全报告</a> · <a href="CONTRIBUTING.md">参与贡献</a> · <a href="CHANGELOG.md">变更记录</a></p>
 
 > [!IMPORTANT]
-> 任何准备推送、上传、同步、镜像、开源或修改 GitHub Release 的任务，都必须先加载 `$github-safe-publish`
+> 准备推送、发布、上传、同步、镜像、开源或更新 GitHub Release 时，Agent 必须先加载 `$github-safe-publish`
 >
-> Skill 加载只启用审计和停止条件，不授权远端写入
+> 用户最初的发布请求授权普通发布流程；重写既有公开历史、强制推送、删除 Release、轮换凭据和修改组织规则仍需单独授权
 
-v1.1.7 冻结旧门禁；v2 主链已经能够从新公开根完成文本凭据外置、私人实体替换、私有地址参数化、功能验证、安全复扫、认证和本机裸远端发布，固定合同见 [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
+## 1. 产品目标
 
-> [!WARNING]
-> `v2.0.0-alpha.2` 已增加 SQLite、Notebook、ZIP 和可选不透明制品转换；图片像素、复杂文档、LFS、Submodule、隔离容器和签名发布器仍在后续预览版本中完成
+v1.1.7 是冻结的旧门禁；它回答当前候选是否允许上传，并保留 `allow`、`allow_with_risk` 和 `deny` 作为兼容接口
 
-## 1. 解决的问题
+v2 是安全发布编译器；它把源项目中的安全问题转换成修复动作，持续修改独立候选，直到候选安全、功能合同成立并完成精确发布
 
-不同 Agent 容易使用不同脱敏标准，常见遗漏分为以下对象：
+固定不变量包括：
 
-- 地址、个人网站、账号、UID 和联系人
-- 数据库、Git 历史和发行附件
-- 图片像素和文档属性
+- 源仓库只读，候选仓库单独可写
+- 每个未解决安全发现必须产生修复动作或 `needs_input`
+- 无法证明安全的对象不能进入公开候选，但不能让整个项目永久失败
+- 自动降级只允许 `none` 和 `minor`；公共接口变化、核心能力移除或只剩骨架时进入 `needs_input`
+- 候选认证后，只要原授权收据仍有效，就继续发布并核对远端 Commit 与 Tree
+- 唯一正常成功终态是 `published`
 
-v2 把单项目发布组织成一条收敛流程：
+完整合同、威胁模型和迁移边界分别位于 [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)、[`THREAT_MODEL.md`](docs/architecture/THREAT_MODEL.md) 和 [`MIGRATION_V1_TO_V2.md`](docs/architecture/MIGRATION_V1_TO_V2.md)
 
-- 冻结只读源快照并清点候选对象
-- 把每项安全发现转换成替换、外置、参数化、合成、重建或剔除动作
-- 在隔离候选中修复引用并运行功能合同
-- 独立复扫候选；未收敛时返回修复阶段
-- 零未解决安全问题后签发认证并发布精确 Candidate Tree
-
-暴露面调查已经与发布主链分离；它继续发现历史风险，但不会把其他仓库或 Codex 会话带入单项目发布判断
-
-## 2. 自动触发
-
-`agents/openai.yaml` 开启隐式调用，Skill 描述同时覆盖 `push`、`publish`、`upload`、`sync`、`mirror`、`open-source` 和 `Release`
-
-用户级 `AGENTS.md` 提供第二层强制调用；[全局调用策略](references/global-invocation-policy.md) 给出可复用规则
-
-远端规则集或分支保护属于第三层；本轮仓库只提供影子工作流，尚未自动修改任何 GitHub 规则
-
-<div align="center">
+## 2. 审计、剔除、验证、认证和发布
 
 ```mermaid
-%% 两类检查共享策略，但只有精确发布检查能够给出发布结论
 flowchart TD
-    A[检测到 GitHub 外部传输] --> B[加载统一 Skill]
-    B --> C[从精确提交创建隔离副本]
-    C --> D[运行严格审计]
-    D --> E[按风险矩阵计算发布结论]
-    E --> K{allow 或 allow_with_risk}
-    K -->|否| F[停止写入并处置关键风险]
-    K -->|是| G{本次任务明确授权}
-    G -->|否| F
-    G -->|是| H[执行精确远端写入]
-    I[定期暴露面审计] --> J[生成私有明细与公开汇总]
-    J --> F
+    A[冻结只读源快照] --> B[盘点并检测全部候选对象]
+    B --> C[为每项安全发现生成修复动作]
+    C --> D[构建隔离公开候选]
+    D --> E[替换、外置、合成、重建或剔除]
+    E --> F[修复引用并运行功能合同]
+    F --> G[独立复扫候选]
+    G --> H{仍有未解决安全问题}
+    H -->|可自动修复| C
+    H -->|需要所有者判断| I[needs_input]
+    I --> C
+    H -->|没有| J[签署候选认证]
+    J --> K[发布精确 Commit]
+    K --> L[回读并核对远端 Tree]
+    L --> M[published]
 ```
 
-图 2.1 严格审计、分级放行和定期暴露面审计
+图 2.1 v2 收敛式安全发布流程
 
-</div>
+`needs_input` 是可恢复暂停；它只在公开权利、法律归属、必要功能取舍或重大降级无法自动判断时出现，用户补充最小决定后可从同一绑定检查点恢复
 
-## 3. 判定模型
+`retryable_failure` 用于 GitHub、网络或依赖服务的暂时失败；同一幂等键重试不会创建第二份提交，幂等键是发布事务的唯一编号，用于把恢复动作绑定到同一次发布
 
-<div align="center">
+## 3. 第一次成功
 
-| 判定 | 已证明的范围 | 必须采取的动作 |
+运行环境需要 Python 3.11 或更高版本、Git 和可用的 Docker Engine；Docker Engine 负责在无网络、无发布凭据、只读源挂载和受限资源中运行不可信项目验证，隔离能力不可用时流程进入 `needs_input`，不会退回普通本机进程
+
+GitHub CLI 是 GitHub 的命令行界面（Command Line Interface，CLI）；只有发布到 GitHub 或执行 Exposure 调查时才需要登录，登录失效会表现为远端读取失败，并使当前发布停在可恢复状态
+
+`safe_publish.py` 是兼容入口；命令后的第一个名称选择 `run`、`inspect`、`plan`、`sanitize`、`verify`、`publish`、`status`、`resume` 或旧版动作，以 `--` 开头的参数指定输入、输出和发布档位，必填参数缺失时命令直接失败且不会触碰远端
+
+第一步，确认当前接口
+
+```powershell
+python -X utf8 scripts/safe_publish.py --version # 显示稳定旧版接口版本，当前应返回 github-safe-publish 1.1.7
+python -X utf8 -m github_safe_publish.cli --version # 显示当前 v2 预览版本
+```
+
+第二步，把 Policy v4 保存在仓库外的私有目录；Policy v4 是修复策略，负责声明敏感实体、合成映射、对象动作、历史策略、功能合同、隔离运行环境、降级上限和精确远端目标
+
+第三步，只评估源快照并查看修复计划
+
+```powershell
+python -X utf8 scripts/safe_publish.py inspect --source . --policy "<PRIVATE_POLICY>" --private-output "<PRIVATE_OUTPUT>" # 只报告源快照、发现数量和公开观察，不创建候选
+python -X utf8 scripts/safe_publish.py plan --source . --policy "<PRIVATE_POLICY>" --private-output "<PRIVATE_OUTPUT>" # 把发现映射成修复动作，并显示是否需要所有者决定
+```
+
+第四步，执行完整闭环
+
+```powershell
+python -X utf8 scripts/safe_publish.py run --source . --policy "<PRIVATE_POLICY>" --private-output "<PRIVATE_OUTPUT>" # 构建候选、隔离验证、复扫、签名、发布并回读远端对象
+```
+
+需要分阶段核对时依次使用 `sanitize`、`verify` 和 `publish`；外部条件恢复后使用 `resume`，它会重新核对源快照、策略摘要、候选认证、授权收据和目标 Base
+
+## 4. 转换范围
+
+| 对象 | 当前处理 | 无法安全保留时的结果 |
 | --- | --- | --- |
-| `pass` | 每个声明表面均已读取，且没有未处置发现 | 记录为完整、干净的严格审计 |
-| `review` | 候选需要信息所有者判断 | 确认归属、位置和处置方式 |
-| `block` | 已确认策略违规 | 修复内容；关键问题不能用风险接受记录覆盖 |
-| `incomplete` | 策略、权限、对象、工具或格式覆盖不足 | 记录缺口，并交给发布风险矩阵判断是否属于关键表面 |
+| 凭据与 `.env` | 外置为运行时环境变量并生成无敏感值示例 | 删除对应可选集成并生成说明 |
+| 姓名、邮箱、地址与私人标识 | 使用 Policy v4 的稳定合成映射 | 删除可选内容 |
+| 私有域名、IP、主机和云资源 | 参数化为文档地址或运行时配置 | 删除私有拓扑 |
+| SQLite、Notebook 与结构化数据 | 保留结构，清空真实行、输出、执行计数和元数据 | 剔除并生成替代说明 |
+| ZIP | 有界递归清洗并确定性重打包 | 剔除并修复引用 |
+| 图片、PDF、Office、音视频与二进制 | 仅在能够完整转换和复扫时保留 | Policy 声明为可选时剔除，否则进入 `needs_input` |
+| Git LFS 与 Submodule | 使用公开替代、安全实体或明确可选剔除 | 删除 Pointer、匹配规则和私有配置，并生成说明 |
+| LICENSE、NOTICE、CITATION 与第三方署名 | 保持原文并核对权利 | 命中私人规则或权利不明时进入 `needs_input` |
 
-表 3.1 严格审计结论
+表 4.1 当前转换与安全回退
 
-</div>
+`v2.0.0-beta.1` 已完成文本、配置、SQLite、Notebook、ZIP、可选不透明制品、LFS Pointer、Submodule 配置和法律保护区的闭环；复杂文档与媒体当前使用安全剔除回退，不宣称已经实现像素级或版式保持重建
 
-覆盖缺口优先产生 `incomplete`；零命中不能覆盖未扫描表面
+## 5. Git 历史策略
 
-<div align="center">
+| 模式 | 基线 | 私有历史处理 | 适用场景 |
+| --- | --- | --- | --- |
+| `new-publication` | 当前私有源 Tree | 创建新的公开 Root Commit | 新项目开源的默认模式 |
+| `update-existing-public` | 已有公开远端 Base | 只把安全公开 Tree 叠加到公开历史 | 更新现有公开仓库 |
+| `history-migration` | 私有历史镜像 | 单独授权后重写全部 Commit、Tag、Note、LFS 与作者信息 | 明确需要迁移历史的特殊场景 |
 
-| 发布结论 | 条件 | 命令结果 |
-| --- | --- | --- |
-| `allow` | 严格审计为 `pass` | 返回成功，仍需本次写入授权 |
-| `allow_with_risk` | 只有固定矩阵中的非关键问题或辅助表面缺口 | 返回成功，同时保留完整风险报告；无需逐条人工接受 |
-| `deny` | 存在凭据、私人信息、真实数据、法律问题、关键基础设施、未确认候选或关键检查失败 | 返回失败并停止写入 |
+表 5.1 三种历史策略
 
-表 3.2 发布结论
+普通 `run` 不执行 `history-migration`；历史重写不能收回旧克隆与 Fork，因此它始终要求单独授权和事故处置
 
-</div>
+## 6. 隔离、认证与可信发布器
 
-默认档位是 `permissive-noncritical`；`strict` 档位只在严格审计为 `pass` 时返回 `allow`
+功能验证在固定摘要镜像中运行；当前真实金丝雀使用 `alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce`，镜像未预取或摘要不同会进入 `needs_input`
 
-固定非关键规则当前包括以下内容：
+容器限制包括：
 
-- 普通公开网址和项目主页
-- 公开的 `AIALRA` 品牌文字
-- 回环、未指定、组播和文档保留地址
-- 源代码中的凭据变量引用
-- 测试与夹具中的合成签名网址
+- 网络为 `none`
+- 根文件系统只读
+- 候选目录只读挂载
+- Linux capabilities 全部删除
+- `no-new-privileges` 开启
+- 进程、内存、CPU 与临时空间有上限
+- 不挂载 Docker Socket
+- 不传入 GitHub、SSH、云端和私有策略环境变量
 
-标准解析器无法识别的地址形状、SVG 路径坐标和 PowerShell 静态成员调用不会生成对应私人网络发现；有效私有网络地址、精确私人标识和凭据字面量仍属于关键风险
+认证使用 Ed25519 签名；Ed25519 是固定长度公钥签名算法，用于把 Candidate Tree、策略摘要、工具版本、功能验证、降级级别、目标仓库、分支和预期 Base 绑定成不可替换的认证对象，可信发布器只接受预先固定的公钥指纹
 
-工作树对象使用内容摘要绑定精确批准；文件内容变化后对象标识随之变化，旧批准不能继续放行
+发布器不运行项目代码，也不读取源项目原值；它只执行 Git 远端读取、非强制推送和回读核对，并把结果写成 in-toto Statement 与 SLSA Verification Summary 形式的私有证明
 
-## 4. 快速开始
+## 7. Exposure 与 v1 兼容
 
-运行环境需要 Python 和 Git；全量仓库审计还需要 GitHub CLI，它是 GitHub 的命令行界面（Command Line Interface，CLI），登录成功后命令能够读取当前账号可见的仓库，登录失效时审计会停止并记录覆盖缺口
+`exposure local` 和 `exposure fleet` 是独立暴露面调查；它们可以扫描本机 Codex 会话、Git 历史、仓库关联 GitHub 表面和发行制品，但调查结果不决定某一个安全候选能否发布
 
-`safe_publish.py` 命令是本仓库的统一执行入口；命令后的第一个名称选择审计、准备或检查动作，以 `--` 开头的参数指定输入、输出和发布档位，必填参数缺失时命令会直接失败且不会写入远端
+v1 命令在 v2 稳定版前继续可用；严格审计字段 `pass`、`review`、`block` 和 `incomplete`，以及发布字段 `allow`、`allow_with_risk` 和 `deny`，只描述旧候选或 Exposure 切片，不再是 v2 发布任务的最终业务状态
 
-先确认工具版本；命令显示 `github-safe-publish 1.1.7` 时，后续报告能够绑定到本次旧门禁安全冻结实现
+旧版恢复、私有策略和事故边界分别见 [`recovery.md`](references/recovery.md)、[`private-policy.md`](references/private-policy.md) 和 [`gate-and-incident.md`](references/gate-and-incident.md)
 
-```powershell
-python -X utf8 scripts/safe_publish.py --version # 显示稳定工具版本，不读取仓库或修改远端
-```
+## 8. 验证状态
 
-- 第一步，查看固定命令接口
+持续集成（Continuous Integration，CI）是在每次代码变更时自动运行检查的流程；GitHub Actions 会显示测试、验证和 CodeQL 结果，但公开 CI 没有私有策略或签名私钥，不能代替本机认证
 
-```powershell
-python -X utf8 scripts/safe_publish.py --help # 使用 UTF-8 显示全部命令，避免 Windows 系统编码误判
-```
-
-- 第二步，审计本机可访问 Codex 会话和已保存项目根目录
-
-```powershell
-python -X utf8 scripts/safe_publish.py audit-local --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --output "$env:CODEX_HOME/private/github-safe-publish/local-audit.private.json" --candidates-output "$env:CODEX_HOME/private/github-safe-publish/candidates.private.json" --checkpoint "$env:CODEX_HOME/private/github-safe-publish/local-audit.checkpoint.json" --resume # 原始候选和详细报告只进入本机私有目录
-```
-
-- 第三步，编译仓库专用第 3 版策略
+当前 Windows 验证运行了 134 项测试，失败 0 项；结果来自 2026-08-31 的完整 `unittest discover`，其中包含 119 项冻结门禁与文档合同回归、14 项新增 v2 行为测试和 1 项真实 WSL Docker 隔离金丝雀
 
 ```powershell
-python -X utf8 scripts/safe_publish.py compile-policy --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --repository ExampleOrg/example-repo --output "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" # 裁剪规则并验证编码后不超过 48 KB
+$env:SAFE_PUBLISH_LIVE_CONTAINER='1' # 明确启用真实容器攻击金丝雀，避免把跳过项算成通过
+python -m compileall -q src scripts tests # 验证 Python 源码能够完成字节码编译
+python -X utf8 -m unittest discover -s tests -v # 运行 v1 兼容、v2 转换、发布、恢复、文档与真实隔离测试
 ```
 
-- 第四步，审计仓库关联 GitHub 表面
+自动去标识化不能证明绝对零遗漏；当前认证只表示固定 Candidate Tree 在固定 Policy、工具版本、覆盖范围和功能合同下通过，不能推出所有未来数据都不会产生新的再识别风险
 
-```powershell
-python -X utf8 scripts/safe_publish.py audit-fleet --owner ExampleOrg --local-root "<LOCAL_ROOT>" --policy "$env:CODEX_HOME/private/github-safe-publish/policy.private.json" --surface-profile repository-associated --history-time-limit-seconds 300 --release-time-limit-seconds 300 --associated-time-limit-seconds 300 --resume --output "$env:CODEX_HOME/private/github-safe-publish/fleet.private.json" --candidates-output "$env:CODEX_HOME/private/github-safe-publish/fleet-candidates.private.json" --public-summary .\fleet-summary.public.json # Git 历史、发行附件和仓库关联表面分别使用有限时间片，超时会保留为 incomplete
-```
+## 9. 安全、贡献与维护
 
-- 第五步，从精确提交建立一次性发布副本
+凭据一旦公开，应先撤销或轮换，再处理仓库历史；不要把删除当前文件误认为凭据已经失效
 
-```powershell
-python -X utf8 scripts/safe_publish.py prepare --source . --commit <SOURCE_COMMIT> --destination ..\example-publication-copy --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --mode preserve-history --report "$env:CODEX_HOME/private/github-safe-publish/prepare.private.json" # 现有公开仓库更新保留公开历史
-```
+安全问题通过 [`SECURITY.md`](SECURITY.md) 中的私密渠道报告；普通改进和测试要求见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，版本差异与迁移状态见 [`CHANGELOG.md`](CHANGELOG.md)
 
-- 第六步，检查隔离副本和拟发布附件
-
-```powershell
-python -X utf8 scripts/safe_publish.py gate --source ..\example-publication-copy --repository ExampleOrg/example-repo --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --release-profile permissive-noncritical --worktree-time-limit-seconds 900 --worktree-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.worktree.private.json" --git-history-time-limit-seconds 900 --git-history-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.history.private.json" --ocr-checkpoint "$env:CODEX_HOME/private/github-safe-publish/example-repo.ocr.private.sqlite" --release-asset .\dist\example.zip --report "$env:CODEX_HOME/private/github-safe-publish/gate.private.json" --public-summary .\gate-summary.public.json # 单轮超时会保存进度并拒绝发布，相同输入再次运行会接着检查
-```
-
-- 第七步，只读检查当前仓库需要的运行组件
-
-```powershell
-python -X utf8 scripts/safe_publish.py doctor --source . # 只要求当前对象类型实际使用的解析器，不修改仓库或安装环境
-```
-
-- 第八步，在已经获得 GitHub 写入授权后执行托管发布
-
-```powershell
-python -X utf8 scripts/safe_publish.py managed-publish --source . --repository ExampleOrg/example-repo --base-commit <SOURCE_COMMIT> --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --private-output-dir "$env:CODEX_HOME/private/github-safe-publish/example-repo-release" --validation-command "python -X utf8 -m unittest discover -s tests -v" --intent pr # 旧入口只创建待复核分支和 Pull Request，不再自动合并
-```
-
-托管流程、运行环境和恢复边界分别见 [`managed-publish.md`](references/managed-publish.md)、[`runtime.md`](references/runtime.md) 和 [`recovery.md`](references/recovery.md)
-
-Windows 上的项目验证会把内部程序的退出码原样交回；内部程序返回非零结果或 PowerShell 命令报错时，托管发布必须停止，不能把失败误判为通过
-
-## 5. 覆盖范围
-
-### 5.1. 敏感分类
-
-<div align="center">
-
-| 分类 | 典型内容 | 默认处置 |
-| --- | --- | --- |
-| 凭据 | 密码、令牌、私钥、Cookie、会话、恢复码、数据库连接和签名网址 | 阻断；公开后先撤销或轮换 |
-| 身份 | 姓名、别名、邮箱、电话、地址、个人网站、头像、二维码、联系人、UID 和设备标识 | 私有精确规则确认后稳定替换 |
-| 基础设施 | URL、域名、IPv4、IPv6、CIDR、MAC、主机名、端口、云资源、本机路径和拓扑 | 替换为合成值或删除 |
-| 数据 | 数据库、转储、备份、业务记录、消息、日程、位置、浏览器数据、日志、HAR、提示词和 Agent 会话 | 默认阻断并检查派生制品 |
-| 制品 | 图片、PDF、Office、Notebook、归档、音视频、二进制、LFS 和发行附件 | 完整解析或精确摘要批准 |
-| 法律记录 | LICENSE、NOTICE、CITATION、版权、第三方署名和来源链 | 只进入人工复核，禁止自动替换 |
-
-表 5.1 默认分类与处置
-
-</div>
-
-### 5.2. 文件与 Git
-
-文件类型由内容签名和扩展名共同识别
-
-- 文本检查执行凭据、身份、基础设施、Unicode 归一化和有界 Base64、十六进制、URL 编码还原
-- Git 检查全部可见对象、分支与标签名、注释标签、notes、作者、提交者、消息和签名载荷
-- Office 检查属性、关系、嵌入文件、内嵌图片和宏
-- 图片检查元数据、全部动画帧、OCR 文字、二维码和条形码；缺少解析层时返回 `incomplete`
-- PDF 检查文本、属性、附件、页面图像 OCR 和加密状态；无法检查页面内容时返回 `incomplete`
-- 音视频检查容器与流属性、可转换字幕、附件和内嵌封面；解析器或提取失败时返回 `incomplete`
-- 本机二进制检查格式属性、可打印字符串和调试路径；解析器失败时返回 `incomplete`
-
-每个仓库的图片 OCR 默认最多运行 300 秒，每张图片或每个 PDF 页面默认最多运行 120 秒；正常单元复用同一个隔离工作进程和已加载模型，单元超时就回收并重建进程；超过任一限制后像素层记为 `incomplete`，历史断点停在当前对象；已经完成的单元会把脱敏结果写入私有 SQLite 检查点，下次相同运行直接复用并继续剩余对象；受信任本地运行可用 `SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS` 和 `SAFE_PUBLISH_OCR_UNIT_TIMEOUT_SECONDS` 调整限制
-
-精确门禁的 Git 全历史默认每轮最多运行 900 秒，并由父进程强制终止超时的独立扫描进程；超时返回 `GIT_HISTORY_TIMEOUT`，同时把已脱敏发现、覆盖状态和下一个对象位置原子写入私有检查点；相同仓库、源提交、完整对象清单、扫描器和策略再次运行时从断点继续；OCR 时间用完时断点停在当前对象，不会越过未检查像素；任一绑定变化都返回 `incomplete` 和 `deny`，不会覆盖旧证据
-
-托管发布在扫描开始前写入拒绝发布的占位报告；扫描器崩溃返回 `SCANNER_CRASHED`，报告缺失返回 `GATE_REPORT_MISSING`，两种情况都保留可恢复记录并停止远端写入
-
-工作树同样默认每轮最多运行 900 秒；检查点绑定全部文件路径、类型和内容摘要，并保存下一个文件索引；总时间、OCR 或复杂对象检查失败时停在当前文件，相同输入下一轮重试
-
-扫描器把单个可解码文本对象的直接模式检查限制为 1 MiB；二进制兆字节（Mebibyte，MiB）按 $1024^2$ 字节计算，超过阈值的对象会记录为 `oversized-text-object` 并拒绝发布，避免一个异常大文本让整仓检查无限占用处理器
-
-私有门禁报告和历史检查点按 10,000 条一页保存完整发现，清单记录总数、页数和每页摘要；恢复时逐页核对，数量或摘要不一致即返回 `incomplete`，不再通过截断发现控制报告大小
-
-图片、PDF、Office、归档、音视频、NumPy 和不透明二进制等复杂对象在可复用隔离进程中解析，每个对象默认最多运行 180 秒；超时或工作进程失败会停在当前历史对象并返回关键覆盖缺口，可用 `SAFE_PUBLISH_ARTIFACT_UNIT_TIMEOUT_SECONDS` 调整上限
-
-检查点默认保存在 `CODEX_HOME/private/github-safe-publish/history-checkpoints/`；需要统一写入冷存储时，先把 `CODEX_HOME` 指向批准的冷存储根目录，或显式传入该目录下的 `--git-history-checkpoint`
-
-本机会话文件在独立子进程中扫描，单文件默认最多运行 600 秒；子进程崩溃或超时只隔离该文件并返回 `incomplete`，不会终止整个审计；Gitleaks 自带 300 秒扫描限制，父进程另设 330 秒硬超时
-
-### 5.3. GitHub 仓库关联表面
-
-`repository-associated` 模式覆盖以下表面：
-
-- 协作表面包含 Issue、Pull Request、评论、Review、Discussion、标签和里程碑
-- 发布表面包含 Release 元数据与附件、Wiki 和 GitHub Pages 元数据
-- 自动化表面包含保留的 Actions 日志、制品、变量、环境、部署、缓存元数据和权限
-- 软件包表面在当前身份可读取时检查仓库关联包和容器；权限不足时记录 `permission_denied`
-- 安全设置包含秘密扫描、推送保护、ruleset、分支保护和 Actions 权限
-
-Gist、GitHub Projects、Codespaces、账单数据、外部克隆和其他账号不属于该母集
-
-## 6. 私有策略
-
-私有策略第 3 版保留 8 个顶层字段：
-
-- `identifiers` 保存精确文字或正则规则，并声明归一化方式和适用范围
-- `replacements` 保存人工批准的稳定合成映射
-- `approved_locations` 保存允许出现某条规则的精确对象位置
-- `blocked_paths` 保存禁止发布的路径模式
-- `binary_approvals` 保存对象摘要、检查层、工具版本、批准者和复审触发器
-- `exceptions` 保存规则、精确对象、批准者、理由、到期时间和复审触发器
-- `risk_acceptances` 保存仓库、非关键规则、精确对象、对象摘要、扫描器摘要、批准者、理由、到期时间和复审触发器
-- `schema_version` 保存机器格式版本
-
-第 1 版和第 2 版策略继续读取，并只在内存中迁移；仓库文件不能扩大私有允许范围
-
-风险接受记录只适用于固定非关键规则，用来证明某个精确对象已经复核，不是宽松发布的前置条件；对象内容、扫描器版本或到期状态变化后记录自动失效，风险重新显示为未接受，但发布仍返回 `allow_with_risk`；凭据、私人标识、法律记录、真实数据和关键检查缺口始终不能通过该字段放行
-
-候选原文、策略、检查点和详细报告只保存在 `CODEX_HOME/private/github-safe-publish/`
-
-本地全量审计最多尝试收集 250000 条私有候选；检查点保存尝试次数和耗尽状态；达到上限后继续执行不含原文的规则与覆盖检查，但最终保持 `incomplete`
-
-## 7. 持续集成
-
-持续集成（Continuous Integration，CI）是在每次代码变更时自动运行检查的流程；本仓库使用 GitHub Actions 显示通用扫描结果，工作流失败时维护者会看到失败状态，但这个状态不能代替包含私有策略的本地发布检查
-
-[复用工作流](.github/workflows/reusable-safe-publish.yml) 只运行公开通用规则，并始终保持影子证据
-
-CodeQL 是 GitHub 的源代码安全扫描器；它检查 Python 数据流和危险调用，并把结果显示在提交检查与 Security 页面；未处置高风险告警会阻止稳定版本发布
-
-私有策略不进入能够由普通分支修改的 GitHub Actions 工作流，因此该工作流只能显示严格审计和 `deny` 影子结论，不能独立批准发布
-
-完整私有门禁当前以本地受信任执行为权威；建立独立可信执行环境后，仍需仓库所有者逐仓库批准远端 ruleset 或分支保护
-
-## 8. 验证
-
-仓库测试使用运行时生成的合成语料，不把真实凭据或私有标识写入 Git 历史
-
-```powershell
-python -X utf8 -m unittest discover -s tests -v # 验证模式、策略迁移、Git 元数据、制品解析、断点恢复和自动触发合同
-```
-
-```powershell
-python -X utf8 "<SKILL_CREATOR>/scripts/quick_validate.py" . # 验证 Skill 结构并固定使用 UTF-8
-```
-
-README 使用以下检查：
-
-```powershell
-python "<README_STANDARDIZER>/scripts/audit_readme.py" . --scan-repository # 检查双语、链接、视觉资源、秘密形状和路径泄漏
-```
-
-每份安全扫描结果同时提供以下无敏感值说明：
-
-- `count_source`：说明发现数量和覆盖缺口数量分别从哪些记录统计
-- `match_reason`：说明规则为什么产生当前严格审计结果
-- `publication_effect`：说明当前结果允许继续发布还是必须停止写入
-- `next_step`：说明维护者下一步修复、复核或远端验证什么
-
-这 4项说明和严格审计字段一起保存；读者可以先理解数量来源、命中原因和发布后果，再使用内部字段核对机器状态
-
-自动测试只证明已声明合成样例和机器合同；真实二进制语义、信息归属和远端授权仍需人工确认
-
-Gitleaks 固定为 `v8.30.1`；该版本存在平台相关静默失效报告 [1]，因此每次进程首次使用该二进制时先运行合成凭据金丝雀；扫描器没有检出金丝雀、金丝雀超过 60 秒或仓库进程超过 330 秒时均返回 `incomplete`
-
-## 9. 安全边界
-
-工具不会自动执行以下动作：
-
-- 改写作者、标签、签名、LICENSE、NOTICE、CITATION 或公开历史
-- 撤销或轮换凭据
-- 强制推送、清理 GitHub 缓存、协调 fork 或替换现有 Release
-- 修改 ruleset、分支保护、Actions 权限或其他远端设置
-- 把候选原文、原文散列、私有策略或事故证据放入公开报告
-
-详细报告保存严格审计和完整风险分类；公开汇总只保存两套结论、数量、提交与扫描器标识和报告指纹，不保存规则位置、候选原文或私有对象摘要
-
-疑似仍有效或已经公开的凭据会停止普通流程；凭据所有者先撤销或轮换，再单独审批历史清理
-
-## 10. 仓库地图
-
-<div align="center">
-
-| 路径 | 用途 |
-| --- | --- |
-| [`SKILL.md`](SKILL.md) | Agent 读取的触发、模式和停止条件 |
-| [`scripts/safe_publish.py`](scripts/safe_publish.py) | 本地审计、仓库审计、策略编译、隔离准备和发布门禁 |
-| [`references/local-audit.md`](references/local-audit.md) | Codex 会话与项目根目录审计合同 |
-| [`references/fleet-audit.md`](references/fleet-audit.md) | GitHub 母集、关联表面和恢复合同 |
-| [`references/private-policy.md`](references/private-policy.md) | 私有策略第 3 版、精确批准和风险接受记录 |
-| [`references/gate-and-incident.md`](references/gate-and-incident.md) | 判定优先级、文件缺口和凭据事故 |
-| [`.github/workflows/reusable-safe-publish.yml`](.github/workflows/reusable-safe-publish.yml) | 不接触私有策略的公开影子门禁 |
-| [`tests/`](tests) | 合成回归与触发合同 |
-
-表 10.1 主要入口
-
-</div>
-
-## 11. 维护与许可
-
-当前稳定版本为 `1.1.7`；这个版本冻结旧门禁安全行为，v2 安全发布编译器按照已审查合同独立演进
-
-升级时可以直接读取第 1、2、3 版私有策略；旧策略只在内存中迁移，源文件不会被自动修改；报告和检查点需要使用创建它们的工具版本完成当前运行，版本变化后重新执行精确检查
-
-安全问题使用 GitHub 私密漏洞报告；该入口位于仓库 Security 页面，只向维护者显示内容；不要把候选原文、凭据、私有策略或本机路径提交到公开 Issue
-
-维护入口如下：
-
-- [`SECURITY.md`](SECURITY.md) 说明私密报告范围和凭据事故顺序
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) 说明合成测试、兼容修改和本地检查
-- [`CHANGELOG.md`](CHANGELOG.md) 记录稳定接口、迁移边界和维护触发条件
-
-本项目采用 [`MIT License`](LICENSE)；版权主体为 `AIALRA-0`
-
-## 12. 参考资料
-
-[1] Gitleaks, [v8.30.1 silent-detection regression report](https://github.com/gitleaks/gitleaks/issues/2170)
-
-[2] GitHub, [Remediating a leaked secret](https://docs.github.com/en/code-security/tutorials/remediate-leaked-secrets/remediating-a-leaked-secret)
-
-[3] GitHub, [Removing sensitive data from a repository](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)
-
-[4] GitHub, [Push protection](https://docs.github.com/en/code-security/concepts/secret-security/push-protection)
-
-[5] NIST, [IR 8053 De-Identification of Personal Information](https://csrc.nist.gov/pubs/ir/8053/final)
-
-[6] Gitleaks, [Official repository](https://github.com/gitleaks/gitleaks)
+本项目使用 [MIT License](LICENSE)；许可证只覆盖本仓库代码，不替代候选项目自身的第三方权利核对

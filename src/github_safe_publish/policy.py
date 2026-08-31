@@ -45,7 +45,7 @@ def default_policy() -> dict[str, Any]:
         "functional_contract": {"commands": []},
         "degradation_policy": {"maximum_automatic": "minor", "optional_paths": []},
         "validation": {"timeout_seconds": 900},
-        "security_runtime": {"network": "disabled", "container_required": False},
+        "security_runtime": {"network": "disabled", "container_required": False, "maximum_object_bytes": 26214400},
         "remote_target": {"repository": "", "branch": "main", "expected_base": None},
     }
 

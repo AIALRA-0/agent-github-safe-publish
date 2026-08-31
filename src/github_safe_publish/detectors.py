@@ -20,6 +20,7 @@ TEXT_EXTENSIONS = {
 DATABASE_EXTENSIONS = {".db", ".sqlite", ".sqlite3"}
 ARCHIVE_EXTENSIONS = {".zip"}
 REMOVABLE_ARTIFACT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".7z", ".rar", ".mp3", ".mp4", ".mov", ".wav", ".exe", ".dll", ".bin"}
+LEGAL_FILENAMES = {"license", "license.md", "license.txt", "notice", "notice.md", "notice.txt", "citation.cff", "copying", "copyright"}
 
 CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|cookie|session)\b\s*[:=]\s*(\"[^\"\r\n]{8,}\"|'[^'\r\n]{8,}'|[^\s\"'`,;]{8,})"
@@ -27,6 +28,7 @@ CREDENTIAL_ASSIGNMENT = re.compile(
 PRIVATE_IPV4 = re.compile(r"(?<!\d)(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(?!\d)")
 URL = re.compile(r"https?://[^\s\"'<>()]+", re.I)
 BRAND = re.compile(r"(?i)(?<![A-Za-z0-9])AIALRA(?![A-Za-z0-9])")
+LFS_POINTER = re.compile(r"(?m)\Aversion https://git-lfs\.github\.com/spec/v1\s*$.*^oid sha256:[0-9a-f]{64}\s*$.*^size \d+\s*$", re.S)
 
 
 def _active_credential_match(text: str) -> bool:
@@ -43,6 +45,19 @@ def _active_credential_match(text: str) -> bool:
 
 def _finding(rule_id: str, category: str, path: str, data: bytes, hint: str) -> SourceFinding:
     digest = hashlib.sha256(data).hexdigest()
+    stable = hashlib.sha256(f"{rule_id}\0{path}\0{digest}".encode("utf-8")).hexdigest()[:24]
+    return SourceFinding(stable, rule_id, category, path, digest, hint)
+
+
+def _stream_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _finding_from_digest(rule_id: str, category: str, path: str, digest: str, hint: str) -> SourceFinding:
     stable = hashlib.sha256(f"{rule_id}\0{path}\0{digest}".encode("utf-8")).hexdigest()[:24]
     return SourceFinding(stable, rule_id, category, path, digest, hint)
 
@@ -123,10 +138,27 @@ def inspect_tree(root: Path, policy: dict) -> tuple[list[SourceFinding], list[Pu
     findings: list[SourceFinding] = []
     observations: list[PublicObservation] = []
     mapping_by_entity = {item.get("entity_id"): item.get("replacement") for item in policy["synthetic_mappings"]}
+    maximum_bytes = int(policy["security_runtime"].get("maximum_object_bytes", 25 * 1024 * 1024))
     for path in iter_candidate_files(root):
         relative = path.relative_to(root).as_posix()
+        if path.stat().st_size > maximum_bytes:
+            findings.append(_finding_from_digest("artifact.oversized", "unsupported-artifact", relative, _stream_sha256(path), "remove-and-stub"))
+            continue
         data = path.read_bytes()
         suffix = path.suffix.lower()
+        if path.name.lower() in LEGAL_FILENAMES:
+            try:
+                legal_text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                legal_text = ""
+            if legal_text and _contains_private_text(legal_text, policy):
+                findings.append(_finding("legal.protected-content", "legal", relative, data, "needs-owner-decision"))
+            else:
+                observations.append(PublicObservation("public.legal-record", relative, "Legal record retained without automatic rewriting"))
+            continue
+        if path.name == ".gitmodules":
+            findings.append(_finding("artifact.submodule", "unsupported-artifact", relative, data, "remove-and-stub"))
+            continue
         if suffix in DATABASE_EXTENSIONS:
             if _sqlite_requires_synthesis(path, policy):
                 findings.append(_finding("data.sqlite", "real-data", relative, data, "synthesize"))
@@ -149,6 +181,9 @@ def inspect_tree(root: Path, policy: dict) -> tuple[list[SourceFinding], list[Pu
         except UnicodeDecodeError:
             rule = "artifact.undecodable" if suffix in TEXT_EXTENSIONS else "artifact.opaque"
             findings.append(_finding(rule, "unsupported-artifact", relative, data, "remove-and-stub"))
+            continue
+        if LFS_POINTER.search(text):
+            findings.append(_finding("artifact.lfs-pointer", "unsupported-artifact", relative, data, "remove-and-stub"))
             continue
         if _active_credential_match(text):
             findings.append(_finding("credential.assignment", "credential", relative, data, "externalize"))

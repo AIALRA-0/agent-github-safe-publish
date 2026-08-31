@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from . import __version__
-from .compiler import run_compiler
+from .compiler import publish_compiler, resume_compiler, run_compiler, sanitize_compiler, verify_compiler
 from .detectors import inspect_tree
 from .inventory import source_snapshot
 from .planner import remediation_plan
@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--state", required=True)
     exposure = commands.add_parser("exposure")
     exposure.add_argument("scope", choices=("local", "fleet"))
+    exposure.add_argument("arguments", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -37,8 +38,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"workflow_id": state.workflow_id, "status": state.status, "iteration": state.iteration, "unresolved_count": state.unresolved_count}, sort_keys=True))
         return 0
     if args.command == "exposure":
-        print(json.dumps({"scope": args.scope, "status": "legacy-command-required"}, sort_keys=True))
-        return 0
+        from . import legacy
+
+        mapped = "audit-local" if args.scope == "local" else "audit-fleet"
+        return legacy.main([mapped, *args.arguments])
     source = Path(args.source)
     policy = load_policy(Path(args.policy))
     if args.command == "inspect":
@@ -53,7 +56,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if not needs_input else 3
     if args.command not in {"run", "sanitize", "verify", "publish", "resume"}:
         return 2
-    state = run_compiler(source, Path(args.policy), Path(args.private_output), publish=args.command in {"run", "publish", "resume"})
+    dispatch = {
+        "run": lambda: run_compiler(source, Path(args.policy), Path(args.private_output), publish=True),
+        "sanitize": lambda: sanitize_compiler(source, Path(args.policy), Path(args.private_output)),
+        "verify": lambda: verify_compiler(source, Path(args.policy), Path(args.private_output)),
+        "publish": lambda: publish_compiler(source, Path(args.policy), Path(args.private_output)),
+        "resume": lambda: resume_compiler(source, Path(args.policy), Path(args.private_output), publish=True),
+    }
+    state = dispatch[args.command]()
     print(json.dumps({"workflow_id": state.workflow_id, "status": state.status, "iteration": state.iteration, "unresolved_count": state.unresolved_count}, sort_keys=True))
     return 0 if state.status in {"certified", "published"} else 3
 

@@ -62,6 +62,20 @@ def build_candidate(
         if not public_base:
             raise ValueError("Existing-public mode requires a public base")
         subprocess.run(["git", "clone", "--no-hardlinks", public_base, str(destination)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        expected_base = policy["remote_target"].get("expected_base")
+        if expected_base and git(destination, "rev-parse", "HEAD").stdout.strip() != expected_base:
+            raise ValueError("Public base differs from the authorized remote base")
+        source_paths = set(git(source, "ls-tree", "-r", "--name-only", snapshot.commit).stdout.splitlines())
+        retained = {
+            item.get("object") or item.get("path")
+            for item in policy.get("retention_rules", [])
+            if item.get("action") == "retain-public"
+        }
+        for relative in git(destination, "ls-files").stdout.splitlines():
+            if relative not in source_paths and relative not in retained:
+                path = destination / relative
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
         archived = git(source, "archive", "--format=tar", snapshot.commit, text=False).stdout
         with tarfile.open(fileobj=io.BytesIO(archived), mode="r:") as archive:
             for member in archive.getmembers():

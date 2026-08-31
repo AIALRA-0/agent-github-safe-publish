@@ -107,6 +107,7 @@ class SafetyCertification:
     expected_remote_base: str | None
     degradation: str
     signature: str | None = None
+    public_key: str | None = None
     public_key_fingerprint: str | None = None
 
 
@@ -121,6 +122,7 @@ class PublicationAuthorization:
     release_in_scope: bool
     expires_at: str
     idempotency_key: str
+    trusted_public_key_fingerprint: str | None = None
 
 
 @dataclass
@@ -146,6 +148,7 @@ class WorkflowState:
     certification: SafetyCertification | None = None
     attestation: PublicationAttestation | None = None
     pause_reason: str | None = None
+    policy_sha256: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

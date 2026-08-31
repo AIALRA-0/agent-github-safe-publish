@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import time
 
+from .sandbox import run_in_container
+
 
 def sanitized_environment() -> dict[str, str]:
     blocked_prefixes = ("AWS_", "AZURE_", "GCP_", "GH_", "GITHUB_", "GOOGLE_", "SAFE_PUBLISH_", "SSH_")
@@ -23,6 +25,11 @@ def validate_candidate(candidate: Path, policy: dict) -> list[dict]:
     timeout = int(policy["validation"].get("timeout_seconds", 900))
     results: list[dict] = []
     for command in policy["functional_contract"].get("commands", []):
+        if policy["security_runtime"].get("container_required", False):
+            results.append(run_in_container(candidate, command, policy))
+            if results[-1]["exit_code"] != 0:
+                break
+            continue
         started = time.monotonic()
         completed = subprocess.run(
             command,

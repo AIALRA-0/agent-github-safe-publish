@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-safe-publish"
-version = "2.0.0a2"
+version = "2.0.0b1"
 description = "Compile private source projects into certified public candidates"
 requires-python = ">=3.11"
 license = { text = "MIT" }

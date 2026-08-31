@@ -30,6 +30,25 @@ def _externalize_credentials(path: Path, text: str) -> str:
     return updated
 
 
+def _remove_lfs_rule(root: Path, relative: str) -> bool:
+    attributes = root / ".gitattributes"
+    if not attributes.is_file():
+        return False
+    original = attributes.read_text(encoding="utf-8", errors="strict")
+    normalized = relative.replace("\\", "/")
+    kept = []
+    for line in original.splitlines():
+        stripped = line.strip()
+        if "filter=lfs" in stripped and stripped.split(maxsplit=1)[0] in {normalized, Path(normalized).name}:
+            continue
+        kept.append(line)
+    updated = "\n".join(kept) + ("\n" if kept else "")
+    if updated == original:
+        return False
+    attributes.write_text(updated, encoding="utf-8")
+    return True
+
+
 def transform_candidate(root: Path, actions: list[RemediationAction], policy: dict) -> tuple[list[dict], list[str]]:
     by_path: dict[str, list[RemediationAction]] = {}
     for action in actions:
@@ -62,6 +81,8 @@ def transform_candidate(root: Path, actions: list[RemediationAction], policy: di
                 stub.write_text("This optional private artifact was removed from the public candidate\n", encoding="utf-8")
                 transformations.append({"action": "remove-and-stub", "path": relative, "replacement": stub.relative_to(root).as_posix()})
             path.unlink()
+            if any(action.finding_id and action.action in {"remove", "remove-and-stub"} for action in path_actions) and _remove_lfs_rule(root, relative):
+                transformations.append({"action": "remove-lfs-rule", "path": ".gitattributes", "replacement": relative})
             removed.append(relative)
             continue
         text = path.read_text(encoding="utf-8", errors="strict")

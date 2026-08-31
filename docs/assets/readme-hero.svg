@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
   <style>:root { color-scheme: only light; }</style>
   <title id="title">GitHub Safe Publish</title>
-  <desc id="desc">Every GitHub publication intent enters a private policy audit, strict finding report, graded publication decision, and separately authorized write</desc>
+  <desc id="desc">A read-only private source becomes a remediated, verified, certified, and exactly published public candidate</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#07111f"/>
@@ -29,46 +29,46 @@
     <path d="M120 0V500M240 0V500M360 0V500M480 0V500M600 0V500M720 0V500M840 0V500M960 0V500M1080 0V500"/>
   </g>
   <text x="600" y="78" text-anchor="middle" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="44" font-weight="750">GITHUB SAFE PUBLISH</text>
-  <text x="600" y="116" text-anchor="middle" fill="#a5f3fc" font-family="Segoe UI,Arial,sans-serif" font-size="18" letter-spacing="2.1">STRICT AUDIT · GRADED RELEASE · EXPLICIT WRITE</text>
+  <text x="600" y="116" text-anchor="middle" fill="#a5f3fc" font-family="Segoe UI,Arial,sans-serif" font-size="18" letter-spacing="2.1">AUDIT · REMEDIATE · VERIFY · CERTIFY · PUBLISH</text>
   <path d="M245 264H300M485 264H540M725 264H780M965 264H1020" stroke="url(#flow)" stroke-width="4" marker-end="url(#arrow)"/>
   <g font-family="Segoe UI,Arial,sans-serif">
     <g transform="translate(55 190)">
       <rect width="190" height="148" rx="20" fill="#0f172a" stroke="#38bdf8" stroke-width="2"/>
       <circle cx="42" cy="43" r="12" fill="#38bdf8" filter="url(#glow)"/>
-      <text x="68" y="50" fill="#f8fafc" font-size="20" font-weight="700">INTENT</text>
-      <text x="28" y="88" fill="#cbd5e1" font-size="15">push · upload · sync</text>
-      <text x="28" y="114" fill="#94a3b8" font-size="14">mirror · open source</text>
+      <text x="68" y="50" fill="#f8fafc" font-size="20" font-weight="700">SOURCE</text>
+      <text x="28" y="88" fill="#cbd5e1" font-size="15">read-only snapshot</text>
+      <text x="28" y="114" fill="#94a3b8" font-size="14">private history stays</text>
     </g>
     <g transform="translate(300 190)">
       <rect width="185" height="148" rx="20" fill="#0f172a" stroke="#60a5fa" stroke-width="2"/>
       <path d="M35 32h26v34H35zM41 39h14M41 47h14M41 55h10" fill="none" stroke="#93c5fd" stroke-width="3"/>
-      <text x="74" y="50" fill="#f8fafc" font-size="20" font-weight="700">POLICY</text>
-      <text x="28" y="88" fill="#cbd5e1" font-size="15">private identifiers</text>
-      <text x="28" y="114" fill="#94a3b8" font-size="14">exact approvals only</text>
+      <text x="74" y="50" fill="#f8fafc" font-size="20" font-weight="700">AUDIT</text>
+      <text x="28" y="88" fill="#cbd5e1" font-size="15">find every object</text>
+      <text x="28" y="114" fill="#94a3b8" font-size="14">plan each repair</text>
     </g>
     <g transform="translate(540 190)">
       <rect width="185" height="148" rx="20" fill="#0f172a" stroke="#818cf8" stroke-width="2"/>
       <circle cx="45" cy="47" r="20" fill="none" stroke="#a5b4fc" stroke-width="4"/>
       <path d="M59 62l18 18" stroke="#a5b4fc" stroke-width="5" stroke-linecap="round"/>
-      <text x="82" y="50" fill="#f8fafc" font-size="20" font-weight="700">AUDIT</text>
-      <text x="28" y="88" fill="#cbd5e1" font-size="15">tree · history · LFS</text>
-      <text x="28" y="114" fill="#94a3b8" font-size="14">metadata · releases</text>
+      <text x="82" y="50" fill="#f8fafc" font-size="20" font-weight="700">REPAIR</text>
+      <text x="28" y="88" fill="#cbd5e1" font-size="15">replace · rebuild</text>
+      <text x="28" y="114" fill="#94a3b8" font-size="14">remove · add stubs</text>
     </g>
     <g transform="translate(780 190)">
       <rect width="185" height="148" rx="20" fill="#0f172a" stroke="#22d3ee" stroke-width="2"/>
       <path d="M35 35h38v38H35z" fill="#083344" stroke="#67e8f9" stroke-width="3"/>
       <path d="M43 54l8 8 16-20" fill="none" stroke="#34d399" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="84" y="50" fill="#f8fafc" font-size="20" font-weight="700">DECIDE</text>
-      <text x="28" y="88" fill="#bbf7d0" font-size="15">allow · allow with risk</text>
-      <text x="28" y="114" fill="#fca5a5" font-size="14">deny critical risk</text>
+      <text x="84" y="50" fill="#f8fafc" font-size="20" font-weight="700">CERTIFY</text>
+      <text x="28" y="88" fill="#bbf7d0" font-size="15">tests · rescan · sign</text>
+      <text x="28" y="114" fill="#94a3b8" font-size="14">exact tree binding</text>
     </g>
     <g transform="translate(1020 190)">
       <rect width="125" height="148" rx="20" fill="#0f172a" stroke="#34d399" stroke-width="2"/>
       <path d="M42 35h42v38H42zM49 35v-9a14 14 0 0128 0v9" fill="none" stroke="#86efac" stroke-width="4"/>
-      <text x="62" y="98" text-anchor="middle" fill="#f8fafc" font-size="18" font-weight="700">WRITE</text>
-      <text x="62" y="122" text-anchor="middle" fill="#bbf7d0" font-size="13">authorized</text>
+      <text x="62" y="98" text-anchor="middle" fill="#f8fafc" font-size="18" font-weight="700">PUBLISH</text>
+      <text x="62" y="122" text-anchor="middle" fill="#bbf7d0" font-size="13">exact remote</text>
     </g>
   </g>
   <rect x="265" y="394" width="670" height="58" rx="29" fill="#071827" stroke="#34d399"/>
-  <text x="600" y="430" text-anchor="middle" fill="#d1fae5" font-family="Segoe UI,Arial,sans-serif" font-size="18" font-weight="650">RAW CANDIDATES AND PRIVATE POLICY STAY OUTSIDE THE REPOSITORY</text>
+  <text x="600" y="430" text-anchor="middle" fill="#d1fae5" font-family="Segoe UI,Arial,sans-serif" font-size="18" font-weight="650">UNSAFE OBJECTS LEAVE THE CANDIDATE · THE PROJECT CONTINUES TO PUBLICATION</text>
 </svg>

@@ -13,7 +13,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from github_safe_publish.compiler import run_compiler  # noqa: E402
+from github_safe_publish.compiler import publish_compiler, resume_compiler, run_compiler, sanitize_compiler, verify_compiler  # noqa: E402
+from github_safe_publish.model import SafetyCertification  # noqa: E402
+from github_safe_publish.signing import sign_certification  # noqa: E402
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -61,12 +63,16 @@ class SafePublicationCompilerTests(unittest.TestCase):
                 for path in source.rglob("*") if path.is_file() and ".git" not in path.parts
             }
             remote = root / "public.git"
+            key_path = root / "certification-ed25519.private.key"
+            probe = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "probe", "d" * 64, str(remote), "main", None, "none")
+            sign_certification(probe, key_path)
             policy = {
                 "schema_version": 4,
                 "publication": {
                     "mode": "new-publication",
                     "allowed_writes": ["commit"],
                     "idempotency_key": "north-star-transaction",
+                    "trusted_public_key_fingerprint": probe.public_key_fingerprint,
                 },
                 "sensitive_entities": [
                     {"id": "private.owner", "kind": "literal", "value": private_name, "category": "private-identity"}
@@ -84,7 +90,7 @@ class SafePublicationCompilerTests(unittest.TestCase):
                 "functional_contract": {"commands": [f'"{sys.executable}" -m unittest test_app.py']},
                 "degradation_policy": {"maximum_automatic": "minor", "optional_paths": [".env"]},
                 "validation": {"timeout_seconds": 30},
-                "security_runtime": {"network": "disabled", "container_required": False},
+                "security_runtime": {"network": "disabled", "container_required": False, "certification_key_path": str(key_path)},
                 "remote_target": {"repository": str(remote), "branch": "main", "expected_base": None},
             }
             policy_path = root / "policy.private.json"
@@ -114,8 +120,50 @@ class SafePublicationCompilerTests(unittest.TestCase):
             }
             self.assertEqual(before, after)
             self.assertEqual(state.certification.candidate_tree, state.attestation.remote_tree)
+            resumed = resume_compiler(source, policy_path, output)
+            self.assertEqual("published", resumed.status)
+            statement = json.loads((output / "publication-attestation.private.json").read_text(encoding="utf-8"))
+            self.assertEqual("https://in-toto.io/Statement/v1", statement["_type"])
+            self.assertEqual(state.certification.candidate_tree, statement["subject"][0]["digest"]["gitTree"])
             second = subprocess.run(["git", "-C", str(candidate), "status", "--porcelain"], check=True, stdout=subprocess.PIPE, text=True).stdout
             self.assertEqual("", second)
+
+    def test_phase_commands_share_one_bound_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            git(source, "init", "-b", "main")
+            git(source, "config", "user.name", "Example")
+            git(source, "config", "user.email", "example@example.invalid")
+            (source / "README.md").write_text("safe\n", encoding="utf-8")
+            git(source, "add", ".")
+            git(source, "commit", "-m", "safe source")
+            remote = root / "remote.git"
+            key_path = root / "key.private"
+            probe = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "probe", "d" * 64, str(remote), "main", None, "none")
+            sign_certification(probe, key_path)
+            policy = {
+                "schema_version": 4,
+                "publication": {"mode": "new-publication", "trusted_public_key_fingerprint": probe.public_key_fingerprint},
+                "sensitive_entities": [],
+                "synthetic_mappings": [],
+                "remediation_defaults": {},
+                "object_rules": [],
+                "retention_rules": [],
+                "history_strategy": {"mode": "new-root"},
+                "functional_contract": {"commands": []},
+                "degradation_policy": {"maximum_automatic": "minor", "optional_paths": []},
+                "validation": {"timeout_seconds": 30},
+                "security_runtime": {"network": "disabled", "container_required": False, "certification_key_path": str(key_path)},
+                "remote_target": {"repository": str(remote), "branch": "main", "expected_base": None},
+            }
+            policy_path = root / "policy.private.json"
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            output = root / "run"
+            self.assertEqual("validating", sanitize_compiler(source, policy_path, output).status)
+            self.assertEqual("certified", verify_compiler(source, policy_path, output).status)
+            self.assertEqual("published", publish_compiler(source, policy_path, output).status)
 
 
 if __name__ == "__main__":

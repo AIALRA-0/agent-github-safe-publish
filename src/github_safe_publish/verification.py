@@ -14,8 +14,9 @@ from .policy import policy_sha256
 def verify_candidate(candidate: Path, policy: dict, validation_results: list[dict]) -> VerificationResult:
     findings, observations = inspect_tree(candidate, policy)
     tree = git(candidate, "rev-parse", "HEAD^{tree}").stdout.strip()
+    clean = git(candidate, "status", "--porcelain", "-z").stdout == ""
     validation_ok = all(item["exit_code"] == 0 for item in validation_results)
-    return VerificationResult(not findings and validation_ok, findings, observations, True, tree, validation_results)
+    return VerificationResult(not findings and validation_ok and clean, findings, observations, clean, tree, validation_results)
 
 
 def certify(result: VerificationResult, policy: dict, commit: str, degradation: str) -> SafetyCertification:
