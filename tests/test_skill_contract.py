@@ -96,6 +96,7 @@ class SkillInvocationContractTests(unittest.TestCase):
             'opencv-python-headless==4.14.0.94; sys_platform != "win32"',
             'pypdf==6.16.2',
             'PyMuPDF==1.28.2',
+            'cryptography==50.0.1',
         )
         for requirement in expected:
             with self.subTest(requirement=requirement):

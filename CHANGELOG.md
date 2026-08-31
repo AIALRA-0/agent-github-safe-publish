@@ -11,6 +11,7 @@
 - 分离 `sanitize`、`verify`、`publish` 和 `resume`，相同绑定检查点支持幂等恢复
 - 增加有界收敛循环、LFS Pointer 与 Submodule 安全剔除、法律保护区和大对象流式摘要
 - 私有发布证明采用 in-toto Statement 与 SLSA Verification Summary 结构
+- 锁定 `cryptography==50.0.1`，保证 Linux CI 与本机均能加载 Ed25519 签名模块
 - 全量运行 134 项测试，失败 0 项，其中包含 1 项真实 WSL Docker 隔离金丝雀
 
 ## 2. 2.0.0-alpha.2 — 2026-08-31
