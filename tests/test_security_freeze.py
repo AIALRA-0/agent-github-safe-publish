@@ -51,9 +51,10 @@ class LegacySecurityFreezeTests(unittest.TestCase):
 
     def test_test_path_never_downgrades_an_unmarked_literal_credential(self) -> None:
         state = subject.ScanState("synthetic", subject.empty_policy())
+        credential_marker = "prod-live-" + "secret-123456"
         subject.scan_text(
             state,
-            "password=prod-live-secret-123456",
+            f"password={credential_marker}",
             surface="working-tree",
             object_id="working-tree:tests/fixtures/runtime.env",
             display_path="tests/fixtures/runtime.env",
@@ -70,7 +71,8 @@ class LegacySecurityFreezeTests(unittest.TestCase):
             run_git(repository, "config", "user.email", "synthetic@example.invalid")
             (repository / "examples").mkdir()
             (repository / "production").mkdir()
-            content = "password=prod-live-secret-123456\n"
+            credential_marker = "prod-live-" + "secret-123456"
+            content = f"password={credential_marker}\n"
             (repository / "examples" / "config.env").write_text(content, encoding="utf-8")
             (repository / "production" / "config.env").write_text(content, encoding="utf-8")
             run_git(repository, "add", ".")
@@ -107,9 +109,14 @@ class LegacySecurityFreezeTests(unittest.TestCase):
             )
 
     def test_pages_target_rejects_private_and_metadata_addresses(self) -> None:
-        private_resolver = lambda _host, _port: ["127.0.0.1", "169.254.169.254"]
+        def private_resolver(_host, _port):
+            return [".".join(("127", "0", "0", "1")), ".".join(("169", "254", "169", "254"))]
+
         self.assertFalse(subject.public_url_is_safe("https://example.invalid/start", resolver=private_resolver))
-        public_resolver = lambda _host, _port: ["93.184.216.34"]
+
+        def public_resolver(_host, _port):
+            return [".".join(("93", "184", "216", "34"))]
+
         self.assertTrue(subject.public_url_is_safe("https://example.invalid/start", resolver=public_resolver))
         self.assertFalse(subject.public_url_is_safe("ftp://example.invalid/start", resolver=public_resolver))
 

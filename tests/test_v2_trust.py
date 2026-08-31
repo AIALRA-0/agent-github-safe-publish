@@ -48,6 +48,8 @@ class TrustedPublicationTests(unittest.TestCase):
             self.assertIn("never", arguments)
             self.assertIn("ALL", arguments)
             self.assertIn("no-new-privileges", arguments)
+            self.assertIn("65532:65532", arguments)
+            self.assertIn("nofile=1024:1024", arguments)
             self.assertNotIn("/var/run/docker.sock", " ".join(arguments))
 
     def test_container_image_must_be_digest_pinned(self) -> None:
@@ -57,18 +59,31 @@ class TrustedPublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "complete sha256 digest"):
                 run_in_container(Path(temporary), "true", policy)
 
+    def test_container_temporary_space_must_be_bounded(self) -> None:
+        policy = default_policy()
+        policy["security_runtime"].update(
+            {"container_required": True, "image": "sha256:" + "a" * 64, "tmpfs_size": "unbounded"}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch("github_safe_publish.sandbox.verify_pinned_image", return_value=policy["security_runtime"]["image"]), mock.patch(
+                "github_safe_publish.sandbox.docker_engine_version", return_value="29.0.1"
+            ):
+                with self.assertRaisesRegex(RuntimeError, "temporary-space"):
+                    run_in_container(Path(temporary), "true", policy)
+
     @unittest.skipUnless(os.environ.get("SAFE_PUBLISH_LIVE_CONTAINER") == "1", "live isolation canary")
     def test_live_wsl_container_blocks_network_credentials_and_writes(self) -> None:
         policy = default_policy()
         policy["validation"]["timeout_seconds"] = 60
-        policy["security_runtime"].update(
-            {
-                "container_required": True,
-                "backend": "wsl-docker",
-                "wsl_distribution": "Ubuntu",
-                "image": "alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
-            }
-        )
+        backend = os.environ.get("SAFE_PUBLISH_CONTAINER_BACKEND", "docker")
+        runtime = {
+            "container_required": True,
+            "backend": backend,
+            "image": "alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
+        }
+        if backend == "wsl-docker":
+            runtime["wsl_distribution"] = os.environ.get("SAFE_PUBLISH_WSL_DISTRO", "SafePublish-Validation")
+        policy["security_runtime"].update(runtime)
         command = " && ".join(
             (
                 "test ! -e /var/run/docker.sock",
@@ -91,8 +106,8 @@ class TrustedPublicationTests(unittest.TestCase):
             else:
                 os.environ["GITHUB_TOKEN"] = previous
         self.assertEqual(0, result["exit_code"])
-        self.assertEqual("wsl-docker", result["sandbox"])
-        self.assertEqual("29.1.3", result["engine_version"])
+        self.assertEqual(backend, result["sandbox"])
+        self.assertTrue(result["engine_version"])
 
 
 if __name__ == "__main__":

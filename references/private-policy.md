@@ -2,32 +2,78 @@
 
 ## 1. Storage boundary
 
-Keep `candidates.private.json`, the master policy, compiled repository policies, checkpoints, and detailed reports below the private root. The default is `CODEX_HOME/private/github-safe-publish/`; a local operator may set `SAFE_PUBLISH_PRIVATE_ROOT` to an absolute repository-external directory when storage policy requires another private volume. Never commit, upload, paste, publicly summarize, or hash raw candidate values into public artifacts
+Keep Policy v4, signing keys, source-audit receipts, checkpoints, candidates, detailed findings, certifications, authorizations, and attestations under an absolute repository-external private root
 
-The gate rejects a policy located inside the source repository. Repository-controlled files cannot add approvals, replacements, or exceptions
+The compiler rejects a private output directory below the source repository and refuses to overwrite an active workflow; repository-controlled files cannot broaden remediation, retention, signing trust, degradation, or remote write scope
 
-## 2. Version 3 fields
+Raw values, original private paths, value-derived hashes, and detailed object mappings may exist only in private evidence; public reports contain aggregate action counts and documented degradation without source identifiers
 
-Every policy contains `schema_version`, `identifiers`, `replacements`, `approved_locations`, `blocked_paths`, `binary_approvals`, `exceptions`, and `risk_acceptances`
+## 2. Policy v4 fields
 
-Each identifier has `id`, `kind`, `value`, `severity`, `normalization`, and `scopes`. Supported normalization operations are `none`, `nfkc`, `casefold`, `zero-width`, and `confusable`. Scopes contain `all`, an exact scan surface, or a repository name used by `compile-policy`
+Every Policy v4 document contains these top-level fields:
 
-Each binary approval contains `object`, `sha256`, `approved_by`, `reason`, `inspection_layers`, `tool_versions`, and `review_trigger`. A changed object digest, scanner version, declared inspection layer, or review trigger requires renewed approval
+- `publication`
+- `sensitive_entities`
+- `synthetic_mappings`
+- `remediation_defaults`
+- `object_rules`
+- `retention_rules`
+- `history_strategy`
+- `functional_contract`
+- `degradation_policy`
+- `validation`
+- `security_runtime`
+- `remote_target`
 
-Approved locations and exceptions target exact object identifiers and reject wildcards. An approved location becomes active only when it also binds the exact object SHA-256, scanner SHA-256, policy SHA-256, approver, reason, issue time, expiry time, and the `content-policy-scanner-or-expiry-change` review trigger. Missing or changed evidence keeps the finding visible. Exceptions also require a rule ID, approver, reason, expiry, and review trigger
+`publication` declares the candidate mode, allowed write types, idempotency key, authorization expiry, workflow and Release scope, and trusted certification-key fingerprint
 
-Each risk acceptance requires `repository`, `rule_id`, `object`, `object_sha256`, `scanner_sha256`, `approved_by`, `reason`, `expires_at`, and the exact `content-or-scanner-change` review trigger. It may target only a rule in the fixed noncritical matrix. A wildcard, critical rule, expired approval, changed object digest, or changed scanner digest is inactive
+`sensitive_entities` contains confirmed private literals or bounded regular expressions; regular expressions are length-limited and reject groups, lookarounds, backreferences, unbounded repetition, and broad wildcard constructs
 
-Version 1 and version 2 policies remain readable through in-memory migration. The source file is not modified automatically
+`synthetic_mappings` assigns explicit stable public values to entity IDs; never derive a replacement from a private value by hashing
 
-## 3. Candidate review and compilation
+`remediation_defaults` maps each finding category to a real action such as `externalize`, `replace`, `parameterize`, `synthesize`, `strip-metadata`, `repack`, `remove-and-stub`, or `needs-owner-decision`
 
-The information owner classifies raw candidates locally. Use literal rules for confirmed private values; use regular expressions only after a bounded false-positive test
+`object_rules` addresses one exact repository-relative path; wildcards, absolute paths, traversal, and a rename target that already exists are invalid
 
-Candidate discovery is bounded. Reaching the attempt limit preserves the private candidates already collected, records the exhausted state in the checkpoint, and returns `incomplete`; it never silently truncates candidates and returns `pass`
+`retention_rules` may retain an object only when the evidence binds the exact object digest, scanner set, policy digest, issuer, issue time, expiry time, and review trigger; retention proves that an object was already public, not that a private object may bypass remediation
 
-Stable synthetic mappings use explicit values such as `ExampleOrg`, `ExampleUser`, `example.invalid`, and synthetic IDs. Never derive them from private values by hashing
+`history_strategy` must match the publication mode:
 
-Run `compile-policy` to keep only rules and risk acceptances applicable to the selected repository. The Base64-encoded compiled policy must not exceed 48 KB
+- `new-publication` uses `new-root`
+- `update-existing-public` uses `public-base-overlay`
+- `history-migration` uses `full-migration` and separate authorization
 
-Working-tree objects use `working-tree:<path>`, history objects use `git:<object>:<path>`, Release assets use `release:<release-id>:<asset>`, repository fields use `metadata:<field>`, and LFS objects use `lfs:<oid>:<path>`
+`functional_contract` lists the commands that prove the sanitized candidate still works; any command requires container isolation and a digest-pinned image
+
+`degradation_policy` permits automatic `none` or `minor` degradation only; optional paths are exact, while `major` and `skeleton` outcomes require owner input
+
+`security_runtime` binds the Ed25519 private key, Gitleaks 8.30.1 executable and SHA-256 digest, private temporary root, container backend, exact image digest or local image ID, numeric non-root user, and resource limits
+
+`remote_target` binds the repository, branch, and expected remote base commit; publication rereads the base immediately before a non-force push
+
+## 3. Source-audit receipts
+
+An exact source-audit receipt may reuse completed deep inspection only when all bindings still match:
+
+- source commit and tree
+- file count and worktree completion
+- report SHA-256
+- scanner, policy, and report fingerprints
+- zero critical findings and zero critical coverage gaps
+- issuer, issue time, expiry time, and review trigger
+
+The receipt may classify an ambiguous public example as a `PublicObservation`; it never suppresses a high-confidence credential or a private entity named by Policy v4
+
+## 4. Migration from Policies v1 through v3
+
+Policies v1, v2, and v3 remain readable through an in-memory migration that never edits the source file
+
+The migration converts identifiers and replacements into sensitive entities and synthetic mappings; blocked paths become exact removal rules; old approvals become retention evidence only when every required binding is present
+
+Exceptions and risk acceptances remain audit history; they cannot allow private content into a v2 candidate
+
+## 5. Owner decisions and revisions
+
+Use `needs_input` only when a required fact cannot be inferred safely, such as public rights, legal provenance, treatment of a required unsupported object, or a major capability change
+
+When the owner supplies the minimum decision, write a new Policy v4 revision and preserve the former candidate, state, certification, authorization, degradation report, and evidence under a numbered private revision; resume only after recomputing every binding

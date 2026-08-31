@@ -8,7 +8,7 @@ version = "2.0.0b1"
 description = "Compile private source projects into certified public candidates"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["cryptography==50.0.1"]
+dependencies = ["cryptography==50.0.1", "fonttools==4.51.0"]
 
 [project.scripts]
 github-safe-publish = "github_safe_publish.cli:main"

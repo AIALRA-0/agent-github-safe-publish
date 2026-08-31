@@ -90,8 +90,12 @@ class VerificationResult:
     unresolved_findings: list[SourceFinding]
     observations: list[PublicObservation]
     coverage_complete: bool
+    candidate_commit: str
     candidate_tree: str
+    candidate_index_tree: str
+    candidate_patch_sha256: str
     validation_results: list[dict[str, Any]] = field(default_factory=list)
+    coverage_records: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -106,6 +110,7 @@ class SafetyCertification:
     target_branch: str
     expected_remote_base: str | None
     degradation: str
+    authorization_sha256: str | None = None
     signature: str | None = None
     public_key: str | None = None
     public_key_fingerprint: str | None = None

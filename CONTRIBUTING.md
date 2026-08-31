@@ -11,7 +11,8 @@
 提交修改前运行以下检查：
 
 - `python -X utf8 scripts/safe_publish.py doctor --source .`，确认当前仓库需要的解析器可用；缺少关键解析器时检查会返回失败
-- `python -X utf8 -m unittest discover -s tests -v`，验证策略迁移、扫描、恢复和发布合同；任一测试失败都会阻止发布
+- `python -W error::ResourceWarning -m pytest -q`，验证策略迁移、扫描、修复、认证、恢复和发布合同；任一测试失败都会阻止发布
+- `python -m ruff check .`，检查无效导入、死代码和不安全简写；静态检查失败不会被当成测试通过
 - Skill Creator 的 `quick_validate.py`，验证 Skill 结构和元数据；结构错误会阻止安装
 - README Standardizer 的仓库扫描与渲染验证，确认双语内容、链接、视觉资源和隐私边界一致
 

@@ -1,43 +1,48 @@
-# Managed publication recovery
+# Publication recovery
 
-## 1. Safe retry
+## 1. v2 bound resume
 
-Use the same private output directory with `--resume` only when the source HEAD, remote base, private policy, and intended candidate are unchanged
+`resume` reloads the private checkpoint and recomputes the source snapshot, Policy v4 digest, candidate binding, signing trust and publication authorization before continuing
 
-The command recomputes the candidate tree, patch, scanner, policy, runtime, and report fingerprints before any remote continuation
+The resumable states are:
 
-## 2. Stale base
+- `needs_input`
+  - Public rights, legal provenance, required-object handling or major degradation needs an owner decision
+  - A changed Policy v4 preserves the prior candidate and evidence under a numbered private revision before rebuilding
+- `retryable_failure`
+  - Candidate construction, GitHub, network or another external dependency failed temporarily
+  - A pre-certification retry preserves the failed workflow under a numbered private retry; a post-certification retry reuses the same signed candidate and idempotency key
+- `internal_error`
+  - A parser, transformer, convergence or evidence invariant failed
+  - Repair the tool and resume the same bound checkpoint; do not lower coverage
+- `operator_attention`
+  - Candidate, authorization, workflow scope or remote Base differs from the certified transaction
+  - Reconcile the exact object before any new publication attempt
 
-When the remote default branch changes, stop the run, create a new isolated candidate from the new base, rerun project and README validation, and execute the exact gate again
+`cancelled`, `superseded` and `legal_hold` are administrative terminal states; `resume` returns them unchanged and performs no work
 
-Never rebase an already gated candidate and reuse its prior decision
+## 2. Remote recovery
 
-## 3. Git-history slices
+The publisher rereads the exact branch immediately before a non-force push; a changed Base produces `operator_attention`, while a temporary read or push failure produces `retryable_failure`
 
-The working tree and Git history use separate checkpoints and time slices. Resume the working tree only when its complete path, kind, and content-digest inventory still matches; any changed file invalidates that checkpoint
+A repeated transaction whose remote Commit and Tree already equal the certified object is an idempotent success; the same idempotency key cannot authorize another candidate
 
-An exact gate saves Git-history progress after bounded object intervals and again when its time budget expires. Rerun the same command with the same checkpoint to continue from the saved object index
+Do not reuse certification after rebasing, amending, changing a workflow, changing the Policy, changing Gitleaks, changing the functional contract or changing the remote target
 
-The Git-history scanner runs in an isolated child process whenever a positive time limit is active. The parent enforces the full wall-clock limit, returns `GIT_HISTORY_TIMEOUT` when the child does not finish, and never treats an absent child result as complete
+## 3. Evidence preservation
 
-Use the same `--ocr-checkpoint` for identical reruns. Completed image and PDF-page units replay their redacted results, while the next uncached unit consumes the new process budget. A changed repository, source commit, scanner, or policy invalidates the OCR checkpoint
+Source candidates, policies, keys, detailed findings, revisions, retries, certifications, authorizations and attestations remain under the approved private root
 
-OCR budget exhaustion in Git history keeps the history checkpoint on the current object. Do not manually advance it. Report and history finding pages are content-addressed and must pass digest and total-count verification before resume
+No recovery path deletes an earlier candidate or report automatically; private evidence can be removed only under the owner’s retention decision after the publication and incident boundary is understood
 
-The scanner re-enumerates the complete visible object inventory before every resume. A changed source commit, object inventory, scanner, policy, repository name, checkpoint schema, or candidate mode makes the checkpoint stale and returns `incomplete` plus publication `deny`
+## 4. Legacy checkpoints
 
-Do not overwrite a stale explicit checkpoint. Keep it as private evidence and select a new private checkpoint path for the changed publication candidate
+The v1 working tree, Git history and OCR layers continue to use separate content-bound checkpoints and bounded time slices
 
-## 4. Failed remote action
+Legacy `incomplete`, `deny`, `SCANNER_CRASHED`, `GATE_REPORT_MISSING` and Git-history timeout results describe one old gate candidate; they do not become v2 terminal publication states
 
-A failed branch push, pull-request creation, status check, tree comparison, or merge leaves the checkpoint outside the repository
+## 5. Incident boundary
 
-Do not force-push or use administrator bypass. Inspect the checkpoint state, repair the external condition, then resume only if all bound fingerprints remain unchanged
+A credential that may still be valid or may already be public must be revoked or rotated before repository cleanup
 
-Managed publication writes a fail-closed placeholder before the exact gate starts. A scanner exception replaces it with `SCANNER_CRASHED`; an unchanged or missing report returns `GATE_REPORT_MISSING`. Both results remain `incomplete` with publication `deny`
-
-## 5. Incident
-
-A detected credential or private identifier stops publication. Rotate a credential before repository cleanup when it may have been valid or previously public
-
-History rewriting, cache cleanup, fork coordination, Release replacement, and credential rotation require their own owner approval and recovery plan
+History rewriting, force-pushing, cache cleanup, Fork coordination, Release replacement, credential rotation and organization-rule changes require separate authorization and their own recovery plan

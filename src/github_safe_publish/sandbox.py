@@ -9,7 +9,7 @@ class SandboxUnavailable(RuntimeError):
     pass
 
 
-PINNED_IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
+PINNED_IMAGE = re.compile(r"(?:^[a-z0-9][a-z0-9._/:.-]*@sha256:[0-9a-f]{64}$)|(?:^sha256:[0-9a-f]{64}$)")
 
 
 def _runtime_prefix(policy: dict) -> list[str]:
@@ -65,8 +65,9 @@ def verify_pinned_image(policy: dict, timeout: int = 30) -> str:
         raise SandboxUnavailable("Container image must use a complete sha256 digest")
     prefix = _runtime_prefix(policy)
     try:
+        template = "{{.Id}}" if image.startswith("sha256:") else "{{index .RepoDigests 0}}"
         result = subprocess.run(
-            [*prefix, "docker", "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
+            [*prefix, "docker", "image", "inspect", image, "--format", template],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -85,13 +86,23 @@ def run_in_container(candidate: Path, command: str, policy: dict) -> dict:
     image = verify_pinned_image(policy)
     if docker_engine_version(policy) is None:
         raise SandboxUnavailable("Docker Engine is unavailable")
+    tmpfs_size = str(runtime.get("tmpfs_size", "256m"))
+    if not re.fullmatch(r"[1-9][0-9]*(?:[kKmMgG])?", tmpfs_size):
+        raise SandboxUnavailable("Container temporary-space limit is invalid")
+    container_user = str(runtime.get("user", "65532:65532"))
+    if not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", container_user):
+        raise SandboxUnavailable("Container user must be a numeric non-root identity")
     arguments = [
         *prefix, "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--pids-limit", str(runtime.get("pids_limit", 128)),
         "--memory", str(runtime.get("memory", "1g")),
         "--cpus", str(runtime.get("cpus", "2")),
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
+        "--user", container_user,
+        "--ulimit", "nofile=1024:1024",
+        "--env", "HOME=/tmp",
+        "--env", "TMPDIR=/tmp",
+        "--tmpfs", f"/tmp:rw,noexec,nosuid,size={tmpfs_size}",
         "--mount", f"type=bind,src={_wsl_path(candidate, prefix)},dst=/workspace,readonly",
         "--workdir", "/workspace",
     ]

@@ -1,26 +1,30 @@
 # Runtime and parser contract
 
-## 1. Read-only diagnosis
+## 1. v2 compiler runtime
 
-`doctor --source <repository>` requires only the parser layers used by the current tracked object types
+Policy v4 binds the Gitleaks 8.30.1 executable path, SHA-256 digest, private temporary root, container backend, exact image digest or local image ID, resource limits, numeric non-Root user and functional commands
 
-`doctor --all` verifies every supported parser layer. Both modes report component status and versions without printing installation paths
+`policy-init` refuses a functional command without a digest-pinned image; `verify` refuses a missing or changed Gitleaks executable, failed credential canary, missing private temporary root or unavailable container engine
 
-## 2. Isolated installation
+Project code never falls back to a host process; an unavailable isolation backend produces `needs_input`, leaves the candidate under private storage and performs no remote action
 
-- Windows: run `scripts/bootstrap-runtime.ps1 -Destination <private-runtime-directory>`
-- Ubuntu: run `scripts/bootstrap-runtime.sh <private-runtime-directory>`
+## 2. v2 resource boundary
 
-Both installers create a repository-external Python environment and install the versions in `requirements-gate.txt`
+- Candidate files larger than the policy object limit are streamed only for their digest and then remediated or removed
+- ZIP and Office members have separate member-count, member-size and total-expansion limits
+- Images have pixel and frame limits; PDF files have page and rendered-pixel limits
+- Private regular expressions use a restricted linear subset without groups, unbounded quantifiers, lookarounds or backreferences
+- Gitleaks reports use full redaction, remain under the private temporary root and are removed after parsing
+- Candidate validation uses no network, a read-only root, a read-only candidate mount, a bounded writable temporary filesystem, no Linux capabilities, `no-new-privileges`, no Docker Socket and no inherited publication credentials
 
-Ubuntu additionally installs `libmagic`, Binutils, FFmpeg, and Git LFS from the operating-system package manager
+## 3. Legacy diagnosis
 
-Gitleaks remains pinned to the version declared by `safe_publish.py`; the scanner downloads it into the Codex cache and verifies the official checksum before use
+`doctor --source <repository>` requires only the legacy parser layers used by the current tracked object types
 
-## 3. Fail-closed behavior
+`doctor --all` verifies every legacy parser layer; both modes report component status and versions without printing installation paths
 
-Missing parsers, incompatible runtime results, encrypted objects, resource limits, and malformed containers return `incomplete`
+Windows can run `scripts/bootstrap-runtime.ps1 -Destination <private-runtime-directory>`; Ubuntu can run `scripts/bootstrap-runtime.sh <private-runtime-directory>`
 
-Bounded working-tree slices run in an isolated child process. Worker task and result documents stay below the private Safe Publish root, are removed after the slice, and never place policy values or raw candidates on the command line
+The legacy installers create a repository-external Python environment and install `requirements-gate.txt`; Ubuntu also installs `libmagic`, Binutils, FFmpeg and Git LFS from the operating-system package manager
 
-NPY and NPZ parsing always uses `allow_pickle=False`. Object dtypes, excessive members, excessive expansion, excessive elements, excessive memory size, excessive extracted text, and excessive nested dtype depth cannot pass the gate
+Legacy missing parsers, incompatible runtime results, encrypted objects, resource limits and malformed containers remain `incomplete`; these terms describe the v1 gate and do not replace v2 remediation, certification or recovery states

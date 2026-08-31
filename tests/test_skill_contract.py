@@ -34,12 +34,12 @@ class SkillInvocationContractTests(unittest.TestCase):
             with self.subTest(intent=intent):
                 self.assertIn(intent, description)
 
-    def test_global_policy_fails_closed_before_remote_write(self) -> None:
+    def test_global_policy_compiles_before_remote_write(self) -> None:
         policy = (REPOSITORY_ROOT / "references" / "global-invocation-policy.md").read_text(encoding="utf-8")
         self.assertIn("$github-safe-publish", policy)
-        self.assertIn("record the result as `incomplete`", policy)
-        self.assertIn("exact publication copy receives `allow` or `allow_with_risk`", policy)
-        self.assertIn("explicitly authorizes the GitHub write", policy)
+        self.assertIn("turn every unsafe finding into remediation", policy)
+        self.assertIn("Publish only the exact signed candidate", policy)
+        self.assertIn("do not touch the remote", policy)
         for intent in ("推送", "发布", "上传", "同步", "镜像", "开源", "全量发布"):
             with self.subTest(intent=intent):
                 self.assertIn(intent, policy)
@@ -49,6 +49,11 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertIn("`audit-local`", skill)
         self.assertIn("`compile-policy`", skill)
         self.assertIn("repository-associated", skill)
+
+    def test_thin_entrypoint_routes_policy_bootstrap_and_key_generation(self) -> None:
+        entrypoint = (REPOSITORY_ROOT / "scripts" / "safe_publish.py").read_text(encoding="utf-8")
+        self.assertIn('"policy-init"', entrypoint)
+        self.assertIn('"keygen"', entrypoint)
 
     def test_skill_preserves_strict_audit_and_graded_publication(self) -> None:
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -63,7 +68,7 @@ class SkillInvocationContractTests(unittest.TestCase):
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("explicitly requests that exact route", skill)
         self.assertIn("fast-forward", skill)
-        self.assertIn("exact gate permits publication", skill)
+        self.assertIn("signed certification plus bound authorization permit publication", skill)
 
     def test_repository_workflow_never_receives_private_policy(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
@@ -97,6 +102,7 @@ class SkillInvocationContractTests(unittest.TestCase):
             'pypdf==6.16.2',
             'PyMuPDF==1.28.2',
             'cryptography==50.0.1',
+            'fonttools==4.51.0',
         )
         for requirement in expected:
             with self.subTest(requirement=requirement):

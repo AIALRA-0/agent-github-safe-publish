@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,116 @@ def git(repository: Path, *arguments: str) -> str:
 
 
 class SafePublicationCompilerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._scanner = mock.patch(
+            "github_safe_publish.verification.scan_gitleaks",
+            return_value=([], {"path": "@credential-scanner", "status": "checked", "parser": "test", "sha256": "a" * 64}),
+        )
+        self._scanner.start()
+        self.addCleanup(self._scanner.stop)
+
+    def test_existing_public_update_uses_only_the_public_base_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public_work = root / "public-work"
+            public_work.mkdir()
+            git(public_work, "init", "-b", "main")
+            git(public_work, "config", "user.name", "Example")
+            git(public_work, "config", "user.email", "example@example.invalid")
+            (public_work / "README.md").write_text("public base\n", encoding="utf-8")
+            git(public_work, "add", ".")
+            git(public_work, "commit", "-m", "public base")
+            public_base = git(public_work, "rev-parse", "HEAD")
+            remote = root / "public.git"
+            subprocess.run(["git", "clone", "--bare", str(public_work), str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            source = root / "private-source"
+            source.mkdir()
+            git(source, "init", "-b", "main")
+            git(source, "config", "user.name", "Private")
+            git(source, "config", "user.email", "private@example.invalid")
+            (source / "deleted.txt").write_text("private-history-marker\n", encoding="utf-8")
+            git(source, "add", ".")
+            git(source, "commit", "-m", "private history")
+            private_commit = git(source, "rev-parse", "HEAD")
+            (source / "deleted.txt").unlink()
+            (source / "README.md").write_text("safe overlay\n", encoding="utf-8")
+            git(source, "add", "-A")
+            git(source, "commit", "-m", "safe source")
+
+            key_path = root / "key.private"
+            probe = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "probe", "d" * 64, str(remote), "main", public_base, "none")
+            sign_certification(probe, key_path)
+            policy = {
+                "schema_version": 4,
+                "publication": {
+                    "mode": "update-existing-public",
+                    "public_base": str(remote),
+                    "allowed_writes": ["commit"],
+                    "trusted_public_key_fingerprint": probe.public_key_fingerprint,
+                },
+                "sensitive_entities": [],
+                "synthetic_mappings": [],
+                "remediation_defaults": {},
+                "object_rules": [],
+                "retention_rules": [],
+                "history_strategy": {"mode": "public-base-overlay"},
+                "functional_contract": {"commands": []},
+                "degradation_policy": {"maximum_automatic": "minor", "optional_paths": []},
+                "validation": {"timeout_seconds": 30},
+                "security_runtime": {"network": "disabled", "container_required": False, "certification_key_path": str(key_path)},
+                "remote_target": {"repository": str(remote), "branch": "main", "expected_base": public_base},
+            }
+            policy_path = root / "policy.private.json"
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            output = root / "run"
+            state = run_compiler(source, policy_path, output)
+            self.assertEqual("published", state.status)
+            candidate = output / "candidate"
+            self.assertEqual(public_base, git(candidate, "rev-parse", "HEAD^"))
+            unreachable = subprocess.run(["git", "-C", str(candidate), "cat-file", "-e", private_commit], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertNotEqual(0, unreachable.returncode)
+            self.assertEqual("safe overlay", (candidate / "README.md").read_text(encoding="utf-8").strip())
+
+    def test_same_source_and_policy_produce_the_same_candidate_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            git(source, "init", "-b", "main")
+            git(source, "config", "user.name", "Example")
+            git(source, "config", "user.email", "example@example.invalid")
+            (source / "config.py").write_text('password = "synthetic-runtime-value"\n', encoding="utf-8")
+            git(source, "add", ".")
+            git(source, "commit", "-m", "source")
+            key_path = root / "key.private"
+            probe = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "probe", "d" * 64, str(root / "remote.git"), "main", None, "none")
+            sign_certification(probe, key_path)
+            policy = {
+                "schema_version": 4,
+                "publication": {"mode": "new-publication", "trusted_public_key_fingerprint": probe.public_key_fingerprint},
+                "sensitive_entities": [],
+                "synthetic_mappings": [],
+                "remediation_defaults": {},
+                "object_rules": [],
+                "retention_rules": [],
+                "history_strategy": {"mode": "new-root"},
+                "functional_contract": {"commands": []},
+                "degradation_policy": {"maximum_automatic": "minor", "optional_paths": []},
+                "validation": {"timeout_seconds": 30},
+                "security_runtime": {"network": "disabled", "container_required": False, "certification_key_path": str(key_path)},
+                "remote_target": {"repository": str(root / "remote.git"), "branch": "main", "expected_base": None},
+            }
+            policy_path = root / "policy.private.json"
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            states = []
+            for index in (1, 2):
+                output = root / f"run-{index}"
+                self.assertEqual("validating", sanitize_compiler(source, policy_path, output).status)
+                states.append(verify_compiler(source, policy_path, output))
+            self.assertEqual("certified", states[0].status)
+            self.assertEqual(states[0].certification.candidate_tree, states[1].certification.candidate_tree)
+
     def test_new_publication_sanitizes_validates_certifies_and_publishes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -90,13 +200,17 @@ class SafePublicationCompilerTests(unittest.TestCase):
                 "functional_contract": {"commands": [f'"{sys.executable}" -m unittest test_app.py']},
                 "degradation_policy": {"maximum_automatic": "minor", "optional_paths": [".env"]},
                 "validation": {"timeout_seconds": 30},
-                "security_runtime": {"network": "disabled", "container_required": False, "certification_key_path": str(key_path)},
+                "security_runtime": {"network": "disabled", "container_required": True, "certification_key_path": str(key_path)},
                 "remote_target": {"repository": str(remote), "branch": "main", "expected_base": None},
             }
             policy_path = root / "policy.private.json"
             policy_path.write_text(json.dumps(policy), encoding="utf-8")
             output = root / "run"
-            state = run_compiler(source, policy_path, output)
+            with mock.patch(
+                "github_safe_publish.validation.run_in_container",
+                return_value={"command_id": "north-star", "exit_code": 0, "sandbox": "test-double"},
+            ):
+                state = run_compiler(source, policy_path, output)
             if state.status != "published":
                 debug = subprocess.run(
                     [sys.executable, "-m", "unittest", "test_app.py"],

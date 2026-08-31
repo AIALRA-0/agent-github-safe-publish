@@ -1,5 +1,7 @@
 # Managed publication contract
 
+This document describes the v1 compatibility command; v2 uses `run`, signed certification, and the trusted publisher described in `SKILL.md`
+
 ## 1. Trigger
 
 Use `managed-publish` only after the user authorizes a GitHub push, publication, synchronization, mirror, open-source transfer, or Release operation

@@ -37,6 +37,43 @@ jobs:
       - name: Compile helper
         run: python -m py_compile scripts/safe_publish.py
 
+      # Keep source and regression tests free from dead imports and unsafe shorthand
+      - name: Run static checks
+        run: |
+          python -m pip install ruff==0.11.11
+          python -m ruff check .
+
       # Run the generated synthetic corpus without accessing real credentials or private policy values.
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+  cross-platform:
+    name: tests / cross-platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      # Read the exact candidate without retaining a publication credential
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Keep the compiler runtime identical across the two additional operating systems
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-gate.txt
+
+      # Install the locked parsers before exercising only the version 2 compiler contract
+      - name: Install Python parser dependencies
+        run: python -m pip install -r requirements-gate.txt
+
+      # Verify Policy v4, transformations, signing, resume, and publication boundaries
+      - name: Run version 2 tests
+        run: python -m unittest discover -s tests -p "test_v2*.py" -v

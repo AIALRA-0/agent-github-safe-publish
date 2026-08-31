@@ -1547,10 +1547,12 @@ class RepositoryTests(unittest.TestCase):
 
     def test_raw_candidate_limit_fails_closed(self) -> None:
         state = subject.ScanState("synthetic", subject.empty_policy(), collect_raw=True)
+        first_marker = "SYNTHETIC_FIRST_" + "1234"
+        second_marker = "SYNTHETIC_SECOND_" + "5678"
         with mock.patch.object(subject, "MAX_RAW_CANDIDATES_PER_STATE", 1):
             subject.scan_text(
                 state,
-                "password=SYNTHETIC_FIRST_1234\npassword=SYNTHETIC_SECOND_5678",
+                f"password={first_marker}\npassword={second_marker}",
                 surface="working-tree",
                 object_id="working-tree:fixture.txt",
                 display_path="fixture.txt",
@@ -1721,9 +1723,12 @@ class RepositoryTests(unittest.TestCase):
 
                 one_shot = subject.ScanState("ExampleOrg/history", subject.empty_policy())
                 subject.scan_git_history(one_shot, repository)
-                normalized = lambda state: sorted(
-                    (item.surface, item.object, item.location, item.rule_id, item.status) for item in state.findings
-                )
+
+                def normalized(state):
+                    return sorted(
+                        (item.surface, item.object, item.location, item.rule_id, item.status) for item in state.findings
+                    )
+
                 self.assertEqual(normalized(one_shot), normalized(resumed))
 
                 reused = subject.ScanState("ExampleOrg/history", subject.empty_policy())

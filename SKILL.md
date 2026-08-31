@@ -20,6 +20,7 @@ Current compiler preview: `2.0.0-beta.1`
 - Replace, externalize, parameterize, synthesize, rebuild, rename, repair references, remove, or stub any object that cannot safely enter the candidate
 - Never publish by lowering severity, adding a wildcard approval, accepting private risk, or silently skipping an unreadable object
 - Validate the functional contract and independently rescan the candidate after transformation
+- Require the digest-bound Gitleaks 8.30.1 runtime to detect its synthetic canary and scan the complete candidate with full redaction
 - Return a rejected candidate to the remediation planner; `deny` is not a v2 business terminal state
 - Certify only when the candidate has zero unresolved security findings, complete coverage, a clean Git worktree, and an authorized `none` or `minor` degradation
 - Continue from `certified` to publication while the original authorization remains valid
@@ -40,6 +41,8 @@ Read [the v2 product contract](docs/architecture/PRODUCT_CONTRACT.md), [threat m
 - `exposure local` and `exposure fleet` run separate exposure investigations that never decide the result of one publication
 
 Use Policy v4 for the compiler; versions 1, 2, and 3 may migrate in memory, but repository-controlled files cannot broaden private rules, signing trust, degradation permission, or remote scope
+
+Create the private signing key with `keygen`; create a new non-overwriting private policy with `policy-init`, including the Gitleaks path, private temporary root, digest-pinned container image, functional commands, exact target, and authorized workflow or Release scope
 
 ## 3. Candidate and remediation rules
 
@@ -76,12 +79,15 @@ Require the validation container to have:
 - all Linux capabilities removed
 - `no-new-privileges`
 - bounded processes, memory, CPU, runtime, and temporary space
+- a numeric non-root user
 - no Docker Socket
 - no GitHub, SSH, cloud, private-policy, or publication environment variables
 
 Sign certification with an OS-protected Ed25519 private key; the trusted publisher must use a separately configured public-key fingerprint rather than trusting a key supplied by the certification itself
 
-Bind certification to the exact candidate commit and tree, Policy v4 digest, tool version, validation evidence, degradation, target repository, target branch, and expected remote base
+Bind certification to the exact candidate commit, tree, index, patch, Policy v4 digest, tool version, Gitleaks runtime, validation evidence, per-object coverage, degradation, authorization receipt, target repository, target branch, and expected remote base
+
+An exact source-audit receipt may reuse completed deep coverage only for the same source commit, tree, object digest, scanner, policy, report, expiry, and review trigger; it may classify an ambiguous public example, but it never suppresses a high-confidence credential or a private entity named by Policy v4
 
 Write the private publication proof as an in-toto Statement carrying an SLSA Verification Summary predicate; the proof describes only the fixed candidate, policy, tools, and coverage that were verified
 
@@ -95,7 +101,7 @@ Write the private publication proof as an in-toto Statement carrying an SLSA Ver
 - Treat a repeated transaction whose remote already equals the certified commit and tree as an idempotent success
 - Enter `retryable_failure` for temporary network or GitHub failure without weakening any binding
 
-Push directly to the default branch only when the current user explicitly requests that exact route, the update is fast-forward, and the exact gate permits publication; otherwise follow the repository's approved review route
+Push directly to the default branch only when the current user explicitly requests that exact route, the update is fast-forward, and the signed certification plus bound authorization permit publication; otherwise follow the repository's approved review route
 
 Force-pushing, rewriting an existing public history, deleting a Release or branch, rotating a credential, and changing organization rules require separate authorization
 

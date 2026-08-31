@@ -14,7 +14,7 @@ if str(SOURCE_ROOT) not in sys.path:
 from github_safe_publish import legacy  # noqa: E402
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in {"run", "inspect", "plan", "sanitize", "verify", "publish", "status", "resume", "exposure"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"run", "inspect", "plan", "sanitize", "verify", "publish", "status", "resume", "exposure", "keygen", "policy-init"}:
         from github_safe_publish.cli import main as v2_main
 
         raise SystemExit(v2_main())

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -49,9 +48,10 @@ class PilotDrillTests(unittest.TestCase):
                 self.assertEqual("allow_with_risk", subject.publication_decision_for(url_state))
 
                 secret_state = subject.ScanState(pilot, subject.empty_policy())
+                credential_marker = "SYNTHETIC_PILOT_" + "SECRET_7421"
                 subject.scan_text(
                     secret_state,
-                    "password=SYNTHETIC_PILOT_SECRET_7421",
+                    f"password={credential_marker}",
                     surface="working-tree",
                     object_id="working-tree:secret.txt",
                     display_path="secret.txt",

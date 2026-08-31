@@ -25,12 +25,12 @@ jobs:
 
       # Initialize GitHub's source-code security analysis for Python
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938
+        uses: github/codeql-action/init@486fec2a3ea2626afcd8c7e9208b4f515078dd7e
         with:
           languages: python
 
       # Analyze data flow and dangerous calls, then upload the result to Security
       - name: Analyze with CodeQL
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938
+        uses: github/codeql-action/analyze@486fec2a3ea2626afcd8c7e9208b4f515078dd7e
         with:
           category: "/language:python"

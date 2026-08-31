@@ -10,7 +10,7 @@ Figure 1 The compiler turns unsafe objects into remediation work instead of term
 
 <p align="center"><strong>Transform a project containing credentials, private identity, real data, or private dependencies into a safe, verified, publishable public derivative</strong></p>
 
-<p align="center">Stable legacy <code>v1.1.7</code> · Current preview <code>v2.0.0-beta.1</code> · Status: real-project validation</p>
+<p align="center">Stable legacy <code>v1.1.7</code> · Current preview <code>v2.0.0-beta.1</code> · Status: RC hardening and real-project certification</p>
 
 <p align="center"><a href="README.md">简体中文</a> · <a href="#3-first-success">First success</a> · <a href="#4-transformation-coverage">Coverage</a> · <a href="SECURITY.md">Security</a> · <a href="CONTRIBUTING.md">Contributing</a> · <a href="CHANGELOG.md">Changelog</a></p>
 
@@ -32,6 +32,7 @@ The fixed invariants are:
 - An object that cannot be proven safe cannot enter the candidate, but it cannot permanently terminate the whole project
 - Automatic degradation is limited to `none` and `minor`; public-interface changes, core capability removal, or a skeleton require owner input
 - A certified candidate proceeds under the original authorization and the publisher verifies the remote commit and tree
+- The locked Gitleaks executable must pass its digest check and runtime canary before certification
 - `published` is the only normal successful terminal state
 
 See the [product contract](docs/architecture/PRODUCT_CONTRACT.md), [threat model](docs/architecture/THREAT_MODEL.md), and [migration guide](docs/architecture/MIGRATION_V1_TO_V2.md)
@@ -64,7 +65,7 @@ An idempotency key uniquely identifies one publication transaction; repeating th
 
 ## 3. First success
 
-The runtime requires Python 3.11 or newer, Git, and a working Docker Engine; the engine validates untrusted project code without network access, publication credentials, source writes, or unrestricted resources
+The runtime requires Python 3.11 or newer, Git, Gitleaks 8.30.1, and a working Docker Engine; the engine validates untrusted project code without network access, publication credentials, source writes, or unrestricted resources
 
 First, verify both interfaces
 
@@ -73,7 +74,14 @@ python -X utf8 scripts/safe_publish.py --version # Reports the stable legacy int
 python -X utf8 -m github_safe_publish.cli --version # Reports the current v2 preview
 ```
 
-Second, keep Policy v4 outside the repository; it defines private entities, synthetic mappings, object actions, history mode, functional contract, isolation runtime, degradation limit, signing trust root, and exact remote target
+Second, create the protected Ed25519 key and Policy v4 outside the repository
+
+```powershell
+python -X utf8 scripts/safe_publish.py keygen --key "<PRIVATE_ROOT>/certification-ed25519.private.key"
+python -X utf8 scripts/safe_publish.py policy-init --source . --output "<PRIVATE_ROOT>/policy.private.json" --key "<PRIVATE_ROOT>/certification-ed25519.private.key" --remote-target "AIALRA-0/example" --gitleaks-path "<PRIVATE_ROOT>/gitleaks.exe" --private-temp-root "<PRIVATE_ROOT>/temp" --container-image "sha256:<LOCAL_IMAGE_ID>" --validation-command "python -m pytest -q"
+```
+
+`policy-init` binds the source commit, remote target, Gitleaks digest, isolation image, functional command, degradation ceiling, and authorization scope; it refuses to overwrite an existing private policy
 
 Third, inspect and plan without creating a candidate
 
@@ -99,13 +107,15 @@ Use `sanitize`, `verify`, and `publish` for phase-by-phase review; use `resume` 
 | Private infrastructure | Parameterize with documentation addresses or runtime configuration | Remove private topology |
 | SQLite, Notebook, and structured data | Retain structure while clearing real rows, output, execution counts, and metadata | Remove and document the replacement |
 | ZIP | Recursively sanitize within bounded limits and repack deterministically | Remove and repair references |
-| Images, PDF, Office, media, and binaries | Retain only after complete transformation and rescan | Remove when optional; otherwise enter `needs_input` |
+| Images | Bounded decode, metadata removal, OCR and symbol inspection, and pixel redaction | Remove an optional object when parsing is incomplete |
+| PDF and Office | Strip PDF metadata, attachments, and annotations; clean Office properties and repack deterministically | Remove private or active optional content; otherwise enter `needs_input` |
+| Media and non-rebuildable binaries | Retain only an exact object backed by complete bound audit evidence | Remove when optional; otherwise enter `needs_input` |
 | Git LFS and submodules | Use a public replacement, safe entity, or explicitly optional removal | Remove pointer, matching rule, and private configuration |
 | Legal and attribution files | Preserve text and verify rights | Enter `needs_input` for a private match or unknown rights |
 
 Table 4.1 Current transformation and safe fallback
 
-v2.0.0-beta.1 closes the loop for text, configuration, SQLite, Notebook, ZIP, optional opaque artifacts, LFS pointers, submodule configuration, and protected legal records; rich pixel-level and layout-preserving document rebuilds remain incomplete
+The RC hardening branch covers text, configuration, SQLite, Notebook, ZIP, images, PDF, Office, fonts, WASM, optional opaque artifacts, LFS pointers, submodule configuration, and protected legal records; layout-preserving PDF text rebuild and media-content rebuild remain outside the completed boundary
 
 ## 5. Git history strategies
 
@@ -121,11 +131,11 @@ Ordinary `run` refuses `history-migration`; rewriting cannot retract old clones 
 
 ## 6. Isolation, certification, and trusted publication
 
-Functional validation uses a digest-pinned image; the current live canary uses `alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce`
+Functional validation uses a digest-pinned image and a numeric non-root user
 
 The container has no network, a read-only root and candidate mount, no Linux capabilities, `no-new-privileges`, bounded processes, memory, CPU and temporary space, no Docker socket, and no GitHub, SSH, cloud, or private-policy environment variables
 
-Ed25519 certification binds the candidate tree, policy, tool version, validation, degradation, target, branch, and expected base; the publisher accepts only a preconfigured public-key fingerprint
+Ed25519 certification binds the candidate commit, tree, index, patch, policy, Gitleaks runtime, validation, object coverage, degradation, target, branch, expected base, and authorization receipt; Windows protects the private key with the current-user data protection interface
 
 The publisher never runs project code or reads source values; it performs Git reads, a non-force push, and remote object verification, then writes a private in-toto Statement with an SLSA Verification Summary predicate
 
@@ -139,12 +149,13 @@ See [recovery](references/recovery.md), [private policy](references/private-poli
 
 ## 8. Verification status
 
-The current Windows run completed 134 tests with 0 failures on 2026-08-31; the total contains 119 frozen gate and documentation regressions, 14 new v2 behavior tests, and 1 live WSL Docker isolation canary
+The current Windows regression contains 159 test cases: 158 passed, 0 failed, and 1 live container canary was skipped because the isolation backend was unavailable; this proves the runnable code regression, but it does not certify the RC or the three real pilots
 
 ```powershell
 $env:SAFE_PUBLISH_LIVE_CONTAINER='1' # Enables the live container attack canary instead of counting it as skipped
 python -m compileall -q src scripts tests # Verifies that Python sources compile
-python -X utf8 -m unittest discover -s tests -v # Runs v1 compatibility, v2 transformation, publication, recovery, documentation, and live isolation tests
+python -W error::ResourceWarning -m pytest -q # Runs v1 compatibility, v2 transformation, publication, recovery, documentation, and live isolation tests
+python -m ruff check . # Checks dead imports and unsafe shorthand
 ```
 
 Certification does not claim absolute de-identification; it only proves that one exact candidate passed one fixed policy, tool set, coverage declaration, and functional contract

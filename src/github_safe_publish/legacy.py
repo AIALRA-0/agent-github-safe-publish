@@ -1221,7 +1221,6 @@ def scan_text(state: ScanState, text: str, *, surface: str, object_id: str, disp
     state.register_object(object_id, text.encode("utf-8"))
     legal = is_legal_path(display_path)
     newlines: array[int] | None = None
-    lowered = text.lower()
     private_aialra = any(rule.rule_id != "identity.aialra" and rule.pattern.pattern == re.escape("AIALRA") for rule in state._private_rules)
     generic_rules = tuple(rule for rule in GENERIC_RULES if not (private_aialra and rule.rule_id == "identity.aialra"))
     for rule in (*generic_rules, *state._private_rules):
