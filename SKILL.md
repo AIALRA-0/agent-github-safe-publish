@@ -7,7 +7,7 @@ description: Audit, sanitize, and gate repository content before it is sent to G
 
 Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits fixed-matrix noncritical risk while preserving it in the report. Keep periodic exposure discovery separate from the exact gate for an intended publication
 
-Stable interface version: `1.1.6`. Resume feature development only for a critical miss, security or parser incompatibility, damaged report or checkpoint migration, or a reproducible incorrect publication decision
+Stable legacy interface version: `1.1.7`. This freeze disables legacy automatic merge while version 2 replaces gate-first behavior with safe-candidate remediation, certification, and publication
 
 ## 1. Mandatory publication boundary
 
@@ -94,8 +94,8 @@ The local trusted gate is authoritative until a separately approved trusted exec
 
 - Use a pull request by default and never use an administrator bypass
 - Push directly to the default branch only when the current user explicitly requests that exact route, the update is fast-forward, the exact gate permits publication, and required repository checks have passed
-- `allow_with_risk` may create a pull request after explicit authorization, but it never auto-merges
-- `allow` may auto-merge only when project checks, README checks, an unchanged base, an exact remote tree match, and required branch governance all pass
+- `allow` and `allow_with_risk` may create a pull request after explicit authorization, but the legacy command never merges it automatically
+- Use the version 2 trusted publisher only after a candidate receives a bound safety certification and the original publication authorization remains valid
 - Missing branch protection or required checks returns `BRANCH_PROTECTION_MISSING` and leaves the pull request for review
 - A resumed run must recompute all bound fingerprints; read [the recovery contract](references/recovery.md) before retrying a partial remote operation
 - A scanner crash or missing gate report must atomically produce an `incomplete` checkpoint with `SCANNER_CRASHED` or `GATE_REPORT_MISSING`; it never terminates the batch or reuses a stale report

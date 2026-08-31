@@ -2,7 +2,7 @@
 
 ## 1. Storage boundary
 
-Keep `candidates.private.json`, the master policy, compiled repository policies, checkpoints, and detailed reports below `CODEX_HOME/private/github-safe-publish/`. Never commit, upload, paste, publicly summarize, or hash raw candidate values into public artifacts
+Keep `candidates.private.json`, the master policy, compiled repository policies, checkpoints, and detailed reports below the private root. The default is `CODEX_HOME/private/github-safe-publish/`; a local operator may set `SAFE_PUBLISH_PRIVATE_ROOT` to an absolute repository-external directory when storage policy requires another private volume. Never commit, upload, paste, publicly summarize, or hash raw candidate values into public artifacts
 
 The gate rejects a policy located inside the source repository. Repository-controlled files cannot add approvals, replacements, or exceptions
 
@@ -14,7 +14,7 @@ Each identifier has `id`, `kind`, `value`, `severity`, `normalization`, and `sco
 
 Each binary approval contains `object`, `sha256`, `approved_by`, `reason`, `inspection_layers`, `tool_versions`, and `review_trigger`. A changed object digest, scanner version, declared inspection layer, or review trigger requires renewed approval
 
-Approved locations and exceptions target exact object identifiers and reject wildcards. Exceptions also require a rule ID, approver, reason, expiry, and review trigger
+Approved locations and exceptions target exact object identifiers and reject wildcards. An approved location becomes active only when it also binds the exact object SHA-256, scanner SHA-256, policy SHA-256, approver, reason, issue time, expiry time, and the `content-policy-scanner-or-expiry-change` review trigger. Missing or changed evidence keeps the finding visible. Exceptions also require a rule ID, approver, reason, expiry, and review trigger
 
 Each risk acceptance requires `repository`, `rule_id`, `object`, `object_sha256`, `scanner_sha256`, `approved_by`, `reason`, `expires_at`, and the exact `content-or-scanner-change` review trigger. It may target only a rule in the fixed noncritical matrix. A wildcard, critical rule, expired approval, changed object digest, or changed scanner digest is inactive
 

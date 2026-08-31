@@ -31,6 +31,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -60,8 +61,16 @@ warnings.filterwarnings(
 
 SCHEMA_VERSION = 3
 SUPPORTED_POLICY_VERSIONS = {1, 2, 3}
-TOOL_VERSION = "1.1.6"
+TOOL_VERSION = "1.1.7"
 GITLEAKS_VERSION = "8.30.1"
+GITLEAKS_ARCHIVE_SHA256 = {
+    "gitleaks_8.30.1_darwin_arm64.tar.gz": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "gitleaks_8.30.1_darwin_x64.tar.gz": "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709",
+    "gitleaks_8.30.1_linux_arm64.tar.gz": "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080",
+    "gitleaks_8.30.1_linux_x64.tar.gz": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+    "gitleaks_8.30.1_windows_arm64.zip": "b95f5e4f5c425cedca7ee203d9afd29597e692c4924a12ed42f970537c72cc0f",
+    "gitleaks_8.30.1_windows_x64.zip": "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e",
+}
 MAX_SECRET_BYTES = 48 * 1024
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
 DEFAULT_IMAGE_OCR_BUDGET_SECONDS = 300
@@ -95,6 +104,10 @@ IMAGE_EXTRACTION_CACHE: dict[str, tuple[list[tuple[str, str]], set[str], list[tu
 RESTRICTED_PRIVATE_PATHS: set[str] = set()
 IN_ARTIFACT_WORKER = False
 PRIVATE_ROOT_OVERRIDE: Path | None = None
+
+
+class BoundedReadExceeded(RuntimeError):
+    """Raised before an object larger than the declared in-memory limit is returned."""
 
 
 class SameOriginLinkParser(HTMLParser):
@@ -339,6 +352,7 @@ def run(
     input_data: bytes | str | None = None,
     timeout_seconds: int | None = None,
     env: dict[str, str] | None = None,
+    inherit_env: bool = True,
 ) -> subprocess.CompletedProcess[Any]:
     """Run a child process without inheriting output that could contain a match."""
     options: dict[str, Any] = {
@@ -349,7 +363,7 @@ def run(
         "text": text,
         "check": False,
         "timeout": timeout_seconds,
-        "env": {**os.environ, **env} if env else None,
+        "env": ({**os.environ, **(env or {})} if inherit_env else dict(env or {})),
     }
     if text:
         options["encoding"] = "utf-8"
@@ -370,6 +384,9 @@ def get_codex_home() -> Path:
 def private_root() -> Path:
     if PRIVATE_ROOT_OVERRIDE is not None:
         return PRIVATE_ROOT_OVERRIDE
+    configured = os.environ.get("SAFE_PUBLISH_PRIVATE_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
     return (get_codex_home() / "private" / "github-safe-publish").resolve()
 
 
@@ -388,8 +405,8 @@ def ensure_private_path(path: Path) -> Path:
 def restrict_private_path(path: Path, *, directory: bool = False) -> None:
     try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | (stat.S_IXUSR if directory else 0))
-    except OSError:
-        pass
+    except OSError as exc:
+        raise RuntimeError("Private path permissions could not be restricted") from exc
     if os.name == "nt":
         cache_key = os.path.normcase(str(path.resolve()))
         if cache_key in RESTRICTED_PRIVATE_PATHS:
@@ -421,10 +438,62 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_file_bounded(path: Path, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> bytes:
+    """Read at most max_bytes and reject size races without allocating the whole object."""
+    if path.stat().st_size > max_bytes:
+        raise BoundedReadExceeded("Object exceeds the bounded read limit")
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise BoundedReadExceeded("Object exceeds the bounded read limit")
+    return data
+
+
+def read_stream_exact_bounded(handle: Any, size: int, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> bytes | None:
+    """Consume exactly size bytes while allocating only objects within the declared limit."""
+    remaining = max(0, size)
+    if size > max_bytes:
+        while remaining:
+            chunk = handle.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise EOFError("Object stream ended before the declared size")
+            remaining -= len(chunk)
+        return None
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = handle.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise EOFError("Object stream ended before the declared size")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def policy_fingerprint(policy: dict[str, Any] | None) -> str | None:
     if policy is None:
         return None
     encoded = json.dumps(policy, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(encoded)
+
+
+def approval_policy_fingerprint(policy: dict[str, Any]) -> str:
+    """Bind approvals to policy content without creating a self-referential digest."""
+    normalized = json.loads(json.dumps(policy))
+    for approval in normalized.get("approved_locations", []):
+        if isinstance(approval, dict):
+            approval.pop("policy_sha256", None)
+    encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256_bytes(encoded)
 
 
@@ -493,6 +562,8 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item["value"], str) or not item["value"]:
             raise ValueError("Identifier values must be non-empty strings")
         if item["kind"] == "regex":
+            if not private_regex_is_safe(item["value"]):
+                raise ValueError("Private identifier regex uses an unsafe construct")
             compiled = re.compile(item["value"])
             if compiled.match(""):
                 raise ValueError("Private identifier regex cannot match an empty string")
@@ -513,6 +584,27 @@ def validate_policy(policy: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Each approved location requires rule_id, object, approved_by, and reason")
         if any(symbol in approval["object"] for symbol in "*?"):
             raise ValueError("Approved locations must be exact and cannot contain wildcards")
+        evidence_fields = {
+            "object_sha256",
+            "scanner_sha256",
+            "policy_sha256",
+            "issued_at",
+            "expires_at",
+            "review_trigger",
+        }
+        present_evidence = evidence_fields.intersection(approval)
+        if present_evidence and present_evidence != evidence_fields:
+            raise ValueError("Approved location evidence must be complete")
+        if present_evidence:
+            if not all(isinstance(approval[field], str) and approval[field] for field in evidence_fields):
+                raise ValueError("Approved location evidence fields must be non-empty strings")
+            for field in ("object_sha256", "scanner_sha256", "policy_sha256"):
+                if not re.fullmatch(r"[0-9a-f]{64}", approval[field]):
+                    raise ValueError("Approved location evidence digest is invalid")
+            if approval["review_trigger"] != "content-policy-scanner-or-expiry-change":
+                raise ValueError("Approved location review trigger is invalid")
+            dt.datetime.fromisoformat(approval["issued_at"].replace("Z", "+00:00"))
+            dt.datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
 
     for approval in policy["binary_approvals"]:
         required_binary = {"object", "sha256", "approved_by", "reason", "inspection_layers", "tool_versions", "review_trigger"}
@@ -678,7 +770,7 @@ class ScanState:
         self._raw_candidate_total = 0
         self._private_rule_config: dict[str, dict[str, Any]] = {}
         self.object_sha256: dict[str, str] = {}
-        self.scanner_sha256 = sha256_bytes(Path(__file__).read_bytes())
+        self.scanner_sha256 = sha256_file(Path(__file__))
         try:
             budget = int(os.environ.get("SAFE_PUBLISH_IMAGE_OCR_BUDGET_SECONDS", DEFAULT_IMAGE_OCR_BUDGET_SECONDS))
         except ValueError:
@@ -720,7 +812,11 @@ class ScanState:
 
     def _handling_status(self, rule_id: str, object_id: str, severity: str, legal: bool) -> tuple[str, str]:
         for approval in self.policy["approved_locations"]:
-            if approval["rule_id"] == rule_id and approval["object"] == object_id:
+            if (
+                approval["rule_id"] == rule_id
+                and approval["object"] == object_id
+                and self._approved_location_evidence_is_current(approval, object_id)
+            ):
                 return severity, "approved"
         if legal:
             return "review", "review"
@@ -738,6 +834,34 @@ class ScanState:
                 if expires > now:
                     return severity, "excepted"
         return severity, severity
+
+    def _approved_location_evidence_is_current(self, approval: dict[str, Any], object_id: str) -> bool:
+        required = {
+            "object_sha256",
+            "scanner_sha256",
+            "policy_sha256",
+            "issued_at",
+            "expires_at",
+            "review_trigger",
+        }
+        if not required.issubset(approval):
+            return False
+        if approval["object_sha256"] != self.object_sha256.get(object_id):
+            return False
+        if approval["scanner_sha256"] != self.scanner_sha256:
+            return False
+        if approval["policy_sha256"] != approval_policy_fingerprint(self.policy):
+            return False
+        if approval["review_trigger"] != "content-policy-scanner-or-expiry-change":
+            return False
+        now = dt.datetime.now(dt.timezone.utc)
+        issued = dt.datetime.fromisoformat(approval["issued_at"].replace("Z", "+00:00"))
+        expires = dt.datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
+        if issued.tzinfo is None:
+            issued = issued.replace(tzinfo=dt.timezone.utc)
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=dt.timezone.utc)
+        return issued <= now < expires
 
     def add_finding(
         self,
@@ -838,24 +962,37 @@ def line_and_column(newlines: array[int], offset: int) -> tuple[int, int]:
 
 
 def is_placeholder(value: str) -> bool:
-    normalized = value.strip().strip("{}[]()<>").lower()
+    stripped = value.strip()
+    normalized = stripped.strip("{}[]()<>").lower()
     if normalized in PLACEHOLDER_VALUES:
         return True
-    if value.strip().startswith(("${", "$env:", "%")):
+    if re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", stripped):
         return True
-    return any(
-        token in normalized
-        for token in (
-            "example",
-            "placeholder",
-            "redacted",
-            "change-me",
-            "changeme",
-            "replace_me",
-            "replace-me",
-            "your_",
+    if re.fullmatch(r"(?i)\$env:[A-Za-z_][A-Za-z0-9_]*", stripped):
+        return True
+    if re.fullmatch(r"%[A-Za-z_][A-Za-z0-9_]*%", stripped):
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?i)(?:example|placeholder|redacted|change[-_]?me|replace[-_]?me|your[-_][A-Za-z0-9_-]+)(?:[-_](?:password|secret|token|key))?",
+            normalized,
         )
     )
+
+
+def private_regex_is_safe(expression: str) -> bool:
+    """Reject constructs with unbounded or context-dependent worst-case behavior."""
+    if len(expression) > 4096 or "\x00" in expression:
+        return False
+    if re.search(r"\\[1-9]", expression):
+        return False
+    if re.search(r"\(\?(?:[=!]|<[=!]|P=|\()", expression):
+        return False
+    if re.search(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]", expression):
+        return False
+    if re.search(r"\((?:\.\*|\.\+|\[[^\]]+\][+*])\)[+*{]", expression):
+        return False
+    return True
 
 
 SOURCE_CODE_SUFFIXES = {
@@ -905,8 +1042,6 @@ def is_nonliteral_credential_assignment(match: re.Match[str], text: str, display
         return True
     raw_start = match.start(1)
     quoted = raw_start > 0 and text[raw_start - 1] in {"'", '"'}
-    if is_synthetic_path(display_path):
-        return True
     suffix = Path(display_path.split("!", 1)[0]).suffix.lower()
     name = Path(display_path.split("!", 1)[0]).name.lower()
     if suffix in SOURCE_CODE_SUFFIXES and "scan" in name and re.search(r"[\[\]\\^$*+?{}()]", raw):
@@ -1870,7 +2005,13 @@ def scan_media_content(state: ScanState, data: bytes, *, surface: str, object_id
             if dumped.returncode != 0 or len(attachments) < len(attachment_streams):
                 state.add_coverage("media-attachments", "unreadable", f"attachment-extraction-failed:{object_id}")
             for index, attachment in enumerate(attachments):
-                scan_bytes(state, attachment.read_bytes(), surface="media-attachments", object_id=f"{object_id}:attachment:{index}", display_path=f"{display_path}!{attachment.name}")
+                attachment_object = f"{object_id}:attachment:{index}"
+                try:
+                    attachment_data = read_file_bounded(attachment)
+                except BoundedReadExceeded:
+                    state.add_coverage("media-attachments", "unreadable", f"oversized-object:{attachment_object}")
+                    continue
+                scan_bytes(state, attachment_data, surface="media-attachments", object_id=attachment_object, display_path=f"{display_path}!{attachment.name}")
             if attachments:
                 state.add_coverage("media-attachments", "checked", object_count=len(attachments))
 
@@ -2223,7 +2364,7 @@ def _scan_working_tree_slice(
             elif path.is_symlink():
                 kind, digest = "symlink", sha256_bytes(os.readlink(path).encode("utf-8", errors="surrogateescape"))
             else:
-                kind, digest = "file", sha256_bytes(path.read_bytes())
+                kind, digest = "file", sha256_file(path)
             entries.append((relative, path, kind, digest))
         except (OSError, PermissionError):
             state.add_coverage("working-tree", "permission_denied", f"file-inventory-unreadable:{relative}")
@@ -2344,7 +2485,13 @@ def _scan_working_tree_slice(
                 except ValueError:
                     work_state.add_coverage("working-tree", "unreadable", f"external-symlink:{object_id}")
             else:
-                scan_bytes_bounded(work_state, path.read_bytes(), surface="working-tree", object_id=object_id, display_path=relative)
+                try:
+                    file_data = read_file_bounded(path)
+                except BoundedReadExceeded:
+                    work_state.add_coverage("working-tree", "unreadable", f"oversized-object:{object_id}")
+                    next_file_index = index + 1
+                    continue
+                scan_bytes_bounded(work_state, file_data, surface="working-tree", object_id=object_id, display_path=relative)
             transient = [
                 item for item in work_state.coverage[coverage_start:]
                 if item.reason.startswith((
@@ -2615,12 +2762,43 @@ def history_checkpoint_binding(
     }
 
 
+def git_blob_path_contexts(source: Path, *, timeout_seconds: int | None = None) -> dict[str, set[str]]:
+    """Return every historical path observed for each blob instead of Git's single display hint."""
+    result = run(
+        ["git", "log", "--all", "--raw", "--no-abbrev", "--format=", "--no-renames", "-z"],
+        source,
+        text=False,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Git blob path contexts are unavailable")
+    contexts: dict[str, set[str]] = {}
+    tokens = result.stdout.split(b"\x00")
+    index = 0
+    header_pattern = re.compile(rb"^:\d{6} \d{6} ([0-9a-f]+) ([0-9a-f]+) [A-Z][0-9]*$")
+    while index < len(tokens):
+        header = tokens[index]
+        index += 1
+        if not header:
+            continue
+        match = header_pattern.match(header)
+        if match is None or index >= len(tokens):
+            continue
+        path = tokens[index].decode("utf-8", errors="replace")
+        index += 1
+        for oid_raw in match.groups():
+            oid = oid_raw.decode("ascii", errors="ignore")
+            if oid and set(oid) != {"0"}:
+                contexts.setdefault(oid, set()).add(path)
+    return contexts
+
+
 def ocr_checkpoint_binding(repository: str, source: Path, policy: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "ocr_checkpoint_schema_version": OCR_CHECKPOINT_SCHEMA_VERSION,
         "repository": repository,
         "source_commit": git_head(source),
-        "scanner_sha256": sha256_bytes(Path(__file__).read_bytes()),
+        "scanner_sha256": sha256_file(Path(__file__)),
         "policy_fingerprint": policy_fingerprint(policy),
     }
 
@@ -2747,6 +2925,11 @@ def _scan_git_history_slice(
     if objects.returncode != 0:
         state.add_coverage("git-history", "tool_failed", "git-object-enumeration-failed")
         return
+    try:
+        blob_paths = git_blob_path_contexts(source, timeout_seconds=inventory_timeout)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        state.add_coverage("git-history", "tool_failed", "git-blob-path-context-enumeration-failed")
+        return
     object_entries: list[tuple[str, str]] = []
     for line in objects.stdout.splitlines():
         if not line:
@@ -2853,8 +3036,16 @@ def _scan_git_history_slice(
                     except ValueError:
                         history_state.add_coverage("git-history", "tool_failed", f"git-object-header-invalid:{oid}")
                         size = 0
-                    content = process.stdout.read(size)
+                    if object_type in {"commit", "tag", "blob"}:
+                        content = read_stream_exact_bounded(process.stdout, size)
+                    else:
+                        content = read_stream_exact_bounded(process.stdout, size, 0)
                     process.stdout.read(1)
+                    if content is None:
+                        if object_type in {"commit", "tag", "blob"}:
+                            history_state.add_coverage("git-history", "unreadable", f"oversized-object:git:{oid}")
+                        next_object_index = index + 1
+                        continue
                     if object_type in {"commit", "tag"}:
                         scan_text(
                             history_state,
@@ -2865,15 +3056,16 @@ def _scan_git_history_slice(
                         )
                     elif object_type == "blob":
                         blob_count += 1
-                        display = path or f"blob-{oid[:12]}"
+                        displays = sorted(blob_paths.get(oid) or {path or f"blob-{oid[:12]}"})
                         coverage_start = len(history_state.coverage)
-                        scan_bytes_bounded(
-                            history_state,
-                            content,
-                            surface="git-history",
-                            object_id=f"git:{oid}:{display}",
-                            display_path=display,
-                        )
+                        for display in displays:
+                            scan_bytes_bounded(
+                                history_state,
+                                content,
+                                surface="git-history",
+                                object_id=f"git:{oid}:{display}",
+                                display_path=display,
+                            )
                         transient_ocr_gaps = [
                             item
                             for item in history_state.coverage[coverage_start:]
@@ -3161,13 +3353,12 @@ def scan_lfs(state: ScanState, source: Path, *, fetch: bool = False) -> None:
         if not object_path.exists():
             missing += 1
             continue
-        scan_bytes(
-            state,
-            object_path.read_bytes(),
-            surface="git-lfs",
-            object_id=f"lfs:{oid}:{path}",
-            display_path=path,
-        )
+        try:
+            object_data = read_file_bounded(object_path)
+        except BoundedReadExceeded:
+            state.add_coverage("git-lfs", "unreadable", f"oversized-object:lfs:{oid}:{path}")
+            continue
+        scan_bytes(state, object_data, surface="git-lfs", object_id=f"lfs:{oid}:{path}", display_path=path)
     if missing:
         state.add_coverage("git-lfs", "unreadable", "missing-lfs-objects", len(entries))
     else:
@@ -3187,28 +3378,63 @@ def gitleaks_asset_name() -> tuple[str, str]:
     raise RuntimeError("Unsupported Gitleaks platform")
 
 
+def cached_gitleaks_is_verified(
+    executable: Path,
+    receipt: Path,
+    *,
+    archive: Path | None = None,
+    asset_name: str | None = None,
+    expected_archive_sha256: str | None = None,
+) -> bool:
+    try:
+        document = json.loads(receipt.read_text(encoding="utf-8"))
+        if document.get("version") != GITLEAKS_VERSION:
+            return False
+        if document.get("executable_sha256") != sha256_file(executable):
+            return False
+        if asset_name is not None and document.get("asset_name") != asset_name:
+            return False
+        if expected_archive_sha256 is not None:
+            if document.get("archive_sha256") != expected_archive_sha256:
+                return False
+            if archive is None or sha256_file(archive) != expected_archive_sha256:
+                return False
+        return True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def ensure_gitleaks() -> Path:
     asset_name, executable_name = gitleaks_asset_name()
+    expected = GITLEAKS_ARCHIVE_SHA256.get(asset_name)
+    if expected is None:
+        raise RuntimeError("Gitleaks platform archive is not locked")
     cache = get_codex_home() / "cache" / "github-safe-publish" / f"gitleaks-{GITLEAKS_VERSION}"
     executable = cache / executable_name
-    if executable.exists():
+    archive_path = cache / asset_name
+    receipt_path = cache / "gitleaks.verified.json"
+    if executable.exists() and cached_gitleaks_is_verified(
+        executable,
+        receipt_path,
+        archive=archive_path,
+        asset_name=asset_name,
+        expected_archive_sha256=expected,
+    ):
         return executable
     cache.mkdir(parents=True, exist_ok=True)
     base = f"https://github.com/gitleaks/gitleaks/releases/download/v{GITLEAKS_VERSION}"
-    archive_path = cache / asset_name
-    checksums_path = cache / "gitleaks_checksums.txt"
     request_headers = {"User-Agent": "github-safe-publish"}
-    for url, destination in ((f"{base}/{asset_name}", archive_path), (f"{base}/gitleaks_{GITLEAKS_VERSION}_checksums.txt", checksums_path)):
+    if not archive_path.exists() or sha256_file(archive_path) != expected:
+        temporary_archive = cache / f".{asset_name}.download"
+        url = f"{base}/{asset_name}"
         with urllib.request.urlopen(urllib.request.Request(url, headers=request_headers), timeout=120) as response:
-            data = response.read()
-        destination.write_bytes(data)
-    expected: str | None = None
-    for line in checksums_path.read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[-1].lstrip("*") == asset_name:
-            expected = fields[0].lower()
-            break
-    if expected is None or sha256_bytes(archive_path.read_bytes()) != expected:
+            with temporary_archive.open("wb") as handle:
+                shutil.copyfileobj(response, handle, length=1024 * 1024)
+        if sha256_file(temporary_archive) != expected:
+            temporary_archive.unlink(missing_ok=True)
+            raise RuntimeError("Gitleaks release checksum verification failed")
+        os.replace(temporary_archive, archive_path)
+    if sha256_file(archive_path) != expected:
         raise RuntimeError("Gitleaks release checksum verification failed")
     if asset_name.endswith(".zip"):
         with zipfile.ZipFile(archive_path) as archive:
@@ -3222,6 +3448,15 @@ def ensure_gitleaks() -> Path:
             archive.extract(member, cache, filter="data")
     if os.name != "nt":
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    write_json(
+        receipt_path,
+        {
+            "version": GITLEAKS_VERSION,
+            "asset_name": asset_name,
+            "archive_sha256": expected,
+            "executable_sha256": sha256_file(executable),
+        },
+    )
     return executable
 
 
@@ -3236,10 +3471,25 @@ def stable_gitleaks_object_id(source: Path, commit: str, path: str) -> str | Non
     worktree_path = source / Path(normalized_path)
     try:
         if worktree_path.is_file():
-            return f"gitleaks-worktree:{sha256_bytes(worktree_path.read_bytes())}:{normalized_path}"
+            return f"gitleaks-worktree:{sha256_file(worktree_path)}:{normalized_path}"
     except OSError:
         pass
     return None
+
+
+def bind_gitleaks_object_digest(state: ScanState, object_id: str) -> bool:
+    """Reuse the independently scanned object digest for an exact Gitleaks approval."""
+    blob_match = re.fullmatch(r"gitleaks-blob:([0-9a-f]{40,64}):(.+)", object_id)
+    if blob_match:
+        history_object = f"git:{blob_match.group(1)}:{blob_match.group(2)}"
+        digest = state.object_sha256.get(history_object)
+    else:
+        worktree_match = re.fullmatch(r"gitleaks-worktree:([0-9a-f]{64}):(.+)", object_id)
+        digest = worktree_match.group(1) if worktree_match else None
+    if not digest:
+        return False
+    state.object_sha256[object_id] = digest
+    return True
 
 
 def run_gitleaks(state: ScanState, source: Path, binary: Path | None = None) -> None:
@@ -3248,7 +3498,7 @@ def run_gitleaks(state: ScanState, source: Path, binary: Path | None = None) -> 
     except Exception:
         state.add_coverage("gitleaks", "tool_failed", "gitleaks-install-or-verification-failed")
         return
-    executable_key = f"{executable.resolve()}:{sha256_bytes(executable.read_bytes())}"
+    executable_key = f"{executable.resolve()}:{sha256_file(executable)}"
     if executable_key not in VERIFIED_GITLEAKS:
         with tempfile.TemporaryDirectory(prefix="safe-publish-gitleaks-canary-") as canary_temporary:
             canary_root = Path(canary_temporary)
@@ -3313,6 +3563,8 @@ def run_gitleaks(state: ScanState, source: Path, binary: Path | None = None) -> 
             if object_id is None:
                 state.add_coverage("gitleaks", "unreadable", "gitleaks-object-binding-failed")
                 object_id = f"gitleaks-unbound:{path}"
+            elif not bind_gitleaks_object_digest(state, object_id):
+                state.add_coverage("gitleaks", "unreadable", "gitleaks-object-digest-binding-failed")
             state.add_finding(
                 surface="gitleaks",
                 object_id=object_id,
@@ -3526,7 +3778,7 @@ def gate_report(
         "source_commit": git_head(source),
         "scanner_versions": {
             "safe_publish": "3",
-            "safe_publish_sha256": sha256_bytes(Path(__file__).read_bytes()),
+            "safe_publish_sha256": sha256_file(Path(__file__)),
             "image_ocr_budget_seconds": state.image_ocr_budget_seconds,
             "gitleaks": GITLEAKS_VERSION,
             "python": platform.python_version(),
@@ -3561,8 +3813,10 @@ def scan_release_paths(state: ScanState, release_paths: list[Path]) -> None:
     for path in release_paths:
         object_id = f"release:proposed:{path.name}"
         try:
-            scan_bytes(state, path.read_bytes(), surface="release-assets", object_id=object_id, display_path=path.name)
+            scan_bytes(state, read_file_bounded(path), surface="release-assets", object_id=object_id, display_path=path.name)
             checked += 1
+        except BoundedReadExceeded:
+            state.add_coverage("release-assets", "unreadable", f"oversized-object:{object_id}")
         except (OSError, PermissionError):
             state.add_coverage("release-assets", "permission_denied", f"release-asset-unreadable:{object_id}")
     state.add_coverage("release-assets", "checked", object_count=checked)
@@ -3837,6 +4091,11 @@ def copy_worktree_candidate(source: Path, base_commit: str, destination: Path) -
             target.symlink_to(os.readlink(source_path))
         else:
             shutil.copy2(source_path, target)
+    return fingerprint_candidate(destination, base_commit)
+
+
+def fingerprint_candidate(destination: Path, base_commit: str) -> tuple[str, str, str]:
+    """Bind the current candidate tree, index, and patch after staging all candidate changes."""
     staged = run(["git", "add", "-A"], destination)
     if staged.returncode != 0:
         raise RuntimeError("Unable to stage the isolated candidate")
@@ -3846,6 +4105,36 @@ def copy_worktree_candidate(source: Path, base_commit: str, destination: Path) -
     if tree.returncode != 0 or index.returncode != 0 or patch.returncode != 0:
         raise RuntimeError("Unable to fingerprint the isolated candidate")
     return tree.stdout.strip(), sha256_bytes(index.stdout), sha256_bytes(patch.stdout)
+
+
+def sanitized_validation_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Remove publication, cloud, SSH, and private-policy credentials from project validation."""
+    original = dict(source or os.environ)
+    exact = {
+        "CODEX_HOME",
+        "DOCKER_AUTH_CONFIG",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "KUBECONFIG",
+        "SSH_AGENT_PID",
+        "SSH_AUTH_SOCK",
+    }
+    prefixes = (
+        "AWS_",
+        "AZURE_",
+        "GCP_",
+        "GH_",
+        "GITHUB_",
+        "GOOGLE_CLOUD_",
+        "SAFE_PUBLISH_",
+    )
+    sensitive_fragments = ("ACCESS_KEY", "API_KEY", "CLIENT_SECRET", "CREDENTIAL", "PASSWORD", "PRIVATE_KEY", "TOKEN")
+    return {
+        name: value
+        for name, value in original.items()
+        if name.upper() not in exact
+        and not name.upper().startswith(prefixes)
+        and not any(fragment in name.upper() for fragment in sensitive_fragments)
+    }
 
 
 def run_validation_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
@@ -3870,7 +4159,13 @@ def run_validation_command(command: str, cwd: Path, timeout_seconds: int) -> dic
     else:
         shell_command = ["bash", "-lc", command]
     try:
-        result = run(shell_command, cwd, timeout_seconds=timeout_seconds)
+        result = run(
+            shell_command,
+            cwd,
+            timeout_seconds=timeout_seconds,
+            env=sanitized_validation_environment(),
+            inherit_env=False,
+        )
         status = "pass" if result.returncode == 0 else "fail"
         exit_code: int | None = int(result.returncode)
     except subprocess.TimeoutExpired:
@@ -4010,6 +4305,16 @@ def command_managed_publish(args: argparse.Namespace) -> int:
     if args.readme_auditor:
         auditor = Path(args.readme_auditor).expanduser().resolve()
         validations.append(run_validation_command(f'python -X utf8 "{auditor}" "{candidate}" --scan-repository', candidate, args.validation_timeout_seconds))
+    post_validation_fingerprint = fingerprint_candidate(candidate, base_commit)
+    if post_validation_fingerprint != (tree_oid, tree_sha256, patch_sha256):
+        validations.append(
+            {
+                "status": "fail",
+                "exit_code": None,
+                "duration_seconds": 0.0,
+                "reason": "candidate-mutated-during-validation",
+            }
+        )
     validation_passed = all(item["status"] == "pass" for item in validations)
     if runtime["decision"] != "pass" or not validation_passed:
         checkpoint = {
@@ -4019,7 +4324,7 @@ def command_managed_publish(args: argparse.Namespace) -> int:
             "candidate_tree_oid": tree_oid,
             "candidate_tree_sha256": tree_sha256,
             "patch_sha256": patch_sha256,
-            "scanner_sha256": sha256_bytes(Path(__file__).read_bytes()),
+            "scanner_sha256": sha256_file(Path(__file__)),
             "policy_fingerprint": policy_fingerprint(policy),
             "runtime_fingerprint": runtime["fingerprint"],
             "validation": validations,
@@ -4167,34 +4472,9 @@ def command_managed_publish(args: argparse.Namespace) -> int:
             raise RuntimeError("Created pull request is unavailable")
         pr_number = lookup.stdout.strip()
     checkpoint.update({"state": "pr-created", "branch": branch, "pull_request": int(pr_number)})
-    if args.intent != "auto-merge" or publication_decision != "allow":
-        write_json(checkpoint_path, checkpoint, private=True)
-        update_managed_public_summary(args.public_summary, {"managed_state": "pr-created"})
-        print(json.dumps({"publication_decision": publication_decision, "state": "pr-created"}, sort_keys=True))
-        return 0
-    if not repository_has_required_governance(args.repository, default_branch):
-        checkpoint.update({"state": "review-required", "governance_issue": "BRANCH_PROTECTION_MISSING"})
-        write_json(checkpoint_path, checkpoint, private=True)
-        update_managed_public_summary(args.public_summary, {"managed_state": "review-required", "issue_codes": ["BRANCH_PROTECTION_MISSING"]})
-        print(json.dumps({"publication_decision": publication_decision, "state": "review-required", "issue_code": "BRANCH_PROTECTION_MISSING"}, sort_keys=True))
-        return 0
-    try:
-        checks = run(["gh", "pr", "checks", pr_number, "--repo", args.repository, "--required", "--watch", "--interval", "10"], timeout_seconds=args.checks_timeout_seconds)
-    except subprocess.TimeoutExpired:
-        checks = subprocess.CompletedProcess([], 1, "", "")
-    if checks.returncode != 0 or remote_branch_commit(args.repository, default_branch) != base_commit:
-        checkpoint["state"] = "review-required"
-        write_json(checkpoint_path, checkpoint, private=True)
-        update_managed_public_summary(args.public_summary, {"managed_state": "review-required"})
-        print(json.dumps({"publication_decision": publication_decision, "state": "review-required"}, sort_keys=True))
-        return 0
-    merged = run(["gh", "pr", "merge", pr_number, "--repo", args.repository, "--squash", "--delete-branch"])
-    if merged.returncode != 0:
-        raise RuntimeError("Pull request merge failed")
-    checkpoint["state"] = "merged"
     write_json(checkpoint_path, checkpoint, private=True)
-    update_managed_public_summary(args.public_summary, {"managed_state": "merged"})
-    print(json.dumps({"publication_decision": publication_decision, "state": "merged"}, sort_keys=True))
+    update_managed_public_summary(args.public_summary, {"managed_state": "pr-created"})
+    print(json.dumps({"publication_decision": publication_decision, "state": "pr-created"}, sort_keys=True))
     return 0
 
 
@@ -4240,8 +4520,8 @@ def apply_replacements(destination: Path, policy: dict[str, Any]) -> dict[str, A
         if is_legal_path(relative) or path.is_symlink() or relative in gitlinks:
             continue
         try:
-            data = path.read_bytes()
-        except OSError:
+            data = read_file_bounded(path)
+        except (OSError, BoundedReadExceeded):
             continue
         text = decode_text(data)
         if text is None:
@@ -4435,29 +4715,98 @@ def api_items(endpoint: str, field: str | None = None) -> tuple[list[dict[str, A
 
 def gh_download(endpoint: str, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> tuple[bytes | None, str | None]:
     try:
-        result = run(
-            ["gh", "api", endpoint, "-H", "Accept: application/octet-stream"],
-            text=False,
-            timeout_seconds=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0:
-            lowered = result.stderr.decode("utf-8", errors="ignore").lower()
-            if "403" in lowered or "resource not accessible" in lowered:
-                return None, "permission_denied"
-            if "404" in lowered or "not found" in lowered or "410" in lowered:
-                return None, "not_present"
-            return None, "tool_failed"
-        if len(result.stdout) > max_bytes:
-            return None, "unreadable"
-        return result.stdout, None
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen(
+                ["gh", "api", endpoint, "-H", "Accept: application/octet-stream"],
+                stdout=output,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                _stdout, stderr = process.communicate(timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                return None, "tool_failed"
+            if process.returncode != 0:
+                lowered = (stderr or b"").decode("utf-8", errors="ignore").lower()
+                if "403" in lowered or "resource not accessible" in lowered:
+                    return None, "permission_denied"
+                if "404" in lowered or "not found" in lowered or "410" in lowered:
+                    return None, "not_present"
+                return None, "tool_failed"
+            size = output.tell()
+            if size > max_bytes:
+                return None, "unreadable"
+            output.seek(0)
+            return output.read(max_bytes + 1), None
     except (OSError, subprocess.SubprocessError):
         return None, "tool_failed"
 
 
+def public_url_is_safe(
+    url: str,
+    *,
+    resolver: Any | None = None,
+) -> bool:
+    """Allow only ordinary HTTP targets whose every resolved address is globally routable."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if port not in {80, 443}:
+            return False
+        if resolver is None:
+            records = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+            addresses = [record[4][0] for record in records]
+        else:
+            addresses = list(resolver(parsed.hostname, port))
+        if not addresses:
+            return False
+        for value in addresses:
+            address = ipaddress.ip_address(str(value).split("%", 1)[0])
+            if not address.is_global:
+                return False
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+class SafePublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Revalidate every redirect before urllib connects to its destination."""
+
+    def redirect_request(self, request: Any, fp: Any, code: int, message: str, headers: Any, new_url: str) -> Any:
+        if not public_url_is_safe(new_url):
+            raise urllib.error.HTTPError(new_url, 403, "Unsafe redirect target", headers, fp)
+        return super().redirect_request(request, fp, code, message, headers, new_url)
+
+
+def response_peer_is_safe(response: Any) -> bool:
+    """Best-effort verification of the connected peer after DNS resolution."""
+    candidates = (
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        getattr(getattr(response, "fp", None), "_sock", None),
+    )
+    for connection in candidates:
+        if connection is None:
+            continue
+        try:
+            address = ipaddress.ip_address(str(connection.getpeername()[0]).split("%", 1)[0])
+            return address.is_global
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+    return True
+
+
 def fetch_public_url(url: str, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> tuple[bytes | None, str | None, str]:
     try:
+        if not public_url_is_safe(url):
+            return None, "permission_denied", ""
         request = urllib.request.Request(url, headers={"User-Agent": "github-safe-publish/2"})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        opener = urllib.request.build_opener(SafePublicRedirectHandler())
+        with opener.open(request, timeout=30) as response:
+            if not public_url_is_safe(response.geturl()) or not response_peer_is_safe(response):
+                return None, "permission_denied", ""
             content_type = response.headers.get_content_type()
             chunks: list[bytes] = []
             total = 0
@@ -5155,7 +5504,7 @@ def command_audit_local(args: argparse.Namespace) -> int:
     candidates_output = ensure_private_path(Path(args.candidates_output))
     checkpoint = ensure_private_path(Path(args.checkpoint))
     policy = load_policy(Path(args.policy)) if args.policy else empty_policy()
-    current_scanner_hash = sha256_bytes(Path(__file__).read_bytes())
+    current_scanner_hash = sha256_file(Path(__file__))
     current_policy_fingerprint = policy_fingerprint(policy)
     database_path = candidates_output.with_suffix(".sqlite")
     database_preexisting = database_path.exists()
@@ -5295,9 +5644,11 @@ def command_audit_local(args: argparse.Namespace) -> int:
                 try:
                     state.raw_candidates.clear()
                     state._candidate_keys.clear()
-                    scan_bytes(state, path.read_bytes(), surface="saved-project", object_id=f"project:{index}:{relative}", display_path=relative)
+                    scan_bytes(state, read_file_bounded(path), surface="saved-project", object_id=f"project:{index}:{relative}", display_path=relative)
                     if store.add(state.raw_candidates, "saved-project"):
                         state.add_coverage("saved-project", "tool_failed", "private-candidate-store-limit-exceeded")
+                except BoundedReadExceeded:
+                    state.add_coverage("saved-project", "unreadable", f"oversized-object:project:{index}:{relative}")
                 except (OSError, PermissionError):
                     state.add_coverage("saved-project", "permission_denied", "project-file-unreadable")
             state.add_coverage("saved-project", "checked", object_count=file_count)
@@ -5375,7 +5726,7 @@ def command_audit_fleet(args: argparse.Namespace) -> int:
     candidates_output = ensure_private_path(Path(args.candidates_output))
     local_root = Path(args.local_root).expanduser().resolve() if args.local_root else None
     policy = load_policy(Path(args.policy)) if args.policy else empty_policy()
-    current_scanner_hash = sha256_bytes(Path(__file__).read_bytes())
+    current_scanner_hash = sha256_file(Path(__file__))
     current_policy_fingerprint = policy_fingerprint(policy)
     repos, error = gh_json("user/repos?affiliation=owner&per_page=100&sort=full_name")
     if error:
@@ -5654,7 +6005,7 @@ def build_parser() -> argparse.ArgumentParser:
     managed.add_argument("--validation-command", action="append", default=[])
     managed.add_argument("--validation-timeout-seconds", type=int, default=900)
     managed.add_argument("--checks-timeout-seconds", type=int, default=1800)
-    managed.add_argument("--intent", choices=("audit", "pr", "auto-merge"), default="audit")
+    managed.add_argument("--intent", choices=("audit", "pr"), default="audit", help="Legacy automatic merge is disabled; use the v2 trusted publisher for certified writes")
     managed.add_argument("--branch")
     managed.add_argument("--commit-message", default="chore: publish verified skill update")
     managed.add_argument("--pr-title", default="Publish verified skill update")

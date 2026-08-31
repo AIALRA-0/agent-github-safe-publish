@@ -43,6 +43,26 @@ def synthetic_policy() -> dict[str, object]:
     }
 
 
+def policy_with_bound_approvals(policy: dict[str, object], object_text: dict[str, str]) -> dict[str, object]:
+    migrated = subject.migrate_policy(policy)
+    scanner_sha256 = subject.sha256_file(Path(subject.__file__))
+    for approval in migrated["approved_locations"]:
+        approval.update(
+            {
+                "object_sha256": subject.sha256_bytes(object_text[approval["object"]].encode("utf-8")),
+                "scanner_sha256": scanner_sha256,
+                "policy_sha256": "0" * 64,
+                "issued_at": "2026-01-01T00:00:00+00:00",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "review_trigger": "content-policy-scanner-or-expiry-change",
+            }
+        )
+    policy_sha256 = subject.approval_policy_fingerprint(migrated)
+    for approval in migrated["approved_locations"]:
+        approval["policy_sha256"] = policy_sha256
+    return subject.validate_policy(migrated)
+
+
 class PatternTests(unittest.TestCase):
     def test_large_text_without_address_has_bounded_runtime(self) -> None:
         # Long address-like and unbroken lines previously exposed unbounded regex backtracking.
@@ -243,10 +263,10 @@ class PatternTests(unittest.TestCase):
             display_path="tests/test_config.py",
         )
         self.assertEqual(
-            {"credential.assignment-reference"},
+            {"credential.assignment"},
             {finding.rule_id for finding in fixture_state.findings},
         )
-        self.assertEqual("allow_with_risk", subject.publication_decision_for(fixture_state))
+        self.assertEqual("deny", subject.publication_decision_for(fixture_state))
 
         example_state = subject.ScanState("synthetic", subject.empty_policy())
         subject.scan_text(
@@ -256,7 +276,8 @@ class PatternTests(unittest.TestCase):
             object_id="working-tree:example-config",
             display_path="config.example.yaml",
         )
-        self.assertEqual([], example_state.findings)
+        self.assertEqual({"credential.assignment"}, {finding.rule_id for finding in example_state.findings})
+        self.assertEqual("deny", subject.publication_decision_for(example_state))
 
     def test_test_signed_urls_are_noncritical_but_runtime_signed_urls_block(self) -> None:
         marker = "https://storage.invalid/object?signature=SYNTHETIC_SIGNATURE_9472"
@@ -343,7 +364,7 @@ class PolicyTests(unittest.TestCase):
     def test_unicode_zero_width_and_encoded_private_literals_are_detected(self) -> None:
         policy = subject.validate_policy(synthetic_policy())
         policy["identifiers"][0]["normalization"] = ["nfkc", "casefold", "zero-width", "confusable"]
-        state = subject.ScanState("synthetic", subject.validate_policy(policy))
+        state = subject.ScanState("synthetic", policy)
         subject.scan_text(state, "AI\u200bALRA QUlBTFJB", surface="working-tree", object_id="working-tree:encoded.txt", display_path="encoded.txt")
         matches = [item for item in state.findings if item.rule_id == "private.brand"]
         self.assertGreaterEqual(len(matches), 2)
@@ -358,7 +379,7 @@ class PolicyTests(unittest.TestCase):
                 "reason": "Public repository owner",
             }
         ]
-        state = subject.ScanState("synthetic", subject.validate_policy(policy))
+        state = subject.ScanState("synthetic", policy_with_bound_approvals(policy, {"metadata:owner": "AIALRA"}))
         subject.scan_text(state, "AIALRA", surface="repository-metadata", object_id="metadata:owner", display_path="owner")
         private_findings = [item for item in state.findings if item.rule_id == "private.brand"]
         self.assertEqual("approved", private_findings[0].status)
@@ -386,7 +407,10 @@ class PolicyTests(unittest.TestCase):
                 "reason": "Preserve reviewed public legal provenance",
             }
         ]
-        approved_state = subject.ScanState("synthetic", subject.validate_policy(approved_policy))
+        approved_state = subject.ScanState(
+            "synthetic",
+            policy_with_bound_approvals(approved_policy, {"working-tree:LICENSE": "AIALRA"}),
+        )
         subject.scan_text(
             approved_state,
             "AIALRA",
@@ -557,7 +581,10 @@ class PublicationDecisionTests(unittest.TestCase):
                 "reason": "Reviewed public project homepage",
             }
         ]
-        state = subject.ScanState("ExampleOrg/example", subject.validate_policy(policy))
+        state = subject.ScanState(
+            "ExampleOrg/example",
+            policy_with_bound_approvals(policy, {"working-tree:README.md": "Homepage https://docs.example.com/guide"}),
+        )
         subject.scan_text(
             state,
             "Homepage https://docs.example.com/guide",
@@ -1168,8 +1195,11 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual("allow_with_risk", subject.publication_decision_for(state))
 
     def test_remote_download_timeout_returns_tool_failure_without_output(self) -> None:
-        with mock.patch.object(subject, "run", side_effect=subprocess.TimeoutExpired("gh", 60)):
+        process = mock.Mock()
+        process.communicate.side_effect = [subprocess.TimeoutExpired("gh", 60), (None, b"")]
+        with mock.patch.object(subject.subprocess, "Popen", return_value=process):
             data, error = subject.gh_download("synthetic/download")
+        process.kill.assert_called_once_with()
         self.assertIsNone(data)
         self.assertEqual("tool_failed", error)
 

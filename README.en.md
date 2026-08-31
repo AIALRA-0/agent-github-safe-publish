@@ -10,7 +10,7 @@
 
 <p align="center"><strong>Give every Agent the same redaction, coverage, and stopping rules before any GitHub upload</strong></p>
 
-<p align="center">Stable version <code>v1.1.6</code> · Maintenance status: security and compatibility maintenance</p>
+<p align="center">Stable version <code>v1.1.7</code> · Maintenance status: legacy gate security freeze</p>
 
 <div align="center">
 
@@ -29,6 +29,8 @@
 > Any task that may push, upload, sync, mirror, open-source, or change a GitHub Release must load `$github-safe-publish` first
 >
 > Loading the Skill activates audit and stopping rules; it does not authorize a remote write
+
+Version 1.1.7 fixes verified attack paths in the legacy gate and disables legacy automatic merge. Version 2 converts the product into a compiler that assesses, removes, validates, certifies, and publishes a safe derivative; see [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
 
 ## 1. Problem and design
 
@@ -108,7 +110,7 @@ The runtime needs Python and Git. A fleet audit also needs an authenticated GitH
 
 The `safe_publish.py` command is the unified entry point. Its first name selects an audit, preparation, or gate action; parameters beginning with `--` select inputs, outputs, and the publication profile. A missing required parameter fails before any remote write
 
-Confirm the tool version first. An output of `github-safe-publish 1.1.6` binds later reports to this stable implementation
+Confirm the tool version first. An output of `github-safe-publish 1.1.7` binds later reports to this legacy security freeze
 
 ```powershell
 python -X utf8 scripts/safe_publish.py --version # Print the stable version without reading a repository or changing the remote
@@ -152,7 +154,7 @@ python -X utf8 scripts/safe_publish.py doctor --source . # Requires only the par
 After explicit GitHub write authorization, run the managed publication path:
 
 ```powershell
-python -X utf8 scripts/safe_publish.py managed-publish --source . --repository ExampleOrg/example-repo --base-commit <SOURCE_COMMIT> --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --private-output-dir "$env:CODEX_HOME/private/github-safe-publish/example-repo-release" --validation-command "python -X utf8 -m unittest discover -s tests -v" --intent auto-merge # Auto-merges only after allow, required checks, and branch governance all pass
+python -X utf8 scripts/safe_publish.py managed-publish --source . --repository ExampleOrg/example-repo --base-commit <SOURCE_COMMIT> --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --private-output-dir "$env:CODEX_HOME/private/github-safe-publish/example-repo-release" --validation-command "python -X utf8 -m unittest discover -s tests -v" --intent pr # The legacy entry point creates a review branch and pull request but never merges it automatically
 ```
 
 See [`managed-publish.md`](references/managed-publish.md), [`runtime.md`](references/runtime.md), and [`recovery.md`](references/recovery.md) for the orchestration, runtime, and recovery contracts
@@ -294,7 +296,7 @@ Table 10.1 Main entry points
 
 ## 11. Maintenance and license
 
-The current stable version is `1.1.6`. Maintenance resumes for a critical miss, parser incompatibility, damaged report or checkpoint, or a reproducible incorrect allow or denial
+The current stable version is `1.1.7`. It freezes the legacy gate security behavior while the reviewed version 2 safe-publication compiler evolves independently
 
 Private policy versions 1, 2, and 3 remain readable. Older policies migrate in memory and the source file is never modified automatically. Reports and checkpoints should finish with the version that created them; rerun the exact gate after a tool-version change
 

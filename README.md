@@ -10,7 +10,7 @@
 
 <p align="center"><strong>让每个 Agent 在上传 GitHub 前执行同一套脱敏、覆盖检查和停止条件</strong></p>
 
-<p align="center">稳定版本 <code>v1.1.6</code> · 维护状态：安全与兼容性维护</p>
+<p align="center">稳定版本 <code>v1.1.7</code> · 维护状态：旧门禁安全冻结</p>
 
 <div align="center">
 
@@ -29,6 +29,8 @@
 > 任何准备推送、上传、同步、镜像、开源或修改 GitHub Release 的任务，都必须先加载 `$github-safe-publish`
 >
 > Skill 加载只启用审计和停止条件，不授权远端写入
+
+v1.1.7 修复旧门禁已经证实的攻击路径，并关闭旧自动合并；v2 将产品改成审计、剔除、验证、认证和发布安全衍生候选，固定合同见 [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
 
 ## 1. 解决的问题
 
@@ -128,7 +130,7 @@ flowchart TD
 
 `safe_publish.py` 命令是本仓库的统一执行入口；命令后的第一个名称选择审计、准备或检查动作，以 `--` 开头的参数指定输入、输出和发布档位，必填参数缺失时命令会直接失败且不会写入远端
 
-先确认工具版本；命令显示 `github-safe-publish 1.1.6` 时，后续报告能够绑定到本次稳定实现
+先确认工具版本；命令显示 `github-safe-publish 1.1.7` 时，后续报告能够绑定到本次旧门禁安全冻结实现
 
 ```powershell
 python -X utf8 scripts/safe_publish.py --version # 显示稳定工具版本，不读取仓库或修改远端
@@ -179,7 +181,7 @@ python -X utf8 scripts/safe_publish.py doctor --source . # 只要求当前对象
 - 第八步，在已经获得 GitHub 写入授权后执行托管发布
 
 ```powershell
-python -X utf8 scripts/safe_publish.py managed-publish --source . --repository ExampleOrg/example-repo --base-commit <SOURCE_COMMIT> --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --private-output-dir "$env:CODEX_HOME/private/github-safe-publish/example-repo-release" --validation-command "python -X utf8 -m unittest discover -s tests -v" --intent auto-merge # 只有 allow、必需检查和分支治理全部通过时才自动合并
+python -X utf8 scripts/safe_publish.py managed-publish --source . --repository ExampleOrg/example-repo --base-commit <SOURCE_COMMIT> --policy "$env:CODEX_HOME/private/github-safe-publish/example-repo.policy.private.json" --private-output-dir "$env:CODEX_HOME/private/github-safe-publish/example-repo-release" --validation-command "python -X utf8 -m unittest discover -s tests -v" --intent pr # 旧入口只创建待复核分支和 Pull Request，不再自动合并
 ```
 
 托管流程、运行环境和恢复边界分别见 [`managed-publish.md`](references/managed-publish.md)、[`runtime.md`](references/runtime.md) 和 [`recovery.md`](references/recovery.md)
@@ -346,7 +348,7 @@ Gitleaks 固定为 `v8.30.1`；该版本存在平台相关静默失效报告 [1]
 
 ## 11. 维护与许可
 
-当前稳定版本为 `1.1.6`；维护者支持这个版本，并在关键漏检、解析器不兼容、报告损坏或可复现错误阻断与错误放行出现时恢复维护
+当前稳定版本为 `1.1.7`；这个版本冻结旧门禁安全行为，v2 安全发布编译器按照已审查合同独立演进
 
 升级时可以直接读取第 1、2、3 版私有策略；旧策略只在内存中迁移，源文件不会被自动修改；报告和检查点需要使用创建它们的工具版本完成当前运行，版本变化后重新执行精确检查
 

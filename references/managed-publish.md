@@ -22,12 +22,12 @@ Before the exact gate starts, the orchestrator writes a fail-closed report place
 
 | Decision | Remote action |
 |---|---|
-| `allow` | Create a branch and pull request; auto-merge only after required checks and branch governance pass |
-| `allow_with_risk` | Create a pull request for human review and never auto-merge |
+| `allow` | Create a branch and pull request for review; never merge automatically |
+| `allow_with_risk` | Create a branch and pull request for human review; never merge automatically |
 | `deny` | Keep evidence local and perform no remote write |
 | `incomplete` | Keep evidence local and repair the missing parser, validation, or coverage |
 
-Table 3.1 Remote action for each publication decision
+表 3.1 各发布结论对应的远程操作
 
 </div>
 
@@ -35,10 +35,10 @@ The command never pushes directly to the default branch and never uses an admini
 
 On Windows, validation runs through a noninteractive PowerShell wrapper that returns the inner native exit code. A PowerShell command failure without a native exit code returns `1`
 
-## 4. Auto-merge boundary
+## 4. Legacy merge boundary
 
-Auto-merge requires a strict `allow`, complete project and README validation, an unchanged remote base, an exact remote tree match, and required status checks enforced by branch protection or an active ruleset
+Version 1.1.7 removes `--intent auto-merge`; the legacy command can audit or create a pull request, but it cannot merge that pull request
 
-Missing governance returns `BRANCH_PROTECTION_MISSING` after the pull request is created. It does not weaken the gate or merge the pull request
+Version 2 replaces this path with a trusted publisher that accepts only a signed certification bound to the candidate, authorization, target, and expected remote base
 
 History rewriting, Release replacement, ruleset changes, credential rotation, and destructive cleanup remain separate owner-approved operations
