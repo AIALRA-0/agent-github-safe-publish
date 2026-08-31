@@ -102,7 +102,7 @@ class SkillInvocationContractTests(unittest.TestCase):
             'pypdf==6.16.2',
             'PyMuPDF==1.28.2',
             'cryptography==50.0.1',
-            'fonttools==4.51.0',
+            'fonttools==4.64.0',
         )
         for requirement in expected:
             with self.subTest(requirement=requirement):
