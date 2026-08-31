@@ -10,7 +10,7 @@
 
 <p align="center"><strong>把可能含有凭据、私人信息、真实数据和私有依赖的项目，转换成安全、可验证并能够继续发布的公开衍生项目</strong></p>
 
-<p align="center">稳定旧版 <code>v1.1.7</code> · 当前预览 <code>v2.0.0-beta.1</code> · 维护状态：RC 安全加固与真实项目认证</p>
+<p align="center">稳定旧版 <code>v1.1.7</code> · 当前预览 <code>v2.0.0-rc.1</code> · 维护状态：RC 验证完成，真实项目认证等待隔离引擎恢复</p>
 
 <p align="center"><a href="README.en.md">English</a> · <a href="#3-第一次成功">第一次成功</a> · <a href="#4-转换范围">转换范围</a> · <a href="SECURITY.md">安全报告</a> · <a href="CONTRIBUTING.md">参与贡献</a> · <a href="CHANGELOG.md">变更记录</a></p>
 

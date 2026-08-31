@@ -10,7 +10,7 @@ Figure 1 The compiler turns unsafe objects into remediation work instead of term
 
 <p align="center"><strong>Transform a project containing credentials, private identity, real data, or private dependencies into a safe, verified, publishable public derivative</strong></p>
 
-<p align="center">Stable legacy <code>v1.1.7</code> · Current preview <code>v2.0.0-beta.1</code> · Status: RC hardening and real-project certification</p>
+<p align="center">Stable legacy <code>v1.1.7</code> · Current preview <code>v2.0.0-rc.1</code> · Status: RC validation complete, real-project certification awaits the isolation engine</p>
 
 <p align="center"><a href="README.md">简体中文</a> · <a href="#3-first-success">First success</a> · <a href="#4-transformation-coverage">Coverage</a> · <a href="SECURITY.md">Security</a> · <a href="CONTRIBUTING.md">Contributing</a> · <a href="CHANGELOG.md">Changelog</a></p>
 
