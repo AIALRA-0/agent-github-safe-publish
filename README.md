@@ -10,7 +10,7 @@
 
 <p align="center"><strong>把可能含有私人内容的源项目编译成安全、可验证并可发布的公开衍生项目</strong></p>
 
-<p align="center">稳定版本 <code>v1.1.7</code> · 预览版本 <code>v2.0.0-alpha.1</code> · 维护状态：安全发布编译器重构</p>
+<p align="center">稳定版本 <code>v1.1.7</code> · 预览版本 <code>v2.0.0-alpha.2</code> · 维护状态：安全发布编译器重构</p>
 
 <div align="center">
 
@@ -33,7 +33,7 @@
 v1.1.7 冻结旧门禁；v2 主链已经能够从新公开根完成文本凭据外置、私人实体替换、私有地址参数化、功能验证、安全复扫、认证和本机裸远端发布，固定合同见 [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
 
 > [!WARNING]
-> `v2.0.0-alpha.1` 只证明首个文本与配置闭环成立；数据库、Notebook、图片、文档、LFS、Submodule、隔离容器和签名发布器仍在后续预览版本中完成
+> `v2.0.0-alpha.2` 已增加 SQLite、Notebook、ZIP 和可选不透明制品转换；图片像素、复杂文档、LFS、Submodule、隔离容器和签名发布器仍在后续预览版本中完成
 
 ## 1. 解决的问题
 

@@ -10,7 +10,7 @@
 
 <p align="center"><strong>Compile a potentially private source project into a safe, verified, publishable public derivative</strong></p>
 
-<p align="center">Stable version <code>v1.1.7</code> · Preview version <code>v2.0.0-alpha.1</code> · Safe-publication compiler rebuild</p>
+<p align="center">Stable version <code>v1.1.7</code> · Preview version <code>v2.0.0-alpha.2</code> · Safe-publication compiler rebuild</p>
 
 <div align="center">
 
@@ -33,7 +33,7 @@
 Version 1.1.7 freezes the legacy gate. The v2 path now creates a new public root, externalizes text credentials, replaces private entities, parameterizes private addresses, validates behavior, rescans, certifies, and publishes to a local bare remote; see [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
 
 > [!WARNING]
-> `v2.0.0-alpha.1` proves the first text-and-configuration vertical slice only. Artifact transformation, container isolation, signed certification, and the trusted GitHub publisher arrive in later previews
+> `v2.0.0-alpha.2` adds SQLite, Notebook, ZIP, and optional opaque-artifact transformation. Pixel-level image handling, complex documents, LFS, submodules, container isolation, signed certification, and the trusted GitHub publisher arrive in later previews
 
 ## 1. Problem and design
 

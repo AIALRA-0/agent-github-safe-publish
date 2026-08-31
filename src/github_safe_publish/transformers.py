@@ -6,6 +6,7 @@ import re
 import shutil
 
 from .detectors import CREDENTIAL_ASSIGNMENT, PRIVATE_IPV4
+from .artifacts import transform_artifact
 from .model import RemediationAction
 
 
@@ -39,6 +40,10 @@ def transform_candidate(root: Path, actions: list[RemediationAction], policy: di
     for relative, path_actions in sorted(by_path.items()):
         path = root / relative
         if not path.exists():
+            continue
+        artifact_action = next((action.action for action in path_actions if action.action in {"synthesize", "regenerate", "repack"}), None)
+        if artifact_action and transform_artifact(path, artifact_action, policy):
+            transformations.append({"action": artifact_action, "path": relative})
             continue
         remove_object = any(action.action in {"remove", "remove-and-stub", "exclude-component"} for action in path_actions)
         externalize_env = path.name == ".env" and any(action.action == "externalize" for action in path_actions)

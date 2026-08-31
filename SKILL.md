@@ -7,7 +7,7 @@ description: Compile potentially private repository content into a sanitized, ve
 
 Turn every unsafe source finding into a remediation action, build a separate public candidate, validate and rescan it, certify the exact Candidate Tree, then publish it under the original authorization. Keep periodic exposure discovery separate from one intended publication
 
-Stable legacy interface: `1.1.7`. Compiler preview: `2.0.0-alpha.1`
+Stable legacy interface: `1.1.7`. Compiler preview: `2.0.0-alpha.2`
 
 ## 1. Compiler-first behavior
 

@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from . import __version__
 from .detectors import inspect_tree
 from .inventory import git
 from .model import SafetyCertification, VerificationResult
@@ -35,7 +36,7 @@ def certify(result: VerificationResult, policy: dict, commit: str, degradation: 
         commit,
         result.candidate_tree,
         policy_sha256(policy),
-        "2.0.0-alpha.1",
+        __version__,
         hashlib.sha256(verification).hexdigest(),
         remote.get("repository", ""),
         remote.get("branch", "main"),
