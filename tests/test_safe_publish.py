@@ -45,7 +45,7 @@ def synthetic_policy() -> dict[str, object]:
 
 def policy_with_bound_approvals(policy: dict[str, object], object_text: dict[str, str]) -> dict[str, object]:
     migrated = subject.migrate_policy(policy)
-    scanner_sha256 = subject.sha256_file(Path(subject.__file__))
+    scanner_sha256 = subject.sha256_file(Path(subject.legacy.__file__))
     for approval in migrated["approved_locations"]:
         approval.update(
             {

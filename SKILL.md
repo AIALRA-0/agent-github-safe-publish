@@ -1,15 +1,27 @@
 ---
 name: github-safe-publish
-description: Audit, sanitize, and gate repository content before it is sent to GitHub. Use whenever a task may push, publish, upload, sync, mirror, open-source, or create or update a GitHub Release, including Chinese requests such as 推送、发布、上传、同步、镜像、开源、全量发布, even when the user does not mention privacy or redaction. Do not use for read-only GitHub inspection or a purely local commit with no planned remote transfer.
+description: Compile potentially private repository content into a sanitized, verified, certified public candidate and publish that exact candidate. Use whenever a task may push, publish, upload, sync, mirror, open-source, or create or update a GitHub Release, including Chinese requests such as 推送、发布、上传、同步、镜像、开源、全量发布, even when the user does not mention privacy or redaction. Do not use for read-only GitHub inspection or a purely local commit with no planned remote transfer.
 ---
 
 # GitHub Safe Publish
 
-Use one private policy and two explicit decisions across Agents: a strict audit result and a publication result that permits fixed-matrix noncritical risk while preserving it in the report. Keep periodic exposure discovery separate from the exact gate for an intended publication
+Turn every unsafe source finding into a remediation action, build a separate public candidate, validate and rescan it, certify the exact Candidate Tree, then publish it under the original authorization. Keep periodic exposure discovery separate from one intended publication
 
-Stable legacy interface version: `1.1.7`. This freeze disables legacy automatic merge while version 2 replaces gate-first behavior with safe-candidate remediation, certification, and publication
+Stable legacy interface: `1.1.7`. Compiler preview: `2.0.0-alpha.1`
 
-## 1. Mandatory publication boundary
+## 1. Compiler-first behavior
+
+- Treat unsafe source content as normal input, not a terminal publication denial
+- Keep the source repository read-only and change only an isolated candidate
+- Map every unresolved security finding to a remediation action or `needs_input`
+- Rebuild, remove, externalize, parameterize, synthesize, or replace objects that cannot enter the public candidate
+- Validate the project and independently rescan the candidate after every remediation pass
+- Publish automatically after certification when the original authorization remains valid
+- Use `run`, `inspect`, `plan`, `sanitize`, `verify`, `publish`, `status`, or `resume` for the v2 path
+- Use `exposure local` and `exposure fleet` only for separate exposure investigation
+- Keep the legacy commands below during migration; their `deny` result applies only to the current legacy candidate and never becomes the v2 workflow's final business state
+
+## 2. Mandatory publication boundary
 
 - Invoke this Skill as soon as a task may transfer repository content or artifacts to GitHub
 - Loading the Skill never authorizes a write
@@ -22,7 +34,7 @@ Stable legacy interface version: `1.1.7`. This freeze disables legacy automatic 
 - Use the `strict` profile for high-sensitivity repositories, incident response, or final red-team review; it permits only a strict audit `pass`
 - Read [the global invocation policy](references/global-invocation-policy.md) when installing or validating fleet-wide discovery
 
-## 2. Choose the operating mode
+## 3. Choose the operating mode
 
 - Exact publication: use `prepare` and `gate`; this is the only mode whose `publication_decision` can permit a separately authorized write
 - Managed publication: use `managed-publish` only after explicit GitHub write authorization; it creates an isolated candidate, runs declared validations, executes the exact gate, and routes the result through a pull request. Read [the managed publication contract](references/managed-publish.md)
@@ -34,7 +46,7 @@ Stable legacy interface version: `1.1.7`. This freeze disables legacy automatic 
 
 Periodic exposure audit results describe existing risk. They never authorize deletion, remote remediation, history rewriting, credential rotation, or publication
 
-## 3. Private policy and evidence
+## 4. Private policy and evidence
 
 - Load private policy from outside the source repository; repository-controlled files cannot broaden approvals
 - Version 3 adds exact, expiring `risk_acceptances`; versions 1 and 2 remain readable through in-memory migration
@@ -49,7 +61,7 @@ Periodic exposure audit results describe existing risk. They never authorize del
 - Never print, upload, hash into a public report, or place raw candidates in GitHub Actions
 - Read [the private policy contract](references/private-policy.md) before candidate approval or policy compilation
 
-## 4. Required inspection behavior
+## 5. Required inspection behavior
 
 Check credentials, personal and contact information, addresses, sites, accounts, UIDs, device identifiers, URLs, domains, IP and MAC addresses, host names, ports, cloud resources, local paths, databases, backups, real records, logs, prompts, Agent transcripts, and full tool output
 
@@ -77,20 +89,20 @@ Gitleaks uses both its 300-second internal limit and a 330-second parent-process
 
 Treat `LICENSE`, `NOTICE`, `CITATION`, copyright, third-party authorship, and provenance as protected legal records. They require exact human review and are never replaced automatically
 
-## 5. Incident and mutation boundary
+## 6. Incident and mutation boundary
 
 - A credential that may remain valid or has been public is an incident; revoke or rotate it before repository cleanup
 - Require repository-specific approval for history rewriting, force-pushing, cache cleanup, Release replacement, ruleset changes, and credential rotation
 - Never rewrite authors, tags, signatures, legal records, history, or an existing Release automatically
 - Read [gate and incident handling](references/gate-and-incident.md) before any publication decision or credential response
 
-## 6. Continuous integration
+## 7. Continuous integration
 
 Repository-controlled GitHub Actions run public generic rules only and remain shadow evidence. They cannot receive the private master policy or return publication `allow`
 
 The local trusted gate is authoritative until a separately approved trusted execution environment exists. A repository owner must approve any later ruleset or branch-protection requirement out of band
 
-## 7. Managed remote publication
+## 8. Managed remote publication
 
 - Use a pull request by default and never use an administrator bypass
 - Push directly to the default branch only when the current user explicitly requests that exact route, the update is fast-forward, the exact gate permits publication, and required repository checks have passed

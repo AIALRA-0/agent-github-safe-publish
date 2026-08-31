@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "github-safe-publish"
+version = "2.0.0a1"
+description = "Compile private source projects into certified public candidates"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[project.scripts]
+github-safe-publish = "github_safe_publish.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

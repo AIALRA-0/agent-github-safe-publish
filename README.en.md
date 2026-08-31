@@ -8,9 +8,9 @@
 
 <h1 align="center">GitHub Safe Publish</h1>
 
-<p align="center"><strong>Give every Agent the same redaction, coverage, and stopping rules before any GitHub upload</strong></p>
+<p align="center"><strong>Compile a potentially private source project into a safe, verified, publishable public derivative</strong></p>
 
-<p align="center">Stable version <code>v1.1.7</code> · Maintenance status: legacy gate security freeze</p>
+<p align="center">Stable version <code>v1.1.7</code> · Preview version <code>v2.0.0-alpha.1</code> · Safe-publication compiler rebuild</p>
 
 <div align="center">
 
@@ -30,18 +30,24 @@
 >
 > Loading the Skill activates audit and stopping rules; it does not authorize a remote write
 
-Version 1.1.7 fixes verified attack paths in the legacy gate and disables legacy automatic merge. Version 2 converts the product into a compiler that assesses, removes, validates, certifies, and publishes a safe derivative; see [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
+Version 1.1.7 freezes the legacy gate. The v2 path now creates a new public root, externalizes text credentials, replaces private entities, parameterizes private addresses, validates behavior, rescans, certifies, and publishes to a local bare remote; see [`PRODUCT_CONTRACT.md`](docs/architecture/PRODUCT_CONTRACT.md)
+
+> [!WARNING]
+> `v2.0.0-alpha.1` proves the first text-and-configuration vertical slice only. Artifact transformation, container isolation, signed certification, and the trusted GitHub publisher arrive in later previews
 
 ## 1. Problem and design
 
 Agents often apply different sanitization standards. Common misses extend beyond passwords and tokens to addresses, personal sites, accounts, UIDs, contacts, databases, Git history, image pixels, document properties, and distribution assets
 
-This project separates two complementary workflows:
+Version 2 uses a convergent publication workflow:
 
-- Exact publication check: inspects only the disposable copy, Git history, and assets intended for the current publication; it preserves every strict audit finding while only critical risk stops the write
-- Periodic exposure audit: inspects accessible Codex sessions, saved project roots, and repository-associated GitHub surfaces; its result identifies existing risk and never authorizes deletion or modification
+- Freeze and inventory a read-only source snapshot
+- Convert each security finding into a replacement, externalization, parameterization, synthesis, rebuild, or removal action
+- Repair and validate an isolated candidate
+- Rescan until no unresolved security finding remains
+- Certify and publish the exact Candidate Tree
 
-Both workflows share the same sensitive-data classes and private policy, so an ordinary publication does not rescan all Codex history
+Exposure investigation is separate from this path and cannot make an unrelated repository or Codex session block one exact publication
 
 ## 2. Automatic invocation
 
