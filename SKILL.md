@@ -9,7 +9,7 @@ Convert an unsafe source project into a safe public derivative and publish the e
 
 Stable legacy interface: `1.1.7`
 
-Current compiler preview: `2.0.0-rc.1`
+Current compiler preview: `2.0.0-rc.2`
 
 ## 1. Product contract
 

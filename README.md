@@ -10,7 +10,7 @@
 
 <p align="center"><strong>把可能含有凭据、私人信息、真实数据和私有依赖的项目，转换成安全、可验证并能够继续发布的公开衍生项目</strong></p>
 
-<p align="center">稳定旧版 <code>v1.1.7</code> · 当前预览 <code>v2.0.0-rc.1</code> · 维护状态：RC 验证完成，真实项目认证等待隔离引擎恢复</p>
+<p align="center">稳定旧版 <code>v1.1.7</code> · 当前预览 <code>v2.0.0-rc.2</code> · 维护状态：候选路径与精确保留已加固，真实项目认证等待隔离引擎恢复</p>
 
 <p align="center"><a href="README.en.md">English</a> · <a href="#3-第一次成功">第一次成功</a> · <a href="#4-转换范围">转换范围</a> · <a href="SECURITY.md">安全报告</a> · <a href="CONTRIBUTING.md">参与贡献</a> · <a href="CHANGELOG.md">变更记录</a></p>
 
@@ -188,7 +188,7 @@ v1 命令在 v2 稳定版前继续可用；严格审计字段 `pass`、`review`�
 
 持续集成（Continuous Integration，CI）是在每次代码变更时自动运行检查的流程；GitHub Actions 会显示测试、验证和 CodeQL 结果，但公开 CI 没有私有策略或签名私钥，不能代替本机认证
 
-当前 Windows 本地回归运行了 159 个测试用例；其中 158 项通过、失败 0 项、1 项实时容器金丝雀因隔离后端不可用而跳过，数量来自 2026-08-31 的完整 Pytest 输出，影响是代码回归成立但 RC 与三个试点的最终认证仍不能据此宣告通过，下一步是在 C 盘隔离后端恢复后重跑该金丝雀和真实功能合同
+当前 Windows 本地回归运行了 160 个测试用例；其中 159 项通过、失败 0 项、1 项实时容器金丝雀因隔离后端不可用而跳过，数量来自 2026-08-31 的完整 Pytest 输出，影响是代码回归成立但稳定版与三个试点的最终认证仍不能据此宣告通过，下一步是在 C 盘隔离后端恢复后重跑该金丝雀和真实功能合同
 
 ```powershell
 $env:SAFE_PUBLISH_LIVE_CONTAINER='1' # 明确启用真实容器攻击金丝雀，避免把跳过项算成通过

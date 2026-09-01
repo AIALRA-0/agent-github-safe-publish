@@ -22,7 +22,7 @@ from github_safe_publish.credential_scanner import CredentialScannerUnavailable,
 from github_safe_publish.detectors import inspect_tree, inspect_tree_detailed  # noqa: E402
 from github_safe_publish.inventory import source_snapshot  # noqa: E402
 from github_safe_publish.model import PublicationAuthorization, RemediationAction, SafetyCertification  # noqa: E402
-from github_safe_publish.policy import default_policy, validate_policy  # noqa: E402
+from github_safe_publish.policy import default_policy, policy_sha256, validate_policy  # noqa: E402
 from github_safe_publish.publication import authorization_sha256, publish_local  # noqa: E402
 from github_safe_publish.sandbox import verify_pinned_image  # noqa: E402
 from github_safe_publish.signing import DPAPI_PREFIX, private_key_fingerprint, sign_certification  # noqa: E402
@@ -88,6 +88,54 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             policy["security_runtime"]["credential_scanner"]["sha256"] = "0" * 64
             with self.assertRaises(CredentialScannerUnavailable):
                 scan_gitleaks(candidate, policy)
+
+    def test_gitleaks_retention_is_exact_and_paths_are_candidate_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            retained = candidate / "nested" / "config.txt"
+            retained.parent.mkdir(parents=True)
+            retained.write_text("public example\n", encoding="utf-8")
+            executable = root / "gitleaks.exe"
+            executable.write_bytes(b"synthetic executable")
+            policy = default_policy()
+            policy["security_runtime"].update({
+                "credential_scanner": {
+                    "path": str(executable),
+                    "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                    "version": "8.30.1",
+                },
+                "private_temp_root": str(root / "private-temp"),
+            })
+            binding_document = json.loads(json.dumps(policy))
+            binding_document["retention_rules"] = []
+            policy["retention_rules"] = [{
+                "action": "retain-public",
+                "object": "nested/config.txt",
+                "sha256": hashlib.sha256(retained.read_bytes()).hexdigest(),
+                "scanner_ids": ["gitleaks-8.30.1:synthetic"],
+                "tool_version": "2.0.0-rc.2",
+                "policy_sha256": policy_sha256(binding_document),
+                "issued_by": "information-owner",
+                "issued_at": "2026-08-31T00:00:00Z",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "review_trigger": "content-policy-scanner-or-expiry-change",
+            }]
+            policy = validate_policy(policy)
+
+            def fake_run(_executable, source, report, _timeout):
+                record = {"File": "canary.txt", "RuleID": "canary"} if source != candidate else {
+                    "File": str(retained.resolve()),
+                    "RuleID": "synthetic",
+                }
+                report.write_text(json.dumps([record]), encoding="utf-8")
+                return subprocess.CompletedProcess([], 1, b"", b"")
+
+            with mock.patch("github_safe_publish.credential_scanner._run", side_effect=fake_run):
+                self.assertEqual([], scan_gitleaks(candidate, policy)[0])
+                retained.write_text("changed public example\n", encoding="utf-8")
+                findings, _ = scan_gitleaks(candidate, policy)
+            self.assertEqual(["nested/config.txt"], [item.object_path for item in findings])
 
     def test_functional_commands_never_fall_back_to_the_host(self) -> None:
         policy = default_policy()
@@ -157,7 +205,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             key = root / "key.private"
             fingerprint = private_key_fingerprint(key)
             authorization = PublicationAuthorization(str(remote), "main", None, ("commit",), "minor", False, False, "2099-01-01T00:00:00Z", "transaction-1", fingerprint)
-            certification = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0-rc.1", "b" * 64, str(remote), "main", None, "none", authorization_sha256(authorization))
+            certification = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0-rc.2", "b" * 64, str(remote), "main", None, "none", authorization_sha256(authorization))
             sign_certification(certification, key)
             mutations = {
                 "target_repository": str(root / "other.git"),
@@ -191,7 +239,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             key = root / "key.private"
             fingerprint = private_key_fingerprint(key)
             denied = PublicationAuthorization(str(remote), "main", None, ("commit",), "minor", False, False, "2099-01-01T00:00:00Z", "workflow-1", fingerprint)
-            denied_cert = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0-rc.1", "b" * 64, str(remote), "main", None, "none", authorization_sha256(denied))
+            denied_cert = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0-rc.2", "b" * 64, str(remote), "main", None, "none", authorization_sha256(denied))
             sign_certification(denied_cert, key)
             with self.assertRaisesRegex(ValueError, "workflow write"):
                 publish_local(candidate, denied_cert, denied)

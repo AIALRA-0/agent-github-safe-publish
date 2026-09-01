@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from . import __version__
 from .model import SourceFinding
 
 
@@ -14,6 +15,19 @@ class CredentialScannerUnavailable(RuntimeError):
 
 
 _VERIFIED_SCANNERS: set[str] = set()
+
+
+def _retained_public(policy: dict, relative: str, digest: str, scanner_id: str) -> bool:
+    expected_scanner = f"gitleaks-8.30.1:{scanner_id}"
+    return any(
+        rule.get("action") == "retain-public"
+        and not rule.get("legacy_review_only")
+        and rule.get("object") == relative
+        and rule.get("sha256") == digest
+        and rule.get("tool_version") == __version__
+        and expected_scanner in rule.get("scanner_ids", [])
+        for rule in policy.get("retention_rules", [])
+    )
 
 
 def _stream_sha256(path: Path) -> str:
@@ -92,16 +106,19 @@ def scan_gitleaks(candidate: Path, policy: dict) -> tuple[list[SourceFinding], d
         records = _load_report(report_path) if report_path.exists() else []
     findings: list[SourceFinding] = []
     for record in records:
-        relative = str(record.get("File", "")).replace("\\", "/")
-        path = (candidate / relative).resolve()
+        reported = Path(str(record.get("File", "")))
+        path = reported.resolve() if reported.is_absolute() else (candidate / reported).resolve()
         try:
-            path.relative_to(candidate.resolve())
+            relative = path.relative_to(candidate.resolve()).as_posix()
         except ValueError as exc:
             raise CredentialScannerUnavailable("Credential scanner reported an out-of-tree object") from exc
         if not path.is_file():
             raise CredentialScannerUnavailable("Credential scanner finding cannot be bound to a candidate object")
         digest = _stream_sha256(path)
-        rule_id = "gitleaks." + str(record.get("RuleID", "unknown"))
+        scanner_rule = str(record.get("RuleID", "unknown"))
+        if _retained_public(policy, relative, digest, scanner_rule):
+            continue
+        rule_id = "gitleaks." + scanner_rule
         finding_id = hashlib.sha256(f"{rule_id}\0{relative}\0{digest}".encode("utf-8")).hexdigest()[:24]
         findings.append(SourceFinding(finding_id, rule_id, "credential", relative, digest, "externalize"))
     return findings, {
