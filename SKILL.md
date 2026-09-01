@@ -39,6 +39,7 @@ Prefer tools already used by the repository and platform
 - Git status, diff, history, attributes, submodules, LFS, and remote refs establish the actual publication surface
 - Repository-native tests, linters, builds, and GitHub checks establish functional confidence
 - Gitleaks or another available secret scanner may supplement review, but no single scanner replaces reading the actual diff and files
+- If a repository already uses a strict publication gate whose heavyweight review is defective or under repair, replace that run with a light critical-content review of credentials, private identity and data, internal infrastructure, and protected legal or private assets; publish after those critical risks are repaired and project checks pass, while reporting the limited coverage honestly
 - Docker is not required by this Skill; do not start, install, repair, or wait for Docker merely because the Skill was loaded
 - The bundled Python CLI is optional compatibility tooling for users who explicitly want its compiler, policy, exposure, or legacy report features; it is not a prerequisite for ordinary publication
 

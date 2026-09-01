@@ -35,6 +35,8 @@ class SkillInvocationContractTests(unittest.TestCase):
 
     def test_docker_and_cli_are_not_default_requirements(self) -> None:
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("light critical-content review", skill)
+        self.assertIn("publish after those critical risks are repaired", skill)
         self.assertIn("Docker is not required by this Skill", skill)
         self.assertIn("do not start, install, repair, or wait for Docker", skill)
         self.assertIn("Python CLI is optional compatibility tooling", skill)

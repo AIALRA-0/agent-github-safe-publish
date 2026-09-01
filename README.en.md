@@ -49,6 +49,8 @@ Docker is not a dependency of this Skill; loading it must not start, install, re
 
 Ordinary publication uses Git, project-native checks, and GitHub platform capabilities; a secret scanner adds evidence but never replaces review of the actual diff and files
 
+If the target repository already has a strict publication gate whose heavyweight review is defective or under repair, the Skill uses a light critical review instead; it checks credentials, private identity and data, internal infrastructure, protected legal records, and private assets, then continues after those critical risks are repaired and project checks pass while stating that the coverage is limited rather than fully certified
+
 ## 4. Optional compatibility tooling
 
 The repository retains Python helpers for users who explicitly need bulk scanning, policy compilation, exposure investigation, or legacy report compatibility; ordinary publication does not depend on them
