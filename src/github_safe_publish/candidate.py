@@ -25,6 +25,9 @@ def _candidate_git_environment() -> dict[str, str]:
         **os.environ,
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.longpaths",
+        "GIT_CONFIG_VALUE_0": "true",
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
     }
@@ -38,6 +41,7 @@ def _git_archive(source: Path, commit: str, temporary_parent: Path) -> Path:
             completed = subprocess.run(
                 ["git", "archive", "--format=tar", commit],
                 cwd=source,
+                env=_candidate_git_environment(),
                 stdout=output,
                 stderr=subprocess.PIPE,
             )
@@ -67,13 +71,17 @@ def _safe_extract(archive_path: Path, destination: Path, *, create: bool, exclud
         archive.extractall(destination, members=members, filter="data")
 
 
-def _commit_candidate(destination: Path, message: str) -> tuple[str, str]:
+def _commit_candidate(destination: Path, message: str, commit_date: str) -> tuple[str, str]:
+    if not commit_date:
+        raise RuntimeError("Candidate commit requires a deterministic source date")
     environment = {
         **_candidate_git_environment(),
         "GIT_AUTHOR_NAME": "Example Publisher",
         "GIT_AUTHOR_EMAIL": "publisher@example.invalid",
+        "GIT_AUTHOR_DATE": commit_date,
         "GIT_COMMITTER_NAME": "Example Publisher",
         "GIT_COMMITTER_EMAIL": "publisher@example.invalid",
+        "GIT_COMMITTER_DATE": commit_date,
     }
     subprocess.run(["git", "add", "-A"], cwd=destination, env=environment, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     subprocess.run(
@@ -153,7 +161,8 @@ def build_candidate(
     else:
         raise ValueError("History migration requires separate authorization")
     transformations, removed = transform_candidate(destination, actions, policy)
-    commit, tree = _commit_candidate(destination, "chore: publish sanitized public candidate")
+    source_date = git(source, "show", "-s", "--format=%aI", snapshot.commit).stdout.strip()
+    commit, tree = _commit_candidate(destination, "chore: publish sanitized public candidate", source_date)
     degradation = "minor" if removed else "none"
     return CandidateManifest(mode, snapshot.commit, commit, tree, str(destination), transformations, removed, degradation)
 
@@ -173,7 +182,8 @@ def rebuild_commit(manifest: CandidateManifest) -> CandidateManifest:
         return manifest
     if unchanged.returncode != 1:
         raise RuntimeError("Git could not compare the candidate index")
-    commit, tree = _commit_candidate(destination, "chore: continue sanitized public candidate")
+    source_date = git(destination, "show", "-s", "--format=%aI", "HEAD").stdout.strip()
+    commit, tree = _commit_candidate(destination, "chore: continue sanitized public candidate", source_date)
     manifest.candidate_commit = commit
     manifest.candidate_tree = tree
     return manifest

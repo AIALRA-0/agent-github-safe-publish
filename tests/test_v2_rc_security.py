@@ -114,7 +114,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
                 "object": "nested/config.txt",
                 "sha256": hashlib.sha256(retained.read_bytes()).hexdigest(),
                 "scanner_ids": ["gitleaks-8.30.1:synthetic"],
-                "tool_version": "2.0.0-rc.2",
+                "tool_version": "2.0.0",
                 "policy_sha256": policy_sha256(binding_document),
                 "issued_by": "information-owner",
                 "issued_at": "2026-08-31T00:00:00Z",
@@ -205,7 +205,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             key = root / "key.private"
             fingerprint = private_key_fingerprint(key)
             authorization = PublicationAuthorization(str(remote), "main", None, ("commit",), "minor", False, False, "2099-01-01T00:00:00Z", "transaction-1", fingerprint)
-            certification = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0-rc.2", "b" * 64, str(remote), "main", None, "none", authorization_sha256(authorization))
+            certification = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0", "b" * 64, str(remote), "main", None, "none", authorization_sha256(authorization))
             sign_certification(certification, key)
             mutations = {
                 "target_repository": str(root / "other.git"),
@@ -239,7 +239,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             key = root / "key.private"
             fingerprint = private_key_fingerprint(key)
             denied = PublicationAuthorization(str(remote), "main", None, ("commit",), "minor", False, False, "2099-01-01T00:00:00Z", "workflow-1", fingerprint)
-            denied_cert = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0-rc.2", "b" * 64, str(remote), "main", None, "none", authorization_sha256(denied))
+            denied_cert = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0", "b" * 64, str(remote), "main", None, "none", authorization_sha256(denied))
             sign_certification(denied_cert, key)
             with self.assertRaisesRegex(ValueError, "workflow write"):
                 publish_local(candidate, denied_cert, denied)
@@ -367,8 +367,10 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             initialize(source)
+            git(source, "config", "core.autocrlf", "true")
             (source / "opaque.dat").write_bytes(b"\xff\xfe\x00\x01")
             (source / "config.py").write_text('token = "notA-placeholder-runtime-value9"\n', encoding="utf-8")
+            (source / "ambiguous.py").write_bytes(b'token = "worker-token"\r\n')
             git(source, "add", ".")
             git(source, "commit", "-m", "opaque")
             snapshot = source_snapshot(source)
@@ -403,6 +405,17 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             findings, _, coverage = inspect_tree_detailed(source, policy, inherited_source=source, source_receipt=receipt)
             self.assertEqual(["credential.assignment"], [item.rule_id for item in findings])
             self.assertIn("bound-source-audit-receipt", {item["parser"] for item in coverage})
+            candidate = root / "candidate"
+            candidate.mkdir()
+            (candidate / "ambiguous.py").write_bytes(b'token = "worker-token"\n')
+            findings, observations, _ = inspect_tree_detailed(
+                candidate,
+                policy,
+                inherited_source=source,
+                source_receipt=receipt,
+            )
+            self.assertEqual([], findings)
+            self.assertEqual(["public.audited-ambiguous-assignment"], [item.rule_id for item in observations])
             policy["validation"]["source_audit_receipt"]["source_tree"] = "d" * 40
             with self.assertRaisesRegex(ValueError, "another source snapshot"):
                 validate_source_audit_receipt(policy, source, snapshot)

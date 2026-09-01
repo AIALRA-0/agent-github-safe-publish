@@ -111,7 +111,10 @@ class SafePublicationCompilerTests(unittest.TestCase):
             git(source, "config", "user.name", "Example")
             git(source, "config", "user.email", "example@example.invalid")
             (source / "config.py").write_text('password = "synthetic-runtime-value"\n', encoding="utf-8")
-            git(source, "add", ".")
+            long_path = source / ("segment-" + "a" * 80) / ("segment-" + "b" * 80) / ("document-" + "c" * 80 + ".txt")
+            long_path.parent.mkdir(parents=True)
+            long_path.write_text("safe long-path object\n", encoding="utf-8")
+            git(source, "-c", "core.longpaths=true", "add", ".")
             git(source, "commit", "-m", "source")
             key_path = root / "key.private"
             probe = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "probe", "d" * 64, str(root / "remote.git"), "main", None, "none")
@@ -133,13 +136,19 @@ class SafePublicationCompilerTests(unittest.TestCase):
             }
             policy_path = root / "policy.private.json"
             policy_path.write_text(json.dumps(policy), encoding="utf-8")
-            states = []
-            for index in (1, 2):
-                output = root / f"run-{index}"
-                self.assertEqual("validating", sanitize_compiler(source, policy_path, output).status)
-                states.append(verify_compiler(source, policy_path, output))
-            self.assertEqual("certified", states[0].status)
-            self.assertEqual(states[0].certification.candidate_tree, states[1].certification.candidate_tree)
+            first_output = root / "run-1"
+            self.assertEqual("validating", sanitize_compiler(source, policy_path, first_output).status)
+            first = verify_compiler(source, policy_path, first_output)
+            with mock.patch.dict(
+                "os.environ",
+                {"GIT_AUTHOR_DATE": "2040-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2040-01-01T00:00:00Z"},
+            ):
+                second_output = root / "run-2"
+                self.assertEqual("validating", sanitize_compiler(source, policy_path, second_output).status)
+                second = verify_compiler(source, policy_path, second_output)
+            self.assertEqual("certified", first.status)
+            self.assertEqual(first.certification.candidate_commit, second.certification.candidate_commit)
+            self.assertEqual(first.certification.candidate_tree, second.certification.candidate_tree)
 
     def test_new_publication_sanitizes_validates_certifies_and_publishes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -275,7 +284,9 @@ class SafePublicationCompilerTests(unittest.TestCase):
             policy_path = root / "policy.private.json"
             policy_path.write_text(json.dumps(policy), encoding="utf-8")
             output = root / "run"
-            self.assertEqual("validating", sanitize_compiler(source, policy_path, output).status)
+            sanitized = sanitize_compiler(source, policy_path, output)
+            self.assertEqual("validating", sanitized.status)
+            self.assertEqual(git(source, "rev-parse", "HEAD^{tree}"), sanitized.candidate_manifest.candidate_tree)
             self.assertEqual("certified", verify_compiler(source, policy_path, output).status)
             self.assertEqual("published", publish_compiler(source, policy_path, output).status)
 

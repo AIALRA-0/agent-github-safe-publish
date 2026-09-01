@@ -63,6 +63,20 @@ def _batch_blob_digests(repository: Path, object_ids: list[str]) -> dict[str, tu
                 stream.close()
 
 
+def committed_blob_sha256s(repository: Path, commit: str) -> dict[str, str]:
+    records = git(repository, "ls-tree", "-r", "-z", "-l", commit, text=False).stdout.split(b"\0")
+    parsed_records: list[tuple[str, str]] = []
+    for raw_record in records:
+        if not raw_record:
+            continue
+        metadata, raw_name = raw_record.split(b"\t", 1)
+        _, object_type, object_id, _ = metadata.decode("ascii").split()
+        if object_type == "blob":
+            parsed_records.append((object_id, raw_name.decode("utf-8", errors="surrogateescape")))
+    blob_digests = _batch_blob_digests(repository, [object_id for object_id, _ in parsed_records])
+    return {name: blob_digests[object_id][0] for object_id, name in parsed_records}
+
+
 def source_snapshot(repository: Path) -> SourceSnapshot:
     repository = repository.resolve()
     commit = git(repository, "rev-parse", "HEAD").stdout.strip()

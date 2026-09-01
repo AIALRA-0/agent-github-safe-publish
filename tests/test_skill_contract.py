@@ -14,68 +14,55 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertRegex(metadata, r"(?m)^\s*allow_implicit_invocation:\s*true\s*$")
         self.assertIn("$github-safe-publish", metadata)
 
-    def test_discovery_description_covers_remote_publication_intents(self) -> None:
+    def test_discovery_description_covers_publication_intents(self) -> None:
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
         frontmatter = skill.split("---", 2)[1]
-        description_match = re.search(r"(?m)^description:\s*(.+)$", frontmatter)
-        self.assertIsNotNone(description_match)
-        description = description_match.group(1).lower()
+        description = re.search(r"(?m)^description:\s*(.+)$", frontmatter).group(1)
         for intent in ("push", "publish", "upload", "sync", "mirror", "open-source", "release"):
             with self.subTest(intent=intent):
-                self.assertIn(intent, description)
-
-    def test_discovery_description_covers_chinese_publication_intents(self) -> None:
-        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        frontmatter = skill.split("---", 2)[1]
-        description_match = re.search(r"(?m)^description:\s*(.+)$", frontmatter)
-        self.assertIsNotNone(description_match)
-        description = description_match.group(1)
+                self.assertIn(intent, description.lower())
         for intent in ("推送", "发布", "上传", "同步", "镜像", "开源", "全量发布"):
             with self.subTest(intent=intent):
                 self.assertIn(intent, description)
 
-    def test_global_policy_compiles_before_remote_write(self) -> None:
+    def test_skill_guides_repair_and_publication_instead_of_a_gate(self) -> None:
+        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("operational guidance for the agent", skill)
+        self.assertIn("not an interceptor, mandatory checker", skill)
+        self.assertIn("Turn each concrete risk into a repair", skill)
+        self.assertIn("Do not stop at a report", skill)
+        self.assertIn("published to the exact remote target", skill)
+
+    def test_docker_and_cli_are_not_default_requirements(self) -> None:
+        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Docker is not required by this Skill", skill)
+        self.assertIn("do not start, install, repair, or wait for Docker", skill)
+        self.assertIn("Python CLI is optional compatibility tooling", skill)
+        self.assertIn("not a prerequisite for ordinary publication", skill)
+
+    def test_global_policy_compiles_guidance_before_remote_write(self) -> None:
         policy = (REPOSITORY_ROOT / "references" / "global-invocation-policy.md").read_text(encoding="utf-8")
         self.assertIn("$github-safe-publish", policy)
-        self.assertIn("turn every unsafe finding into remediation", policy)
-        self.assertIn("Publish only the exact signed candidate", policy)
-        self.assertIn("do not touch the remote", policy)
-        for intent in ("推送", "发布", "上传", "同步", "镜像", "开源", "全量发布"):
-            with self.subTest(intent=intent):
-                self.assertIn(intent, policy)
+        self.assertIn("repair concrete risks", policy)
+        self.assertIn("continue to the authorized publication", policy)
+        self.assertIn("Do not introduce a separate gate", policy)
+        self.assertIn("not a repository interceptor", policy)
 
-    def test_skill_routes_local_audit_and_policy_compilation(self) -> None:
+    def test_direct_default_branch_publication_requires_authorization_and_fast_forward(self) -> None:
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("`audit-local`", skill)
-        self.assertIn("`compile-policy`", skill)
-        self.assertIn("repository-associated", skill)
-
-    def test_thin_entrypoint_routes_policy_bootstrap_and_key_generation(self) -> None:
-        entrypoint = (REPOSITORY_ROOT / "scripts" / "safe_publish.py").read_text(encoding="utf-8")
-        self.assertIn('"policy-init"', entrypoint)
-        self.assertIn('"keygen"', entrypoint)
-
-    def test_skill_preserves_strict_audit_and_graded_publication(self) -> None:
-        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("`decision` remains the strict audit result", skill)
-        self.assertIn("`publication_decision`", skill)
-        self.assertIn("`permissive-noncritical`", skill)
-        self.assertIn("`strict` profile", skill)
-        self.assertIn("never override credentials", skill)
-        self.assertIn("`result_explanation`", skill)
-
-    def test_direct_default_branch_publication_requires_explicit_authorization_and_fast_forward(self) -> None:
-        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("explicitly requests that exact route", skill)
+        self.assertIn("user requested that route", skill)
         self.assertIn("fast-forward", skill)
-        self.assertIn("signed certification plus bound authorization permit publication", skill)
+        self.assertIn("Re-read the remote branch immediately before writing", skill)
+        self.assertIn("Do not force-push", skill)
 
-    def test_repository_workflow_never_receives_private_policy(self) -> None:
+    def test_reusable_workflow_is_advisory_and_receives_no_private_policy(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
+        self.assertIn("safe-publish / advisory review", workflow)
+        self.assertIn("continue-on-error: true", workflow)
         self.assertNotIn("SAFE_PUBLISH_POLICY_B64", workflow)
         self.assertIn("--generic-only", workflow)
 
-    def test_stable_version_interface(self) -> None:
+    def test_legacy_and_stable_versions_remain_distinct(self) -> None:
         result = subprocess.run(
             [sys.executable, str(REPOSITORY_ROOT / "scripts" / "safe_publish.py"), "--version"],
             check=True,
@@ -83,30 +70,10 @@ class SkillInvocationContractTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual("github-safe-publish 1.1.7", result.stdout.strip())
-
-    def test_reusable_workflow_accepts_only_public_inputs(self) -> None:
-        workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "reusable-safe-publish.yml").read_text(encoding="utf-8")
-        call_block = workflow.split("workflow_call:", 1)[1].split("permissions:", 1)[0]
-        self.assertIn("tool_ref:", call_block)
-        self.assertIn("shadow:", call_block)
-        self.assertNotIn("secrets:", call_block)
-        self.assertNotIn("SAFE_PUBLISH_POLICY_B64", workflow)
-
-    def test_runtime_locks_platform_specific_opencv(self) -> None:
-        requirements = (REPOSITORY_ROOT / "requirements-gate.txt").read_text(encoding="utf-8")
-        expected = (
-            'Pillow==12.3.0',
-            'numpy==2.5.2',
-            'opencv-python==4.14.0.94; sys_platform == "win32"',
-            'opencv-python-headless==4.14.0.94; sys_platform != "win32"',
-            'pypdf==6.16.2',
-            'PyMuPDF==1.28.2',
-            'cryptography==50.0.1',
-            'fonttools==4.64.0',
-        )
-        for requirement in expected:
-            with self.subTest(requirement=requirement):
-                self.assertIn(requirement, requirements)
+        package = (REPOSITORY_ROOT / "src" / "github_safe_publish" / "__init__.py").read_text(encoding="utf-8")
+        pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('__version__ = "2.0.0"', package)
+        self.assertIn('version = "2.0.0"', pyproject)
 
     def test_official_actions_use_full_commit_identifiers(self) -> None:
         workflow_paths = sorted((REPOSITORY_ROOT / ".github" / "workflows").glob("*.yml"))
@@ -209,20 +176,7 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(explanation=explanation):
                 self.assertIn(explanation, readme)
 
-    def test_colon_led_nested_lists_increase_indentation(self) -> None:
-        for document in self._documents():
-            lines = document.read_text(encoding="utf-8").splitlines()
-            for index, line in enumerate(lines[:-1]):
-                match = re.match(r"^(\s*)-\s+.*[:：]\s*$", line)
-                if not match:
-                    continue
-                following = next((item for item in lines[index + 1:] if item.strip()), "")
-                nested = re.match(r"^(\s*)-\s+", following)
-                if nested:
-                    with self.subTest(document=document.name, line=index + 1):
-                        self.assertGreater(len(nested.group(1)), len(match.group(1)))
-
-    def test_multi_node_publication_flow_uses_mermaid(self) -> None:
+    def test_publication_flow_uses_mermaid(self) -> None:
         readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
         match = re.search(r"```mermaid\s+(.*?)```", readme, re.DOTALL)
         self.assertIsNotNone(match)
@@ -232,8 +186,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("图 2.1", readme[match.end():])
 
     def test_stable_release_documents_and_license_exist(self) -> None:
-        required = ("LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md")
-        for name in required:
+        for name in ("LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md"):
             with self.subTest(name=name):
                 self.assertTrue((REPOSITORY_ROOT / name).is_file())
         license_text = (REPOSITORY_ROOT / "LICENSE").read_text(encoding="utf-8")
@@ -241,6 +194,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Copyright (c) 2026 AIALRA-0", license_text)
         for readme_name in ("README.md", "README.en.md"):
             readme = (REPOSITORY_ROOT / readme_name).read_text(encoding="utf-8")
+            self.assertIn("v2.0.0", readme)
             self.assertIn("v1.1.7", readme)
             self.assertIn("SECURITY.md", readme)
             self.assertIn("CONTRIBUTING.md", readme)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -64,20 +65,51 @@ def verify_pinned_image(policy: dict, timeout: int = 30) -> str:
     if not isinstance(image, str) or not PINNED_IMAGE.fullmatch(image):
         raise SandboxUnavailable("Container image must use a complete sha256 digest")
     prefix = _runtime_prefix(policy)
-    try:
-        template = "{{.Id}}" if image.startswith("sha256:") else "{{index .RepoDigests 0}}"
+    def inspect(reference: str, template: str) -> subprocess.CompletedProcess:
         result = subprocess.run(
-            [*prefix, "docker", "image", "inspect", image, "--format", template],
+            [*prefix, "docker", "image", "inspect", reference, "--format", template],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=timeout,
         )
+        return result
+
+    try:
+        template = "{{.Id}}" if image.startswith("sha256:") else "{{json .RepoDigests}}"
+        result = inspect(image, template)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SandboxUnavailable("Unable to inspect the pinned container image") from exc
-    if result.returncode != 0 or result.stdout.strip() != image:
-        raise SandboxUnavailable("Pinned container image is not present or its digest differs")
-    return image
+    observed = result.stdout.strip()
+    if image.startswith("sha256:"):
+        if result.returncode == 0 and observed == image:
+            return image
+    else:
+        expected_digest = image.rsplit("@", 1)[1]
+        try:
+            repo_digests = json.loads(observed) if result.returncode == 0 else []
+        except json.JSONDecodeError:
+            repo_digests = []
+        if isinstance(repo_digests, list) and any(
+            isinstance(item, str) and item.endswith("@" + expected_digest) for item in repo_digests
+        ):
+            return image
+        try:
+            fallback = inspect(expected_digest, "{{.Id}}|{{json .RepoDigests}}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxUnavailable("Unable to inspect the pinned container image") from exc
+        if fallback.returncode == 0:
+            image_id, separator, encoded_digests = fallback.stdout.strip().partition("|")
+            try:
+                fallback_digests = json.loads(encoded_digests) if separator else []
+            except json.JSONDecodeError:
+                fallback_digests = []
+            if image_id == expected_digest or (
+                isinstance(fallback_digests, list)
+                and any(isinstance(item, str) and item.endswith("@" + expected_digest) for item in fallback_digests)
+            ):
+                return expected_digest
+    raise SandboxUnavailable("Pinned container image is not present or its digest differs")
 
 
 def run_in_container(candidate: Path, command: str, policy: dict) -> dict:
@@ -119,10 +151,17 @@ def run_in_container(candidate: Path, command: str, policy: dict) -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         raise SandboxUnavailable("Container validation exceeded its bounded runtime") from exc
+    except OSError as exc:
+        raise SandboxUnavailable("Unable to start the container validation runtime") from exc
+    if result.returncode == 125:
+        raise SandboxUnavailable("Container validation failed before the project command started")
+    engine_version = docker_engine_version(policy)
+    if engine_version is None:
+        raise SandboxUnavailable("Docker Engine became unavailable during container validation")
     return {
         "command_id": __import__("hashlib").sha256(command.encode()).hexdigest()[:16],
         "exit_code": result.returncode,
         "sandbox": runtime.get("backend", "docker"),
-        "engine_version": docker_engine_version(policy),
+        "engine_version": engine_version,
         "image": image,
     }

@@ -9,6 +9,7 @@ from typing import Iterable
 import warnings
 import zipfile
 
+from .inventory import committed_blob_sha256s
 from .model import PublicObservation, SourceFinding
 
 
@@ -405,6 +406,14 @@ def inspect_tree_detailed(
     findings: list[SourceFinding] = []
     observations: list[PublicObservation] = []
     coverage: list[dict] = []
+    source_digests: dict[str, str] = {}
+    inspecting_bound_source = (
+        source_receipt is not None
+        and inherited_source is not None
+        and root.resolve() == inherited_source.resolve()
+    )
+    if source_receipt is not None and inherited_source is not None and not inspecting_bound_source:
+        source_digests = committed_blob_sha256s(inherited_source, str(source_receipt["source_commit"]))
     mapping_by_entity = {item.get("entity_id"): item.get("replacement") for item in policy["synthetic_mappings"]}
     maximum_bytes = int(policy["security_runtime"].get("maximum_object_bytes", 25 * 1024 * 1024))
     for path in iter_candidate_files(root):
@@ -422,10 +431,7 @@ def inspect_tree_detailed(
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         suffix = path.suffix.lower()
-        source_match = False
-        if source_receipt is not None and inherited_source is not None:
-            original = inherited_source / relative
-            source_match = original.is_file() and _stream_sha256(original) == digest
+        source_match = inspecting_bound_source or source_digests.get(relative) == digest
         if path.name.lower() in LEGAL_FILENAMES:
             try:
                 legal_text = data.decode("utf-8")

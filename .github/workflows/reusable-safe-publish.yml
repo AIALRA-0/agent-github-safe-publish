@@ -1,4 +1,4 @@
-name: safe-publish / gate
+name: safe-publish / advisory review
 
 on:
   workflow_call:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       shadow:
-        description: "Report failures without blocking the caller workflow"
+        description: "Deprecated compatibility input; this review is always advisory"
         required: false
         default: true
         type: boolean
@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   gate:
-    name: safe-publish / gate
+    name: safe-publish / advisory review
     runs-on: ubuntu-latest
     steps:
       # Check out the caller with complete history so a shallow clone cannot receive a pass.
@@ -39,9 +39,9 @@ jobs:
           persist-credentials: false
 
       # Repository-controlled workflows run only public rules and can never approve publication.
-      - name: Run public shadow gate
+      - name: Run optional public review
         id: gate
-        continue-on-error: ${{ inputs.shadow }}
+        continue-on-error: true
         shell: bash
         run: |
           # Keep the private policy outside repository-controlled GitHub Actions.
@@ -63,7 +63,7 @@ jobs:
               report = json.loads(report_path.read_text(encoding="utf-8"))  # Parse the redacted machine report.
               summary = report.get("summary", {})  # Limit the published summary to aggregate counts.
               lines = [  # Build a small Markdown summary without repository paths or identifiers.
-                  "## safe-publish shadow gate",
+                  "## safe-publish advisory review",
                   f"- Strict audit: `{report.get('decision', 'incomplete')}`",
                   f"- Publication: `{report.get('publication_decision', 'deny')}`",
                   f"- Release profile: `{report.get('release_profile', 'permissive-noncritical')}`",
@@ -73,7 +73,7 @@ jobs:
                   f"- Coverage gaps: `{summary.get('coverage_gap_count', 1)}`",
               ]
           else:  # Fail closed when no machine report was produced.
-              lines = ["## safe-publish shadow gate", "- Strict audit: `incomplete`", "- Publication: `deny`", "- Coverage gaps: `1`"]
+              lines = ["## safe-publish advisory review", "- Review: `incomplete`", "- Coverage gaps: `1`"]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:  # Append to GitHub's approved summary file.
               handle.write("\n".join(lines) + "\n")  # Write aggregate values only.
           PY

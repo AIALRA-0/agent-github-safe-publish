@@ -1,7 +1,7 @@
 interface:
-  display_name: "GitHub 安全发布编译器"
-  short_description: "审计并剔除不安全对象，验证、认证并发布安全衍生候选"
-  default_prompt: "Use $github-safe-publish whenever a task may push, publish, upload, sync, mirror, open-source, or update a GitHub Release, including 推送、发布、上传、同步、镜像、开源 and 全量发布; keep the private source read-only, turn every unsafe finding into remediation or a resumable owner decision, verify the isolated candidate with digest-bound tools, certify the exact commit and authorization, and publish that certified derivative without treating unsafe source content as a terminal denial."
+  display_name: "GitHub 安全发布指导"
+  short_description: "指导 Codex 审阅、修复并完成安全的 GitHub 发布"
+  default_prompt: "Use $github-safe-publish to review the real repository, repair concrete publication risks, run proportionate project checks, and complete the authorized GitHub push or Release without adding a blocking gate."
 
 policy:
   allow_implicit_invocation: true
