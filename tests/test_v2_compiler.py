@@ -146,7 +146,8 @@ class SafePublicationCompilerTests(unittest.TestCase):
                 second_output = root / "run-2"
                 self.assertEqual("validating", sanitize_compiler(source, policy_path, second_output).status)
                 second = verify_compiler(source, policy_path, second_output)
-            self.assertEqual("certified", first.status)
+            self.assertEqual("certified", first.status, first.pause_reason)
+            self.assertEqual("certified", second.status, second.pause_reason)
             self.assertEqual(first.certification.candidate_commit, second.certification.candidate_commit)
             self.assertEqual(first.certification.candidate_tree, second.certification.candidate_tree)
 

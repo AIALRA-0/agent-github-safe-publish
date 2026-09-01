@@ -33,6 +33,17 @@ def _candidate_git_environment() -> dict[str, str]:
     }
 
 
+def _configure_candidate_repository(destination: Path) -> None:
+    subprocess.run(
+        ["git", "config", "--local", "core.longpaths", "true"],
+        cwd=destination,
+        env=_candidate_git_environment(),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
 def _git_archive(source: Path, commit: str, temporary_parent: Path) -> Path:
     temporary_parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=".source-archive-", suffix=".tar", dir=temporary_parent)
@@ -124,6 +135,7 @@ def build_candidate(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        _configure_candidate_repository(destination)
     elif mode == "update-existing-public":
         public_base = policy["publication"].get("public_base")
         if not public_base:
@@ -135,6 +147,7 @@ def build_candidate(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        _configure_candidate_repository(destination)
         expected_base = policy["remote_target"].get("expected_base")
         if expected_base and git(destination, "rev-parse", "HEAD").stdout.strip() != expected_base:
             raise ValueError("Public base differs from the authorized remote base")
