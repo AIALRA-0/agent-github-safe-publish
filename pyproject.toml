@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-safe-publish"
-version = "2.0.0"
-description = "Guide Codex through safe GitHub review, repair, and publication"
+version = "2.0.1"
+description = "Optional advanced compiler and compatibility tools for the GitHub safe-publish guidance Skill"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = ["cryptography==50.0.1", "fonttools==4.64.0"]

@@ -114,7 +114,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
                 "object": "nested/config.txt",
                 "sha256": hashlib.sha256(retained.read_bytes()).hexdigest(),
                 "scanner_ids": ["gitleaks-8.30.1:synthetic"],
-                "tool_version": "2.0.0",
+                "tool_version": "2.0.1",
                 "policy_sha256": policy_sha256(binding_document),
                 "issued_by": "information-owner",
                 "issued_at": "2026-08-31T00:00:00Z",
@@ -205,7 +205,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             key = root / "key.private"
             fingerprint = private_key_fingerprint(key)
             authorization = PublicationAuthorization(str(remote), "main", None, ("commit",), "minor", False, False, "2099-01-01T00:00:00Z", "transaction-1", fingerprint)
-            certification = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0", "b" * 64, str(remote), "main", None, "none", authorization_sha256(authorization))
+            certification = SafetyCertification(1, commit, tree, "a" * 64, "2.0.1", "b" * 64, str(remote), "main", None, "none", authorization_sha256(authorization))
             sign_certification(certification, key)
             mutations = {
                 "target_repository": str(root / "other.git"),
@@ -239,7 +239,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
             key = root / "key.private"
             fingerprint = private_key_fingerprint(key)
             denied = PublicationAuthorization(str(remote), "main", None, ("commit",), "minor", False, False, "2099-01-01T00:00:00Z", "workflow-1", fingerprint)
-            denied_cert = SafetyCertification(1, commit, tree, "a" * 64, "2.0.0", "b" * 64, str(remote), "main", None, "none", authorization_sha256(denied))
+            denied_cert = SafetyCertification(1, commit, tree, "a" * 64, "2.0.1", "b" * 64, str(remote), "main", None, "none", authorization_sha256(denied))
             sign_certification(denied_cert, key)
             with self.assertRaisesRegex(ValueError, "workflow write"):
                 publish_local(candidate, denied_cert, denied)

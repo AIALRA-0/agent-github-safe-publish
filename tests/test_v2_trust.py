@@ -20,7 +20,7 @@ from github_safe_publish.signing import sign_certification, verify_certification
 class TrustedPublicationTests(unittest.TestCase):
     def test_ed25519_signature_binds_candidate_and_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            certification = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "2.0.0", "d" * 64, "owner/repository", "main", None, "none")
+            certification = SafetyCertification(1, "a" * 40, "b" * 40, "c" * 64, "2.0.1", "d" * 64, "owner/repository", "main", None, "none")
             sign_certification(certification, Path(temporary) / "key.private")
             self.assertTrue(verify_certification(certification, certification.public_key_fingerprint))
             self.assertFalse(verify_certification(certification, None))

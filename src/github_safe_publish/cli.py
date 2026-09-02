@@ -28,21 +28,41 @@ def _stream_sha256(path: Path) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="github-safe-publish")
+    parser = argparse.ArgumentParser(
+        prog="github-safe-publish",
+        description=(
+            "Optional advanced compiler and compatibility CLI for the GitHub safe-publish guidance Skill. "
+            "Ordinary publication does not require this package."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"github-safe-publish {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("run", "inspect", "plan", "sanitize", "verify", "resume"):
-        command = commands.add_parser(name)
+        command = commands.add_parser(name, help=f"Run the optional advanced {name} workflow")
         command.add_argument("--source", required=True)
         command.add_argument("--policy", required=True)
         command.add_argument("--private-output", required=True)
-    publish = commands.add_parser("publish")
+    publish = commands.add_parser(
+        "publish",
+        help="Publish an already-certified candidate commit to its configured Git remote",
+        description=(
+            "Publish only an already-certified candidate commit to the Git remote configured in its authorization. "
+            "This command does not create a GitHub Tag, Release, release asset, Pull Request, or repository setting."
+        ),
+    )
     publish.add_argument("--private-output", required=True)
     publish.add_argument("--source")
     publish.add_argument("--policy")
-    keygen = commands.add_parser("keygen")
+    keygen = commands.add_parser("keygen", help="Inspect the fingerprint for an optional signing key")
     keygen.add_argument("--key", required=True)
-    policy_init = commands.add_parser("policy-init")
+    policy_init = commands.add_parser(
+        "policy-init",
+        help="Create a private policy for the optional advanced workflow",
+        description=(
+            "Create a private policy for the optional advanced workflow. "
+            "The policy binds intent; this CLI does not create GitHub Release objects."
+        ),
+    )
     policy_init.add_argument("--source", required=True)
     policy_init.add_argument("--output", required=True)
     policy_init.add_argument("--key", required=True)
@@ -53,7 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     policy_init.add_argument("--expected-remote-base")
     policy_init.add_argument("--maximum-degradation", choices=("none", "minor"), default="minor")
     policy_init.add_argument("--workflow-in-scope", action="store_true")
-    policy_init.add_argument("--release-in-scope", action="store_true")
+    policy_init.add_argument(
+        "--release-in-scope",
+        action="store_true",
+        help="Keep the compatible policy-intent field; this CLI does not create a GitHub Release object",
+    )
     policy_init.add_argument("--validation-command", action="append", default=[])
     policy_init.add_argument("--optional-path", action="append", default=[])
     policy_init.add_argument("--container-image")
@@ -63,9 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     policy_init.add_argument("--gitleaks-path", required=True)
     policy_init.add_argument("--private-temp-root", required=True)
     policy_init.add_argument("--approved-by", default="information-owner")
-    status = commands.add_parser("status")
+    status = commands.add_parser("status", help="Read an optional workflow state")
     status.add_argument("--state", required=True)
-    exposure = commands.add_parser("exposure")
+    exposure = commands.add_parser("exposure", help="Use the legacy exposure-report compatibility commands")
     exposure.add_argument("scope", choices=("local", "fleet"))
     exposure.add_argument("arguments", nargs=argparse.REMAINDER)
     return parser

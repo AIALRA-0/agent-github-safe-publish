@@ -1,7 +1,7 @@
 interface:
   display_name: "GitHub 安全发布指导"
-  short_description: "指导 Codex 审阅、修复并完成安全的 GitHub 发布"
-  default_prompt: "Use $github-safe-publish to review the real repository, repair concrete publication risks, run proportionate project checks, and complete the authorized GitHub push or Release without adding a blocking gate."
+  short_description: "指导 Codex 按授权安全完成 GitHub 发布"
+  default_prompt: "Use $github-safe-publish to complete only the GitHub write types the user names, after proportionate review and checks, and stop when the specified remote result is read back."
 
 policy:
   allow_implicit_invocation: true
