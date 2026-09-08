@@ -17,6 +17,13 @@ from run_v202_matrix import BASE_CONFIGS, CRITICAL_CASES, EXTENDED_CONFIGS
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/Users/|/home/|\\Users\\)")
+EVALUATED_INPUTS = {
+    "SKILL.md",
+    "agents/openai.yaml",
+    "evals/candidate/publication-behavior-v2.0.2.json",
+    "scripts/behavior_eval_contract.py",
+    "scripts/grade_skill_behavior.py",
+}
 
 
 def _sha256(data: bytes) -> str:
@@ -291,13 +298,7 @@ def verify(manifest_path: Path, required: bool = False) -> list[str]:
         outputs = _mapping(payload, "evidence_outputs")
     except ValueError as error:
         return errors + [str(error)]
-    expected_inputs = {
-        "SKILL.md",
-        "agents/openai.yaml",
-        "evals/candidate/publication-behavior-v2.0.2.json",
-        "scripts/grade_skill_behavior.py",
-    }
-    if set(inputs) != expected_inputs:
+    if set(inputs) != EVALUATED_INPUTS:
         errors.append("evaluated_input_set_mismatch")
 
     for relative, expected in {**inputs, **outputs}.items():

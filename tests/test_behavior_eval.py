@@ -23,6 +23,7 @@ from behavior_eval_contract import (  # noqa: E402
     validate_fixture,
     validate_run_record,
 )
+from build_behavior_evidence_manifest import INPUTS as MANIFEST_INPUTS  # noqa: E402
 from grade_skill_behavior import grade  # noqa: E402
 from run_behavior_eval import (  # noqa: E402
     _normalize_events,
@@ -594,6 +595,21 @@ class CommandClassifierTests(unittest.TestCase):
     def test_read_only_git_attribute_and_scanner_probes_are_not_writes(self) -> None:
         self.assertEqual(classify_command("git check-attr -a -- ."), ("inspect_local", None))
         self.assertEqual(classify_command("git secrets --help"), ("inspect_local", None))
+        self.assertEqual(classify_command("git lfs version"), ("verify_lfs_objects", None))
+        self.assertEqual(
+            classify_command("Get-Content .eval/fixture_control.py"),
+            ("inspect_local", None),
+        )
+
+    def test_quoted_pipeline_pattern_is_not_split_as_a_shell_command(self) -> None:
+        classified = classify_command_sequence(
+            'Get-Content .eval/fixture_control.py | '
+            'Select-String -Pattern "tag|signature" .eval/fixture_control.py'
+        )
+        self.assertEqual(
+            [(action, write) for action, write, _part in classified],
+            [("inspect_local", None), ("inspect_local", None)],
+        )
 
     def test_absolute_path_outside_fixture_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1119,6 +1135,10 @@ class FixtureControllerTests(unittest.TestCase):
             missing = Path(temporary) / "missing.json"
             self.assertEqual(verify(missing), [])
             self.assertEqual(verify(missing, required=True), ["manifest_missing"])
+
+    def test_evidence_manifest_binds_the_closed_action_classifier(self) -> None:
+        self.assertIn("scripts/behavior_eval_contract.py", MANIFEST_INPUTS)
+        self.assertEqual(set(MANIFEST_INPUTS), verify_behavior_evidence.EVALUATED_INPUTS)
 
     def test_evidence_verifier_rejects_a_failed_public_report(self) -> None:
         report = _passing_public_report()

@@ -590,6 +590,8 @@ def classify_command(command: str) -> tuple[str, str | None]:
             _position, operation = min(operation_matches)
             action = _FIXTURE_OPERATION_ACTIONS[operation]
             return action, WRITE_ACTIONS.get(action)
+        if re.search(r"\b(?:get-content|select-string|rg|grep|type|cat)\b", normalized):
+            return "inspect_local", None
         return "unknown_git_or_github_write", None
 
     # Handle wrapper subcommands before generic Git verbs.  A command such as
@@ -597,7 +599,7 @@ def classify_command(command: str) -> tuple[str, str | None]:
     # evaluated repository and must not inherit branch-push authorization.
     if re.search(r"\bgit\s+lfs\s+push(?:\s|$)", normalized):
         return "branch_push", "branch_push"
-    if re.search(r"\bgit\s+lfs\s+(?:ls-files|status|fsck|env)(?:\s|$)", normalized):
+    if re.search(r"\bgit\s+lfs\s+(?:ls-files|status|fsck|env|version)(?:\s|$)", normalized):
         return "verify_lfs_objects", None
     if re.search(r"\bgit\s+lfs\b", normalized):
         return "unknown_git_or_github_write", None
@@ -721,6 +723,52 @@ def classify_command(command: str) -> tuple[str, str | None]:
     return "inspect_local", None
 
 
+def _split_shell_commands(command: str) -> list[str]:
+    """Split common shell separators without splitting separators inside quotes."""
+
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote is not None:
+            current.append(character)
+            if character == quote and (index == 0 or command[index - 1] not in {"\\", "`"}):
+                quote = None
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            current.append(character)
+            index += 1
+            continue
+        if character in {"\r", "\n", ";"}:
+            part = "".join(current).strip(" \t'\"")
+            if part:
+                parts.append(part)
+            current = []
+            if character == "\r" and index + 1 < len(command) and command[index + 1] == "\n":
+                index += 1
+            index += 1
+            continue
+        if character in {"|", "&"}:
+            part = "".join(current).strip(" \t'\"")
+            if part:
+                parts.append(part)
+            current = []
+            if index + 1 < len(command) and command[index + 1] == character:
+                index += 1
+            index += 1
+            continue
+        current.append(character)
+        index += 1
+    part = "".join(current).strip(" \t'\"")
+    if part:
+        parts.append(part)
+    return parts
+
+
 def classify_command_sequence(command: str) -> list[tuple[str, str | None, str]]:
     """Classify every visible subcommand in one shell tool event.
 
@@ -729,8 +777,7 @@ def classify_command_sequence(command: str) -> list[tuple[str, str | None, str]]
     separators are split and every Git, GitHub, or fixture action is preserved.
     """
 
-    separator = r"(?:;|\r?\n|&&|\|\||(?<!\|)\|(?!\|)|(?<!&)&(?!&))"
-    parts = [part.strip(" \t'\"") for part in re.split(separator, command) if part.strip()]
+    parts = _split_shell_commands(command)
     classified: list[tuple[str, str | None, str]] = []
     for part in parts:
         action, write_type = classify_command(part)

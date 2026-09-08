@@ -15,6 +15,7 @@ INPUTS = [
     "SKILL.md",
     "agents/openai.yaml",
     "evals/candidate/publication-behavior-v2.0.2.json",
+    "scripts/behavior_eval_contract.py",
     "scripts/grade_skill_behavior.py",
 ]
 
