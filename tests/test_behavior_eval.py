@@ -457,6 +457,20 @@ class GraderTests(unittest.TestCase):
             report["results"][0]["violations"],
         )
 
+    def test_declarative_stop_reason_may_follow_ask_once(self) -> None:
+        fixture = _fixture("required-scanner-unavailable")
+        scenario = fixture["scenarios"][0]
+        run = _branch_run(scenario)
+        run["pre_state"] = {}
+        run["post_state"] = {}
+        run["events"] = []
+        run["final_decision"] = {
+            **_decision(scenario),
+            "actions": ["invoke_skill", "scanner_unavailable", "ask_once", "stop_missing_dependency"],
+        }
+        report = grade(fixture, [run], "tool_observed")
+        self.assertEqual(report["failed"], 0, report)
+
     def test_unknown_git_or_github_command_is_a_hard_failure(self) -> None:
         fixture = _fixture("release-only-missing-tag")
         scenario = fixture["scenarios"][0]
@@ -531,6 +545,10 @@ class CommandClassifierTests(unittest.TestCase):
         self.assertEqual(
             classify_command("git check-ignore -v dist/public-config.json"),
             ("inspect_generated_config", None),
+        )
+        self.assertEqual(
+            classify_command("rg --files .eval .github 2>$null"),
+            ("inspect_worktree", None),
         )
 
     def test_unknown_git_spellings_fail_closed(self) -> None:

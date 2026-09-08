@@ -118,6 +118,10 @@ _OBJECTIVE_SEMANTIC_STOPS = frozenset(
     }
 )
 
+_DECLARATIVE_STOP_ACTIONS = frozenset(
+    action for action in ACTION_IDS if action == "stop" or action.startswith("stop_")
+)
+
 
 def _successful_actions_before(events: list[Mapping[str, Any]], index: int) -> set[str]:
     return {
@@ -491,7 +495,7 @@ def _grade_one(
         elif expected_stop in actions:
             stop_index = _effective_stop_index(actions, expected_stop)
             assert stop_index is not None
-            allowed_tail = {"stop", "stop_original_write", "final_report", "run_end"}
+            allowed_tail = _DECLARATIVE_STOP_ACTIONS | {"final_report", "run_end"}
             trailing = [action for action in actions[stop_index + 1 :] if action not in allowed_tail]
             if trailing:
                 violations.append("decision_action_after_stop_point:" + ",".join(trailing))

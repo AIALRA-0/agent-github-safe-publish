@@ -718,13 +718,15 @@ def classify_command(command: str) -> tuple[str, str | None]:
         if explicit_write or implicit_body:
             return "unknown_git_or_github_write", None
         return "reread_remote", None
+    if re.search(r"(?:^|\s)rg\s+--files(?:\s|$)", normalized):
+        return "inspect_worktree", None
     if re.search(r"\b(?:git|gh)\s+|\bgithub\b", normalized):
         return "unknown_git_or_github_write", None
     if "project_check.py" in normalized:
         return "run_affected_checks", None
     if re.search(r"\b(?:pytest|ruff\s+check|npm\s+(?:test|run\s+test)|pnpm\s+(?:test|run\s+test)|make\s+test)\b", normalized):
         return "run_affected_checks", None
-    if re.search(r"\b(?:rg\s+--files|git\s+status)\b", normalized):
+    if re.search(r"\bgit\s+status\b", normalized):
         return "inspect_worktree", None
     return "inspect_local", None
 
