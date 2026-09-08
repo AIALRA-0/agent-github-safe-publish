@@ -545,6 +545,21 @@ def _normalize_events(stdout: str, roots: list[Path], allowed_root: Path) -> lis
     return normalized
 
 
+def _authorized_write_was_not_executed(
+    events: list[dict[str, Any]], allowed_writes: set[str]
+) -> bool:
+    """Identify a host-side refusal before an authorized fixture write started."""
+
+    return any(
+        event.get("write_type") in allowed_writes
+        and (
+            event.get("result", {}).get("status") == "declined"
+            or event.get("result", {}).get("exit_code") is None
+        )
+        for event in events
+    )
+
+
 def _prompt(skill_text: str, scenario: dict[str, Any], language: str, context_profile: str) -> str:
     environment = "\n".join(f"- {item}" for item in scenario.get("environment", []))
     context_note = {
@@ -715,12 +730,7 @@ def _execute_case(
         post_state = _snapshot(work, env)
         events = _normalize_events(stdout, [root, args.raw_output_dir, ROOT], work)
         allowed_writes = set(scenario.get("allowed_writes", []))
-        authorized_decline = any(
-            event.get("result", {}).get("status") == "declined"
-            and event.get("write_type") in allowed_writes
-            for event in events
-        )
-        if authorized_decline:
+        if _authorized_write_was_not_executed(events, allowed_writes):
             infrastructure_ok = False
         try:
             final_decision = _read_json(last_message) if last_message.exists() else {}

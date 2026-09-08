@@ -26,6 +26,7 @@ from behavior_eval_contract import (  # noqa: E402
 from build_behavior_evidence_manifest import INPUTS as MANIFEST_INPUTS  # noqa: E402
 from grade_skill_behavior import grade  # noqa: E402
 from run_behavior_eval import (  # noqa: E402
+    _authorized_write_was_not_executed,
     _normalize_events,
     _prepare_fixture,
     _redact,
@@ -767,6 +768,14 @@ class CommandClassifierTests(unittest.TestCase):
             events = _normalize_events(stdout, [root], root)
         self.assertEqual([event["sequence"] for event in events], [1, 2])
         self.assertEqual([event["action_id"] for event in events], ["inspect_worktree", "inspect_worktree"])
+
+    def test_authorized_write_without_an_exit_code_is_infrastructure_failure(self) -> None:
+        event = _event(1, "fast_forward_push", write_type="branch_push")
+        event["result"] = {"status": "failed", "exit_code": None}
+        self.assertTrue(_authorized_write_was_not_executed([event], {"branch_push"}))
+
+        event["result"] = {"status": "failed", "exit_code": 1}
+        self.assertFalse(_authorized_write_was_not_executed([event], {"branch_push"}))
 
     def test_declined_tool_event_remains_distinguishable_from_command_failure(self) -> None:
         stdout = json.dumps(
