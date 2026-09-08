@@ -200,52 +200,59 @@ def _run_codex(
         if initialized.returncode != 0:
             (raw_output_dir / f"{label}-stderr.txt").write_text(initialized.stderr, encoding="utf-8")
             return -1
-        process = subprocess.run(
-            [
-                codex,
-                "--cd",
-                str(work),
-                "--disable",
-                "plugins",
-                "--disable",
-                "remote_plugin",
-                "--disable",
-                "skill_search",
-                "--disable",
-                "plugin_sharing",
-                "--enable",
-                "skip_host_skill_discovery",
-                "--config",
-                "suppress_unstable_features_warning=true",
-                "exec",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--json",
-                "--color",
-                "never",
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(output_path),
-                "--model",
-                model,
-                "--config",
-                f'model_reasoning_effort="{reasoning}"',
-                "--sandbox",
-                "read-only",
-                "-",
-            ],
-            cwd=work,
-            env=environment,
-            input=prompt,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=360,
-            check=False,
-        )
+        try:
+            process = subprocess.run(
+                [
+                    codex,
+                    "--cd",
+                    str(work),
+                    "--disable",
+                    "plugins",
+                    "--disable",
+                    "remote_plugin",
+                    "--disable",
+                    "skill_search",
+                    "--disable",
+                    "plugin_sharing",
+                    "--enable",
+                    "skip_host_skill_discovery",
+                    "--config",
+                    "suppress_unstable_features_warning=true",
+                    "exec",
+                    "--ephemeral",
+                    "--ignore-user-config",
+                    "--ignore-rules",
+                    "--json",
+                    "--color",
+                    "never",
+                    "--output-schema",
+                    str(schema_path),
+                    "--output-last-message",
+                    str(output_path),
+                    "--model",
+                    model,
+                    "--config",
+                    f'model_reasoning_effort="{reasoning}"',
+                    "--sandbox",
+                    "read-only",
+                    "-",
+                ],
+                cwd=work,
+                env=environment,
+                input=prompt,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=360,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout.decode("utf-8", errors="replace") if isinstance(error.stdout, bytes) else error.stdout or ""
+            stderr = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else error.stderr or ""
+            (raw_output_dir / f"{label}-stdout.jsonl").write_text(stdout, encoding="utf-8")
+            (raw_output_dir / f"{label}-stderr.txt").write_text(stderr, encoding="utf-8")
+            return 124
     (raw_output_dir / f"{label}-stdout.jsonl").write_text(process.stdout, encoding="utf-8")
     (raw_output_dir / f"{label}-stderr.txt").write_text(process.stderr, encoding="utf-8")
     return process.returncode
@@ -276,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning", default="high")
     parser.add_argument("--calibration-model", default="gpt-5.6-sol")
-    parser.add_argument("--calibration-reasoning", default="high")
+    parser.add_argument("--calibration-reasoning", default="medium")
     parser.add_argument("--codex", default="codex")
     args = parser.parse_args(argv)
     public = json.loads(args.public_cases.read_text(encoding="utf-8"))

@@ -24,7 +24,11 @@ from behavior_eval_contract import (  # noqa: E402
     validate_run_record,
 )
 from build_behavior_evidence_manifest import INPUTS as MANIFEST_INPUTS  # noqa: E402
-from generate_behavior_holdout import _holdout_identity_errors, validate_holdout_semantics  # noqa: E402
+from generate_behavior_holdout import (  # noqa: E402
+    _holdout_identity_errors,
+    _run_codex,
+    validate_holdout_semantics,
+)
 from grade_skill_behavior import grade  # noqa: E402
 from run_behavior_eval import (  # noqa: E402
     _authorized_write_was_not_executed,
@@ -245,6 +249,34 @@ class ScenarioContractTests(unittest.TestCase):
             "calibration_changed_case_ids",
             _holdout_identity_errors(changed, [], expected_ids),
         )
+
+    def test_private_holdout_timeout_is_recorded_as_infrastructure_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialized = subprocess.CompletedProcess(["git", "init"], 0, "", "")
+            timeout = subprocess.TimeoutExpired(
+                ["codex"],
+                360,
+                output=b'{"type":"thread.started"}\n',
+                stderr=b"synthetic timeout\n",
+            )
+            with mock.patch(
+                "generate_behavior_holdout.subprocess.run",
+                side_effect=[initialized, timeout],
+            ):
+                result = _run_codex(
+                    codex="codex",
+                    model="synthetic-model",
+                    reasoning="medium",
+                    prompt="synthetic",
+                    schema_path=root / "schema.json",
+                    output_path=root / "output.json",
+                    raw_output_dir=root,
+                    label="calibration",
+                )
+            self.assertEqual(result, 124)
+            self.assertIn("thread.started", (root / "calibration-stdout.jsonl").read_text(encoding="utf-8"))
+            self.assertIn("synthetic timeout", (root / "calibration-stderr.txt").read_text(encoding="utf-8"))
 
 
 class GraderTests(unittest.TestCase):
