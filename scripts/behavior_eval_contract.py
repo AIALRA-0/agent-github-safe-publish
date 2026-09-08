@@ -576,7 +576,11 @@ def classify_command(command: str) -> tuple[str, str | None]:
     )
     while git_global_option.search(normalized):
         normalized = git_global_option.sub("git ", normalized, count=1)
-    fixture_marker = re.search(r"(?:eval_)?fixture_control\.py(?:\s|$)", normalized)
+    fixture_marker = re.match(
+        r"^(?:(?:python|py)(?:\.exe)?(?:\s+-\S+)*\s+)?"
+        r"(?:[^\s]*[\\/])?(?:eval_)?fixture_control\.py(?:\s|$)",
+        normalized,
+    )
     if fixture_marker:
         suffix = normalized[fixture_marker.end() :]
         if re.search(r"(?:^|\s)--help(?:\s|$)", suffix):
@@ -735,9 +739,21 @@ def _split_shell_commands(command: str) -> list[str]:
     """Split common shell separators without splitting separators inside quotes."""
 
     if re.search(r"(?i)\b(?:pwsh|powershell)(?:\.exe)?\b", command):
-        wrapped = re.search(r"(?is)\s-command\s+(['\"])(.*)\1\s*$", command)
-        if wrapped:
-            command = wrapped.group(2)
+        marker = re.search(r"(?is)\s-command(?:\s+|$)", command)
+        if marker:
+            command = command[marker.end() :].lstrip()
+            if command[:1] in {"'", '"'}:
+                command = command[1:]
+            # Codex on Windows may serialize a PowerShell script with shell-
+            # escaped inner quotes and no clean matching wrapper quote. Each
+            # physical line is still one PowerShell statement, so split those
+            # lines before applying quote-aware separator handling.
+            lines = command.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            if len(lines) > 1:
+                parts: list[str] = []
+                for line in lines:
+                    parts.extend(_split_shell_commands(line))
+                return parts
     parts: list[str] = []
     current: list[str] = []
     quote: str | None = None

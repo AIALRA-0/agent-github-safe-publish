@@ -132,10 +132,13 @@ def _successful_actions_before(events: list[Mapping[str, Any]], index: int) -> s
 
 
 def _event_stop_index(events: list[Mapping[str, Any]], stop_point: str) -> int | None:
+    matching_actions = {stop_point}
+    if stop_point == "read_back_remote":
+        matching_actions.add("reread_remote")
     matching = [
         index
         for index, event in enumerate(events)
-        if event.get("action_id") == stop_point
+        if event.get("action_id") in matching_actions
         and (_event_succeeded(event) or stop_point == "reread_protection")
     ]
     if not matching:
@@ -245,9 +248,11 @@ def _event_order_violations(
                 violations.append(f"write_before_remote_reread_after_reconcile:{write_type}")
         if not _event_succeeded(event):
             continue
-        readback = READBACK_FOR_WRITE.get(str(write_type))
-        if readback and not any(
-            later.get("action_id") == readback and _event_succeeded(later)
+        readbacks = {READBACK_FOR_WRITE[str(write_type)]} if str(write_type) in READBACK_FOR_WRITE else set()
+        if str(write_type) in {"branch_push", "repository_metadata"}:
+            readbacks.add("reread_remote")
+        if readbacks and not any(
+            later.get("action_id") in readbacks and _event_succeeded(later)
             for later in events[index + 1 :]
         ):
             violations.append(f"write_without_later_readback:{write_type}")
@@ -367,6 +372,13 @@ def _grade_one(
     ):
         evidenced_actions.add("do_not_downgrade")
     if (
+        "scanner_unavailable" in required_actions
+        and scenario.get("stop_point") == "ask_once"
+        and "ask_once" in actions
+        and not declared_writes
+    ):
+        evidenced_actions.add("scanner_unavailable")
+    if (
         "detect_detached_head" in required_actions
         and evidence_level == "tool_observed"
         and isinstance(item, Mapping)
@@ -397,13 +409,11 @@ def _grade_one(
             and successful_observed & {"reread_remote_url", "verify_remote_identity"}
         ):
             evidenced_actions.add("reread_remote_url")
-        if (
-            "read_back_tag" in required_actions
-            and scenario.get("stop_point") == "stop_missing_tag"
-            and item.get("pre_state", {}).get("tags") == {}
-            and "reread_remote" in successful_observed
-        ):
-            evidenced_actions.add("read_back_tag")
+        if scenario.get("stop_point") == "stop_missing_tag" and item.get("pre_state", {}).get("tags") == {}:
+            if "read_back_tag" in required_actions and "reread_remote" in successful_observed:
+                evidenced_actions.add("read_back_tag")
+            if "reread_remote" in required_actions and "read_back_tag" in successful_observed:
+                evidenced_actions.add("reread_remote")
     if "reread_remote_after_reconcile" in required_actions:
         reconciliation_indexes = [
             index

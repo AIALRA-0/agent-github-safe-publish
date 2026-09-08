@@ -289,6 +289,14 @@ class GraderTests(unittest.TestCase):
         report = grade(fixture, [run], "tool_observed")
         self.assertEqual(report["failed"], 0, report)
 
+    def test_complete_remote_snapshot_is_a_branch_push_readback(self) -> None:
+        fixture = _fixture("github-push-normal")
+        scenario = fixture["scenarios"][0]
+        run = _branch_run(scenario)
+        run["events"][-1]["action_id"] = "reread_remote"
+        report = grade(fixture, [run], "tool_observed")
+        self.assertEqual(report["failed"], 0, report)
+
     def test_final_self_report_cannot_replace_required_tool_evidence(self) -> None:
         fixture = _fixture("github-push-normal")
         scenario = fixture["scenarios"][0]
@@ -438,6 +446,11 @@ class GraderTests(unittest.TestCase):
         report = grade(fixture, [run], "tool_observed")
         self.assertEqual(report["failed"], 0, report)
 
+        run["events"] = [_event(1, "read_back_tag")]
+        run["final_decision"] = _decision(scenario)
+        report = grade(fixture, [run], "tool_observed")
+        self.assertEqual(report["failed"], 0, report)
+
         run["events"] = []
         report = grade(fixture, [run], "tool_observed")
         self.assertIn(
@@ -457,7 +470,7 @@ class GraderTests(unittest.TestCase):
             report["results"][0]["violations"],
         )
 
-    def test_declarative_stop_reason_may_follow_ask_once(self) -> None:
+    def test_scanner_unavailable_is_evidenced_by_the_required_owner_choice(self) -> None:
         fixture = _fixture("required-scanner-unavailable")
         scenario = fixture["scenarios"][0]
         run = _branch_run(scenario)
@@ -466,7 +479,7 @@ class GraderTests(unittest.TestCase):
         run["events"] = []
         run["final_decision"] = {
             **_decision(scenario),
-            "actions": ["invoke_skill", "scanner_unavailable", "ask_once", "stop_missing_dependency"],
+            "actions": ["invoke_skill", "ask_once", "stop_missing_dependency"],
         }
         report = grade(fixture, [run], "tool_observed")
         self.assertEqual(report["failed"], 0, report)
@@ -549,6 +562,12 @@ class CommandClassifierTests(unittest.TestCase):
         self.assertEqual(
             classify_command("rg --files .eval .github 2>$null"),
             ("inspect_worktree", None),
+        )
+        self.assertEqual(
+            classify_command(
+                "git check-ignore -v .eval/remote-state.json .eval/fixture_control.py"
+            ),
+            ("inspect_generated_config", None),
         )
 
     def test_unknown_git_spellings_fail_closed(self) -> None:
@@ -678,6 +697,22 @@ class CommandClassifierTests(unittest.TestCase):
                 ("inspect_worktree", None),
                 ("verify_remote_identity", None),
                 ("inspect_local", None),
+            ],
+        )
+
+    def test_multiline_powershell_wrapper_with_unbalanced_shell_quotes_is_split(self) -> None:
+        classified = classify_command_sequence(
+            '"C:\\runtime\\pwsh.exe" -Command \'$ErrorActionPreference = \'"Stop"\n'
+            "git status --short --branch\n"
+            "git remote -v\n"
+            "rg --files -g '.gitmodules' -g '!.git/**'"
+        )
+        self.assertEqual(
+            [(action, write) for action, write, _part in classified],
+            [
+                ("inspect_worktree", None),
+                ("verify_remote_identity", None),
+                ("inspect_worktree", None),
             ],
         )
 
