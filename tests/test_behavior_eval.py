@@ -412,6 +412,39 @@ class GraderTests(unittest.TestCase):
             report["results"][0]["violations"],
         )
 
+    def test_complete_remote_read_can_prove_a_named_tag_is_missing(self) -> None:
+        fixture = _fixture("release-only-missing-tag")
+        scenario = fixture["scenarios"][0]
+        run = _branch_run(_fixture("github-push-normal")["scenarios"][0])
+        run.update(
+            {
+                "case_id": scenario["case_id"],
+                "pre_state": {"tags": {}},
+                "post_state": {"tags": {}},
+                "events": [_event(1, "reread_remote")],
+                "final_decision": {
+                    **_decision(scenario),
+                    "actions": [
+                        "invoke_skill",
+                        "reread_remote",
+                        "read_back_remote",
+                        "stop_missing_tag",
+                        "final_report",
+                        "run_end",
+                    ],
+                },
+            }
+        )
+        report = grade(fixture, [run], "tool_observed")
+        self.assertEqual(report["failed"], 0, report)
+
+        run["events"] = []
+        report = grade(fixture, [run], "tool_observed")
+        self.assertIn(
+            "required_actions_missing:read_back_tag,reread_remote",
+            report["results"][0]["violations"],
+        )
+
     def test_decision_action_after_stop_point_fails(self) -> None:
         fixture = _fixture("github-push-normal")
         scenario = fixture["scenarios"][0]
@@ -609,6 +642,21 @@ class CommandClassifierTests(unittest.TestCase):
         self.assertEqual(
             [(action, write) for action, write, _part in classified],
             [("inspect_local", None), ("inspect_local", None)],
+        )
+
+    def test_powershell_command_wrapper_is_unwrapped_before_splitting(self) -> None:
+        classified = classify_command_sequence(
+            '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command '
+            "'git status --short; git remote -v; "
+            'Select-String -Pattern "tag|signature" .eval/fixture_control.py\''
+        )
+        self.assertEqual(
+            [(action, write) for action, write, _part in classified],
+            [
+                ("inspect_worktree", None),
+                ("verify_remote_identity", None),
+                ("inspect_local", None),
+            ],
         )
 
     def test_absolute_path_outside_fixture_is_detected(self) -> None:

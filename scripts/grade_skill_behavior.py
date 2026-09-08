@@ -159,7 +159,12 @@ def _semantic_stop_index(
     if stop_point == "stop_missing_tag":
         if pre_state.get("tags") not in ({}, None):
             return None
-        matches = [index for index, event in enumerate(events) if event.get("action_id") == "read_back_tag"]
+        matches = [
+            index
+            for index, event in enumerate(events)
+            if event.get("action_id") in {"read_back_tag", "reread_remote"}
+            and _event_succeeded(event)
+        ]
     elif stop_point == "stop_missing_lfs":
         matches = [
             index
@@ -388,6 +393,13 @@ def _grade_one(
             and successful_observed & {"reread_remote_url", "verify_remote_identity"}
         ):
             evidenced_actions.add("reread_remote_url")
+        if (
+            "read_back_tag" in required_actions
+            and scenario.get("stop_point") == "stop_missing_tag"
+            and item.get("pre_state", {}).get("tags") == {}
+            and "reread_remote" in successful_observed
+        ):
+            evidenced_actions.add("read_back_tag")
     if "reread_remote_after_reconcile" in required_actions:
         reconciliation_indexes = [
             index

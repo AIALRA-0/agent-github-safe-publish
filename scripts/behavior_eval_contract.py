@@ -726,6 +726,10 @@ def classify_command(command: str) -> tuple[str, str | None]:
 def _split_shell_commands(command: str) -> list[str]:
     """Split common shell separators without splitting separators inside quotes."""
 
+    if re.search(r"(?i)\b(?:pwsh|powershell)(?:\.exe)?\b", command):
+        wrapped = re.search(r"(?is)\s-command\s+(['\"])(.*)\1\s*$", command)
+        if wrapped:
+            command = wrapped.group(2)
     parts: list[str] = []
     current: list[str] = []
     quote: str | None = None
