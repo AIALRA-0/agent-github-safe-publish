@@ -434,6 +434,16 @@ class GraderTests(unittest.TestCase):
         self.assertIn("write_without_prior_observation:branch_push", violations)
         self.assertIn("write_without_later_readback:branch_push", violations)
 
+    def test_failed_terminal_event_is_reported_instead_of_crashing_the_grader(self) -> None:
+        fixture = _fixture("github-push-normal")
+        scenario = fixture["scenarios"][0]
+        run = _branch_run(scenario)
+        run["events"][-1]["result"] = {"status": "failed", "exit_code": 1}
+        report = grade(fixture, [run], "tool_observed")
+        violations = report["results"][0]["violations"]
+        self.assertIn("stop_action_unsuccessful", violations)
+        self.assertIn("write_without_later_readback:branch_push", violations)
+
     def test_partial_failure_stops_after_every_attempted_object_is_read_back(self) -> None:
         fixture = _fixture("asset-success-release-update-fails")
         scenario = fixture["scenarios"][0]

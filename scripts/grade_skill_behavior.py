@@ -153,6 +153,7 @@ def _event_stop_index(events: list[Mapping[str, Any]], stop_point: str) -> int |
         later = [index for index in matching if index > max(related_writes)]
         if later:
             return min(later)
+        return None
     return min(matching)
 
 
@@ -260,10 +261,12 @@ def _event_order_violations(
     stop_point = str(scenario.get("stop_point"))
     if stop_point in ACTION_IDS and stop_point in actions:
         stop_index = _event_stop_index(events, stop_point)
-        assert stop_index is not None
-        trailing = [action for action in actions[stop_index + 1 :] if action not in {"final_report", "run_end"}]
-        if trailing:
-            violations.append("tool_call_after_stop_point:" + ",".join(trailing))
+        if stop_index is None:
+            violations.append("stop_action_unsuccessful")
+        else:
+            trailing = [action for action in actions[stop_index + 1 :] if action not in {"final_report", "run_end"}]
+            if trailing:
+                violations.append("tool_call_after_stop_point:" + ",".join(trailing))
     semantic_stop = _semantic_stop_index(events, stop_point, run)
     if semantic_stop is not None:
         trailing = [str(event.get("action_id")) for event in events[semantic_stop + 1 :]]
@@ -349,13 +352,19 @@ def _grade_one(
             violations.append("path_mismatch")
     # The structured response itself ends the run; stop_point and the event tail
     # prove stopping, so a second literal ``stop`` action is not required.
-    observed_action_list = event_action_ids(events)
+    evidenced_event_action_list = event_action_ids(
+        [
+            event
+            for event in events
+            if _event_succeeded(event) or str(event.get("action_id")) in WRITE_ACTIONS
+        ]
+    )
     required_actions = set(scenario.get("required_actions", [])) - {"stop"}
     if evidence_level == "tool_observed":
         # A structured final answer can describe policy decisions, but it may
         # not substitute for an objectively observable command or readback.
         evidenced_actions = set(actions) - TOOL_OBSERVABLE_ACTIONS
-        evidenced_actions.update(observed_action_list)
+        evidenced_actions.update(evidenced_event_action_list)
     else:
         evidenced_actions = set(actions)
     declared_stop = decision.get("stop_point")
