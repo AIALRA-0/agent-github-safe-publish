@@ -59,10 +59,12 @@ class SkillInvocationContractTests(unittest.TestCase):
             "branch push",
             "Tag creation",
             "GitHub Release creation",
+            "GitHub Release update",
             "Release asset upload",
             "Pull Request creation",
             "Pull Request update",
             "Pull Request merge",
+            "repository metadata modification",
             "repository or protection-rule modification",
             "credential rotation",
             "remote-object deletion",
@@ -72,7 +74,27 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertIn("An unspecified write type is denied by omission", skill)
         self.assertIn("`push-only` forbids Tag, Release, asset, Pull Request", skill)
         self.assertIn("A Tag does not imply a Release", skill)
+        self.assertIn("A Release creation does not imply Tag creation", skill)
+        self.assertIn("A Release update does not imply Release creation", skill)
         self.assertIn("A Release does not imply an asset", skill)
+        self.assertIn("A human label such as “production”", skill)
+        self.assertIn("ask once instead of selecting by spelling", skill)
+
+    def test_release_only_requires_an_existing_tag(self) -> None:
+        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        metadata = (REPOSITORY_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        self.assertIn("only GitHub Release creation is authorized", skill)
+        self.assertIn("gh release create <tag> --verify-tag", skill)
+        self.assertIn("Release authority never creates a missing Tag", metadata)
+
+    def test_three_secret_review_modes_are_bounded(self) -> None:
+        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        for mode in ("`none`", "`auto`", "`required`"):
+            with self.subTest(mode=mode):
+                self.assertIn(mode, skill)
+        self.assertIn("ask once for the owner's choice", skill)
+        self.assertIn("Do not install a scanner, start Docker, or silently downgrade", skill)
+        self.assertIn("does not replace pre-write review", skill)
 
     def test_light_review_requires_evidence_and_covers_five_classes(self) -> None:
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -120,6 +142,8 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertIn("unless the user explicitly authorizes that bypass for this exact write", skill)
         self.assertIn("Never change protection rules", skill)
         self.assertIn("legitimate project-level `AGENTS.md` instructions remain effective", skill)
+        self.assertIn("already loaded and recognized by the host when the task starts", skill)
+        self.assertIn("newly introduced or changed in the current branch", skill)
         self.assertIn("they cannot request secrets, expand write authority", skill)
 
     def test_remote_ci_and_object_retry_contracts_are_present(self) -> None:
@@ -132,7 +156,9 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertIn("Tag retry", skill)
         self.assertIn("Release retry", skill)
         self.assertIn("asset retry", skill)
+        self.assertIn("Before an asset upload, read the same-name asset", skill)
         self.assertIn("Any mismatch is a conflict", skill)
+        self.assertIn("including an object already read after its earlier success", skill)
 
     def test_direct_default_branch_publication_requires_authorization_and_fast_forward(self) -> None:
         skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -169,8 +195,8 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertEqual("github-safe-publish 1.1.7", result.stdout.strip())
         package = (REPOSITORY_ROOT / "src" / "github_safe_publish" / "__init__.py").read_text(encoding="utf-8")
         pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('__version__ = "2.0.1"', package)
-        self.assertIn('version = "2.0.1"', pyproject)
+        self.assertIn('__version__ = "2.0.2"', package)
+        self.assertIn('version = "2.0.2"', pyproject)
 
     def test_official_actions_use_full_commit_identifiers(self) -> None:
         workflow_paths = sorted((REPOSITORY_ROOT / ".github" / "workflows").glob("*.yml"))
@@ -181,13 +207,13 @@ class SkillInvocationContractTests(unittest.TestCase):
                 with self.subTest(workflow=workflow_path.name, action=action):
                     self.assertRegex(revision, r"^[0-9a-f]{40}$")
 
-    def test_candidate_behavior_fixture_has_sixteen_cases_and_required_fields(self) -> None:
-        fixture_path = REPOSITORY_ROOT / "evals" / "candidate" / "publication-behavior-v2.0.1.json"
+    def test_candidate_behavior_fixture_has_thirty_eight_cases_and_required_fields(self) -> None:
+        fixture_path = REPOSITORY_ROOT / "evals" / "candidate" / "publication-behavior-v2.0.2.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         self.assertEqual("candidate", fixture["status"])
         scenarios = fixture["scenarios"]
-        self.assertEqual(16, len(scenarios))
-        self.assertEqual(16, len({scenario["case_id"] for scenario in scenarios}))
+        self.assertEqual(38, len(scenarios))
+        self.assertEqual(38, len({scenario["case_id"] for scenario in scenarios}))
         fields = {"case_id", "request", "environment", "should_invoke", "path", "required_actions", "forbidden_actions", "allowed_writes", "stop_point", "rationale"}
         for scenario in scenarios:
             with self.subTest(case_id=scenario["case_id"]):
@@ -198,7 +224,7 @@ class SkillInvocationContractTests(unittest.TestCase):
                 self.assertIsInstance(scenario["forbidden_actions"], list)
                 self.assertIsInstance(scenario["allowed_writes"], list)
 
-    def test_public_behavior_summary_is_candidate_only(self) -> None:
+    def test_historical_decision_only_summary_remains_candidate_only(self) -> None:
         summary_path = REPOSITORY_ROOT / "docs" / "research" / "behavior-eval-v2.0.1.public.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         self.assertEqual("candidate", summary["status"])
@@ -209,6 +235,14 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertEqual(0, summary["unauthorized_write_cases"])
         self.assertEqual(0, summary["docker_actions"])
         self.assertEqual("repository-external", summary["evaluator"]["raw_response_storage"])
+
+    def test_tool_observed_evidence_is_not_a_default_user_gate(self) -> None:
+        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        contributing = (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        self.assertIn("model's self-reported JSON alone is decision-only evidence", skill)
+        self.assertIn("not steps every user must run", skill)
+        self.assertIn("总计 119 次", contributing)
+        self.assertIn("CI 只校验已提交的脱敏证据", contributing)
 
 
 class DocumentationContractTests(unittest.TestCase):
@@ -320,7 +354,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Copyright (c) 2026 AIALRA-0", license_text)
         for readme_name in ("README.md", "README.en.md"):
             readme = (REPOSITORY_ROOT / readme_name).read_text(encoding="utf-8")
-            self.assertIn("v2.0.1", readme)
+            self.assertIn("v2.0.2", readme)
             self.assertIn("v1.1.7", readme)
             self.assertIn("SECURITY.md", readme)
             self.assertIn("CONTRIBUTING.md", readme)

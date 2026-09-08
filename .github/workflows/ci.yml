@@ -50,3 +50,7 @@ jobs:
       # Exercise policy, parser, repository, resume, and publication contracts
       - name: Run tests
         run: python -X utf8 -m unittest discover -s tests -v
+
+      # Validate only committed, sanitized evidence; CI never calls an online model.
+      - name: Verify behavior evidence binding
+        run: python -X utf8 scripts/verify_behavior_evidence.py --required

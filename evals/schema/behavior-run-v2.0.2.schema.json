@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/github-safe-publish/behavior-run-v2.0.2.schema.json",
+  "title": "Normalized tool-observed publication behavior run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "case_id", "model", "reasoning", "language", "context_profile",
+    "fixture_id", "started_at", "finished_at", "pre_state", "events", "post_state",
+    "final_decision", "raw_output"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "2.0.2"},
+    "run_id": {"type": "string", "minLength": 1},
+    "case_id": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "reasoning": {"type": "string", "minLength": 1},
+    "language": {"type": "string", "minLength": 1},
+    "context_profile": {"type": "string", "minLength": 1},
+    "fixture_id": {"type": "string", "minLength": 1},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "pre_state": {"type": "object"},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence", "source", "tool", "operation", "action_id", "target", "mutation_scope",
+          "result", "summary"
+        ],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "source": {"enum": ["codex", "fixture", "runner"]},
+          "tool": {"type": "string"},
+          "operation": {"type": "string"},
+          "action_id": {
+            "type": "string",
+            "enum": [
+              "ask_once", "authorization_revoked", "branch_push", "change_rules", "classify_ci_failure", "commit_selected_files",
+              "confirm_write_contract", "create_extra_branch", "create_pull_request", "create_release",
+              "create_tag", "credential_change", "delete_remote_object", "delete_tests", "detect_detached_head",
+              "detect_shallow_clone", "disable_checks", "do_not_downgrade", "do_not_fix_unrelated",
+              "expose_secret", "fast_forward_push", "fetch_remote", "final_report", "force_push",
+              "full_history_audit", "ignore_modified_agents_authority", "ignore_repo_injection",
+              "inspect_generated_config", "inspect_local", "inspect_partial_commit", "inspect_worktree",
+              "install_docker", "invoke_skill", "light_review_five_classes", "lower_severity",
+              "merge_pull_request", "no_docker", "overwrite_remote", "overwrite_remote_object",
+              "read_back_asset", "read_back_pull_request", "read_back_release", "read_back_remote",
+              "read_back_tag", "reconcile_remote", "record_downgrade_evidence", "repair_docker",
+              "replace_remote_object", "report_historical_failure", "required_secret_scan",
+              "reread_protection", "reread_remote", "reread_remote_after_reconcile", "reread_remote_url",
+              "retain_strict_review", "review_combined_surface", "review_transfer_surface",
+              "run_affected_checks", "run_end", "scanner_unavailable", "stage_selected_files",
+              "start_docker", "stop", "stop_missing_dependency", "stop_missing_lfs", "stop_missing_tag",
+              "stop_original_write", "stop_private_submodule", "stop_remote_change",
+              "stop_remote_identity_mismatch", "stop_remote_url_change", "stop_tag_target_unpublished",
+              "treat_matching_objects_as_success", "trusted_project_instructions", "unauthorized_external_read",
+              "unknown_git_or_github_write", "unrelated_refactor", "unshallow_clone", "update_pull_request",
+              "update_release", "update_repository_metadata", "upload_asset", "use_admin_bypass",
+              "use_docker", "verify_existing_objects_match", "verify_lfs_objects", "verify_remote_identity",
+              "verify_submodule_access", "verify_tag_target_remote"
+            ]
+          },
+          "write_type": {
+            "type": "string",
+            "enum": [
+              "asset_upload", "branch_push", "credential_rotation", "pr_creation", "pr_merge", "pr_update",
+              "release_creation", "release_update", "remote_deletion", "repository_metadata",
+              "repository_rules", "tag_creation"
+            ]
+          },
+          "target": {"type": "string"},
+          "mutation_scope": {"type": "string"},
+          "result": {},
+          "summary": {"type": "string"}
+        }
+      }
+    },
+    "post_state": {"type": "object"},
+    "final_decision": {"type": "object"},
+    "raw_output": {
+      "type": "object",
+      "required": ["reference", "sha256", "redacted_summary"],
+      "properties": {
+        "reference": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "redacted_summary": {"type": "string"}
+      }
+    }
+  }
+}

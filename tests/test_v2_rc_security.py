@@ -114,7 +114,7 @@ class ReleaseCandidateSecurityTests(unittest.TestCase):
                 "object": "nested/config.txt",
                 "sha256": hashlib.sha256(retained.read_bytes()).hexdigest(),
                 "scanner_ids": ["gitleaks-8.30.1:synthetic"],
-                "tool_version": "2.0.1",
+                "tool_version": "2.0.2",
                 "policy_sha256": policy_sha256(binding_document),
                 "issued_by": "information-owner",
                 "issued_at": "2026-08-31T00:00:00Z",

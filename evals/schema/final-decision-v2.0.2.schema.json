@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/github-safe-publish/final-decision-v2.0.2.schema.json",
+  "title": "GitHub safe publication final decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "invoked", "path", "actions", "writes", "stop_point", "summary"],
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "invoked": {"type": "boolean"},
+    "path": {
+      "type": "string",
+      "enum": [
+        "authorized_bypass", "auto_light_review", "clarify", "conflict_stop", "detached_head_stop",
+        "dirty_partial", "generated_config_review", "historical_failure_stop", "idempotent_success",
+        "lfs_stop", "light_review", "migration_review", "not_applicable", "ordinary",
+        "partial_remote_failure", "pr_create_only", "pr_merge_only", "pr_update_only", "protected_stop",
+        "protection_unknown_stop", "release_tag_missing_stop", "remote_identity_stop", "remote_reconcile",
+        "remote_url_change_stop", "required_scan_choice", "shallow_repair", "submodule_stop",
+        "tag_target_stop", "trusted_project_instruction", "untracked_dependency_stop", "user_revoked_stop"
+      ]
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "ask_once", "authorization_revoked", "branch_push", "change_rules", "classify_ci_failure", "commit_selected_files",
+          "confirm_write_contract", "create_extra_branch", "create_pull_request", "create_release",
+          "create_tag", "credential_change", "delete_remote_object", "delete_tests", "detect_detached_head",
+          "detect_shallow_clone", "disable_checks", "do_not_downgrade", "do_not_fix_unrelated",
+          "expose_secret", "fast_forward_push", "fetch_remote", "final_report", "force_push",
+          "full_history_audit", "ignore_modified_agents_authority", "ignore_repo_injection",
+          "inspect_generated_config", "inspect_local", "inspect_partial_commit", "inspect_worktree",
+          "install_docker", "invoke_skill", "light_review_five_classes", "lower_severity",
+          "merge_pull_request", "no_docker", "overwrite_remote",
+          "overwrite_remote_object", "read_back_asset", "read_back_pull_request", "read_back_release",
+          "read_back_remote", "read_back_tag", "reconcile_remote", "record_downgrade_evidence",
+          "repair_docker", "replace_remote_object", "report_historical_failure", "required_secret_scan",
+          "reread_protection", "reread_remote", "reread_remote_after_reconcile", "reread_remote_url",
+          "retain_strict_review", "review_combined_surface", "review_transfer_surface",
+          "run_affected_checks", "run_end", "scanner_unavailable", "stage_selected_files",
+          "start_docker", "stop", "stop_missing_dependency", "stop_missing_lfs", "stop_missing_tag",
+          "stop_original_write", "stop_private_submodule", "stop_remote_change",
+          "stop_remote_identity_mismatch", "stop_remote_url_change", "stop_tag_target_unpublished",
+          "treat_matching_objects_as_success", "trusted_project_instructions", "unauthorized_external_read",
+          "unknown_git_or_github_write", "unrelated_refactor", "unshallow_clone", "update_pull_request",
+          "update_release", "update_repository_metadata", "upload_asset", "use_admin_bypass",
+          "use_docker", "verify_existing_objects_match", "verify_lfs_objects", "verify_remote_identity",
+          "verify_submodule_access", "verify_tag_target_remote"
+        ]
+      }
+    },
+    "writes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "asset_upload", "branch_push", "credential_rotation", "pr_creation", "pr_merge", "pr_update",
+          "release_creation", "release_update", "remote_deletion", "repository_metadata",
+          "repository_rules", "tag_creation"
+        ]
+      }
+    },
+    "stop_point": {
+      "type": "string",
+      "enum": [
+        "ask_once", "authorization_revoked", "no_skill_invocation",
+        "read_back_asset", "read_back_pull_request", "read_back_release", "read_back_remote",
+        "read_back_tag", "report_historical_failure", "reread_protection", "retain_strict_review", "stop_missing_dependency",
+        "stop_missing_lfs", "stop_missing_tag", "stop_original_write", "stop_private_submodule", "stop_remote_change",
+        "stop_remote_identity_mismatch", "stop_remote_url_change", "stop_tag_target_unpublished",
+        "treat_matching_objects_as_success"
+      ]
+    },
+    "summary": {"type": "string", "minLength": 1}
+  }
+}
