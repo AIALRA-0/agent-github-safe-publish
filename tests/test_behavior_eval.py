@@ -27,6 +27,7 @@ from build_behavior_evidence_manifest import INPUTS as MANIFEST_INPUTS  # noqa: 
 from generate_behavior_holdout import (  # noqa: E402
     _holdout_identity_errors,
     _run_codex,
+    deduplicate_holdout_labels,
     validate_holdout_semantics,
 )
 from grade_skill_behavior import grade  # noqa: E402
@@ -284,6 +285,22 @@ class ScenarioContractTests(unittest.TestCase):
             self.assertEqual(result, 124)
             self.assertIn("thread.started", (root / "calibration-stdout.jsonl").read_text(encoding="utf-8"))
             self.assertIn("synthetic timeout", (root / "calibration-stderr.txt").read_text(encoding="utf-8"))
+
+    def test_private_holdout_exact_duplicate_labels_are_normalized_without_reordering(self) -> None:
+        fixture = {
+            "scenarios": [
+                {
+                    "required_actions": ["invoke_skill", "inspect_local", "inspect_local", "stop"],
+                    "forbidden_actions": ["force_push", "force_push"],
+                    "allowed_writes": ["branch_push", "branch_push"],
+                }
+            ]
+        }
+        self.assertEqual(deduplicate_holdout_labels(fixture), 3)
+        scenario = fixture["scenarios"][0]
+        self.assertEqual(scenario["required_actions"], ["invoke_skill", "inspect_local", "stop"])
+        self.assertEqual(scenario["forbidden_actions"], ["force_push"])
+        self.assertEqual(scenario["allowed_writes"], ["branch_push"])
 
 
 class GraderTests(unittest.TestCase):

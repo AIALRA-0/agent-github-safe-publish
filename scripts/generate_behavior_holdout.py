@@ -173,6 +173,23 @@ def validate_holdout_semantics(fixture: dict) -> list[str]:
     return errors
 
 
+def deduplicate_holdout_labels(fixture: dict) -> int:
+    """Remove exact duplicate closed labels while preserving their first-seen order."""
+
+    removed = 0
+    for scenario in fixture.get("scenarios", []):
+        if not isinstance(scenario, dict):
+            continue
+        for field in ("required_actions", "forbidden_actions", "allowed_writes"):
+            values = scenario.get(field)
+            if not isinstance(values, list):
+                continue
+            unique = list(dict.fromkeys(values))
+            removed += len(values) - len(unique)
+            scenario[field] = unique
+    return removed
+
+
 def _run_codex(
     *,
     codex: str,
@@ -285,6 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Resume independent calibration from a preserved generated candidate without drawing new cases",
     )
+    parser.add_argument(
+        "--calibrated-candidate",
+        type=Path,
+        help="Resume deterministic validation from a preserved calibration result without another model call",
+    )
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning", default="high")
     parser.add_argument("--calibration-model", default="gpt-5.6-sol")
@@ -378,16 +400,23 @@ Observable write mapping:
 Required readback by write type:
 {json.dumps(READBACK_FOR_WRITE, sort_keys=True)}
 """
-    calibration_code = _run_codex(
-        codex=args.codex,
-        model=args.calibration_model,
-        reasoning=args.calibration_reasoning,
-        prompt=calibration_prompt,
-        schema_path=schema_path,
-        output_path=calibrated_message,
-        raw_output_dir=args.raw_output_dir,
-        label="calibration",
-    )
+    if args.calibrated_candidate is not None:
+        if not args.calibrated_candidate.is_file():
+            print(json.dumps({"status": "invalid_calibrated_candidate_path"}))
+            return 1
+        calibrated_message.write_bytes(args.calibrated_candidate.read_bytes())
+        calibration_code = 0
+    else:
+        calibration_code = _run_codex(
+            codex=args.codex,
+            model=args.calibration_model,
+            reasoning=args.calibration_reasoning,
+            prompt=calibration_prompt,
+            schema_path=schema_path,
+            output_path=calibrated_message,
+            raw_output_dir=args.raw_output_dir,
+            label="calibration",
+        )
     if calibration_code != 0 or not calibrated_message.exists():
         print(
             json.dumps(
@@ -396,6 +425,7 @@ Required readback by write type:
         )
         return 2
     fixture = json.loads(calibrated_message.read_text(encoding="utf-8"))
+    deduplicated_labels = deduplicate_holdout_labels(fixture)
     generated_ids = [item["case_id"] for item in generated_fixture["scenarios"]]
     errors = (
         validate_fixture(fixture)
@@ -406,7 +436,10 @@ Required readback by write type:
         print(json.dumps({"status": "invalid_calibrated_holdout", "error_count": len(errors)}))
         return 1
     args.holdout_output.parent.mkdir(parents=True, exist_ok=True)
-    args.holdout_output.write_bytes(calibrated_message.read_bytes())
+    args.holdout_output.write_text(
+        json.dumps(fixture, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     digest = hashlib.sha256(args.holdout_output.read_bytes()).hexdigest()
     print(
         json.dumps(
@@ -414,6 +447,7 @@ Required readback by write type:
                 "status": "pass",
                 "scenario_count": 8,
                 "calibrated_in_fresh_context": True,
+                "deduplicated_labels": deduplicated_labels,
                 "sha256": digest,
             }
         )
