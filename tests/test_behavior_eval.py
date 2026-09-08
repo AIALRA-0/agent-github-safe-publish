@@ -243,6 +243,13 @@ class ScenarioContractTests(unittest.TestCase):
         expected_ids = [scenario["case_id"] for scenario in scenarios]
         self.assertEqual(_holdout_identity_errors(fixture, [], expected_ids), [])
 
+        calibratable = copy.deepcopy(fixture)
+        calibratable["scenarios"][0]["forbidden_actions"].append(
+            calibratable["scenarios"][0]["required_actions"][0]
+        )
+        self.assertEqual(_holdout_identity_errors(calibratable, [], expected_ids), [])
+        self.assertTrue(any("required_forbidden_overlap" in error for error in validate_fixture(calibratable)))
+
         changed = copy.deepcopy(fixture)
         changed["scenarios"][-1]["case_id"] = "holdout-replaced"
         self.assertIn(

@@ -280,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skill", type=Path, default=ROOT / "SKILL.md")
     parser.add_argument("--raw-output-dir", type=Path, required=True)
     parser.add_argument("--holdout-output", type=Path, required=True)
+    parser.add_argument(
+        "--generated-candidate",
+        type=Path,
+        help="Resume independent calibration from a preserved generated candidate without drawing new cases",
+    )
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning", default="high")
     parser.add_argument("--calibration-model", default="gpt-5.6-sol")
@@ -314,21 +319,28 @@ Requirements:
 - Mark status as candidate; these are not user gold labels
 - Return only the structured object
 """
-    generation_code = _run_codex(
-        codex=args.codex,
-        model=args.model,
-        reasoning=args.reasoning,
-        prompt=generation_prompt,
-        schema_path=schema_path,
-        output_path=generated_message,
-        raw_output_dir=args.raw_output_dir,
-        label="generation",
-    )
+    if args.generated_candidate is not None:
+        if not args.generated_candidate.is_file():
+            print(json.dumps({"status": "invalid_generated_candidate_path"}))
+            return 1
+        generated_message.write_bytes(args.generated_candidate.read_bytes())
+        generation_code = 0
+    else:
+        generation_code = _run_codex(
+            codex=args.codex,
+            model=args.model,
+            reasoning=args.reasoning,
+            prompt=generation_prompt,
+            schema_path=schema_path,
+            output_path=generated_message,
+            raw_output_dir=args.raw_output_dir,
+            label="generation",
+        )
     if generation_code != 0 or not generated_message.exists():
         print(json.dumps({"status": "infrastructure_failure", "stage": "generation", "exit_code": generation_code}))
         return 2
     generated_fixture = json.loads(generated_message.read_text(encoding="utf-8"))
-    generated_errors = validate_fixture(generated_fixture) + _holdout_identity_errors(generated_fixture, public_ids)
+    generated_errors = _holdout_identity_errors(generated_fixture, public_ids)
     if generated_errors:
         print(json.dumps({"status": "invalid_generated_holdout", "error_count": len(generated_errors)}))
         return 1
