@@ -564,6 +564,10 @@ class CommandClassifierTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(classify_command(command), ("unknown_git_or_github_write", None))
         self.assertEqual(classify_command("git submodule status"), ("verify_submodule_access", None))
+        self.assertEqual(
+            classify_command("git submodule foreach --recursive git remote -v"),
+            ("verify_submodule_access", None),
+        )
         self.assertEqual(classify_command("git lfs fsck --objects"), ("verify_lfs_objects", None))
         self.assertEqual(classify_command("git merge-base --is-ancestor origin/main HEAD"), ("inspect_local", None))
         self.assertEqual(classify_command("git merge origin/main"), ("reconcile_remote", None))

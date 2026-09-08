@@ -605,6 +605,12 @@ def classify_command(command: str) -> tuple[str, str | None]:
         return "unknown_git_or_github_write", None
     if re.search(r"\bgit\s+submodule\s+(?:status|summary)(?:\s|$)", normalized):
         return "verify_submodule_access", None
+    if re.fullmatch(
+        r"git\s+submodule\s+foreach(?:\s+--recursive)?\s+"
+        r"(?:['\"])?git\s+remote(?:\s+(?:-v|--verbose))?(?:['\"])?",
+        normalized,
+    ):
+        return "verify_submodule_access", None
     if re.search(r"\bgit\s+submodule\b", normalized):
         return "unknown_git_or_github_write", None
 
