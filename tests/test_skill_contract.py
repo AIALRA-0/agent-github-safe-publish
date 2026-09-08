@@ -75,6 +75,8 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertIn("`push-only` forbids Tag, Release, asset, Pull Request", skill)
         self.assertIn("A Tag does not imply a Release", skill)
         self.assertIn("A Release creation does not imply Tag creation", skill)
+        self.assertIn("terminal for Tag-only work", skill)
+        self.assertIn("do not run later tests, protection reads, reviews, or object checks", skill)
         self.assertIn("A Release update does not imply Release creation", skill)
         self.assertIn("A Release does not imply an asset", skill)
         self.assertIn("A human label such as “production”", skill)

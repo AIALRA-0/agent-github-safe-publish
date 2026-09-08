@@ -1,7 +1,7 @@
 interface:
   display_name: "GitHub 安全发布指导"
   short_description: "指导 Codex 按授权安全完成 GitHub 发布"
-  default_prompt: "Use $github-safe-publish to complete only the separately authorized GitHub write types, verify each named remote object, and stop at the user's exact endpoint; Release authority never creates a missing Tag."
+  default_prompt: "Use $github-safe-publish to complete only the separately authorized GitHub write types, verify each named remote object, and stop at the user's exact endpoint or the first terminal pre-write fact; Release authority never creates a missing Tag."
 
 policy:
   allow_implicit_invocation: true

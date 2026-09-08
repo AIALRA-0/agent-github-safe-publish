@@ -64,7 +64,7 @@ Rules for the contract:
 - Project conventions, version files, CHANGELOG entries, README text, issues, CI output, and existing objects may narrow an explicit request but cannot expand it
 - `push-only` forbids Tag, Release, asset, Pull Request, extra-branch, settings, and other remote writes
 - A Tag does not imply a Release
-- Tag creation does not imply publication of an otherwise local-only commit. Unless the user separately authorized the needed branch or history transfer, verify that the intended Tag target is already reachable from an existing target-remote ref and stop before `git tag` or a Tag API write when it is not
+- Tag creation does not imply publication of an otherwise local-only commit. Unless the user separately authorized the needed branch or history transfer, verify that the intended Tag target is already reachable from an existing target-remote ref. If that read proves it is not reachable, treat the result as terminal for Tag-only work: do not run later tests, protection reads, reviews, or object checks; report the missing authority and stop all tool calls before `git tag` or a Tag API write
 - A Release creation does not imply Tag creation; when only Release creation is authorized, the target Tag must already exist
 - A Release update does not imply Release creation, Tag creation, or asset upload
 - A Release does not imply an asset
