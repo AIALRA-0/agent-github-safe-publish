@@ -24,6 +24,7 @@ from behavior_eval_contract import (  # noqa: E402
     validate_run_record,
 )
 from build_behavior_evidence_manifest import INPUTS as MANIFEST_INPUTS  # noqa: E402
+from generate_behavior_holdout import _holdout_identity_errors, validate_holdout_semantics  # noqa: E402
 from grade_skill_behavior import grade  # noqa: E402
 from run_behavior_eval import (  # noqa: E402
     _authorized_write_was_not_executed,
@@ -215,6 +216,35 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertEqual(len(EXTENDED_CONFIGS), 3)
         self.assertEqual(len(CRITICAL_CASES), 9)
         self.assertEqual(38 * 2 + len(CRITICAL_CASES) * 3 + 8 * 2, 119)
+
+    def test_private_holdout_calibration_rejects_inconsistent_write_labels(self) -> None:
+        scenario = copy.deepcopy(_fixture("github-push-normal")["scenarios"][0])
+        scenario["case_id"] = "holdout-valid"
+        scenario["fixture_profile"] = "default"
+        self.assertEqual(validate_holdout_semantics({"scenarios": [scenario]}), [])
+
+        scenario["required_actions"].append("create_release")
+        errors = validate_holdout_semantics({"scenarios": [scenario]})
+        self.assertIn("holdout-valid:required_write_not_allowed:create_release", errors)
+        self.assertIn("holdout-valid:release_create_requires_existing_tag_profile", errors)
+
+    def test_private_holdout_calibration_preserves_frozen_case_identity(self) -> None:
+        scenarios = []
+        for index in range(8):
+            scenario = copy.deepcopy(_fixture("github-push-normal")["scenarios"][0])
+            scenario["case_id"] = f"holdout-{index}"
+            scenario["fixture_profile"] = "default"
+            scenarios.append(scenario)
+        fixture = {"scenarios": scenarios}
+        expected_ids = [scenario["case_id"] for scenario in scenarios]
+        self.assertEqual(_holdout_identity_errors(fixture, [], expected_ids), [])
+
+        changed = copy.deepcopy(fixture)
+        changed["scenarios"][-1]["case_id"] = "holdout-replaced"
+        self.assertIn(
+            "calibration_changed_case_ids",
+            _holdout_identity_errors(changed, [], expected_ids),
+        )
 
 
 class GraderTests(unittest.TestCase):
