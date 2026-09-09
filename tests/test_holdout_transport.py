@@ -156,6 +156,9 @@ class HoldoutTransportTests(unittest.TestCase):
             self.assertIn("schema maps use arrays of unique key/value entries", prompt)
             self.assertIn("only unconstrained leaf values are JSON-encoded strings", prompt)
             if kwargs["label"] == "calibration":
+                self.assertIn("Preserve case_id, request, environment and fixture_profile exactly", prompt)
+                self.assertIn("Independently adjudicate and, when needed, correct", prompt)
+                self.assertIn("required and forbidden actions must not overlap", prompt)
                 candidate = prompt.split("<candidate_holdout>\n", 1)[1].split("\n</candidate_holdout>", 1)[0]
                 self.assertEqual(subject._decode_fixture_transport(json.loads(candidate)),
                                  subject._decode_fixture_transport(generated))

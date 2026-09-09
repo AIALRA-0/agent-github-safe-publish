@@ -375,12 +375,16 @@ class GeneratorPreservationTests(unittest.TestCase):
         item["fixture_requirements"] = [requirement(["authorization_revoked"], False)]
         return {"schema_version": "2.0.2", "status": "candidate", "purpose": "Unit check", "scenarios": [item]}
 
-    def test_only_execution_fields_may_change_during_calibration(self):
+    def test_calibration_may_adjudicate_labels_but_cannot_rewrite_the_task(self):
         original = self.candidate()
         updated = deepcopy(original)
         updated["scenarios"][0]["fixture_setup"]["shallow"] = True
+        updated["scenarios"][0]["required_actions"] = ["invoke_skill", "read_remote", "stop"]
+        updated["scenarios"][0]["allowed_writes"] = ["branch_push"]
+        updated["scenarios"][0]["stop_point"] = "read_remote"
+        updated["scenarios"][0]["rationale"] = "Independent synthetic adjudication"
         self.assertEqual([], validate_calibration_preserves_content(original, updated))
-        for field in ("request", "environment", "required_actions", "allowed_writes", "stop_point", "fixture_profile"):
+        for field in ("case_id", "request", "environment", "fixture_profile"):
             changed = deepcopy(updated)
             changed["scenarios"][0][field] = "changed"
             self.assertEqual(["calibration_content_changed"], validate_calibration_preserves_content(original, changed))
