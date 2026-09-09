@@ -34,6 +34,25 @@ def synthetic_stream():
 
 
 class HoldoutCaptureTests(unittest.TestCase):
+    def test_errors_keep_only_allowlisted_codes_and_bounded_http_status(self):
+        records = [
+            {"type": "error", "code": "invalid_json_schema", "status_code": 400,
+             "message": "HIDDEN_PROMPT", "param": "HIDDEN_PATH"},
+            {"type": "turn.failed", "error": {"code": "rate_limit_exceeded",
+             "http_status_code": 429, "message": "HIDDEN_REASONING"}},
+            {"type": "error", "code": "HIDDEN_UNKNOWN", "status": "HIDDEN_STATUS"},
+            {"type": "error", "code": ["HIDDEN"], "status_code": True},
+            {"type": "error", "status_code": 999999},
+            {"type": "error", "channel": "analysis", "code": "server_error", "status": 500},
+        ]
+        visible = subject._visible_capture("\n".join(map(json.dumps, records)))
+        self.assertNotIn("HIDDEN", visible)
+        self.assertEqual([json.loads(line) for line in visible.splitlines()], [
+            {"type": "error", "code": "invalid_json_schema", "http_status_code": 400},
+            {"type": "turn.failed", "code": "rate_limit_exceeded", "http_status_code": 429},
+            {"type": "error"}, {"type": "error"}, {"type": "error"},
+        ])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="gsp-holdout-capture-test-")
         self.addCleanup(temporary.cleanup)

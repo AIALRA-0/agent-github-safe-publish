@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -79,7 +80,14 @@ def _schema() -> dict:
             },
         },
     }
-    scenario["properties"].update(fixture_schema_properties())
+    # The executable DSL permits maps and optional properties. Keep it out of
+    # the API's strict schema; decode this lossless transport before validation.
+    scenario["properties"].update({
+        field: {"type": "string", "description": "JSON-encoded " + (
+            "object" if field in ("fixture_setup", "fixture_state") else "array"
+        ) + "; must conform to the fixture schema reference in the prompt"}
+        for field in SPEC_FIELDS
+    })
     scenario["required"].extend(SPEC_FIELDS)
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -93,6 +101,76 @@ def _schema() -> dict:
             "scenarios": {"type": "array", "items": scenario},
         },
     }
+
+
+def _strict_json_loads(text: str):
+    """Reject ambiguous JSON without including input values in diagnostics."""
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate_json_key")
+            result[key] = value
+        return result
+
+    def constant(_):
+        raise ValueError("nonfinite_json_number")
+
+    def number(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("nonfinite_json_number")
+        return parsed
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+
+
+def _decode_fixture_transport(payload: dict) -> dict:
+    """Accept encoded generation or canonical resume data; never mutate either."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("scenarios"), list):
+        raise ValueError("invalid_fixture_transport")
+    scenarios = []
+    for scenario in payload["scenarios"]:
+        if not isinstance(scenario, dict):
+            raise ValueError("invalid_fixture_transport")
+        decoded = dict(scenario)
+        for field in SPEC_FIELDS:
+            value = decoded.get(field)
+            if isinstance(value, str):
+                value = _strict_json_loads(value)
+            expected = dict if field in ("fixture_setup", "fixture_state") else list
+            if not isinstance(value, expected):
+                raise ValueError("invalid_fixture_transport")
+            decoded[field] = value
+        scenarios.append(decoded)
+    return {**payload, "scenarios": scenarios}
+
+
+def _load_candidate(path: Path) -> dict:
+    return _decode_fixture_transport(_strict_json_loads(path.read_text(encoding="utf-8")))
+
+
+def _safe_error_fields(event: dict) -> dict:
+    """Only fixed public error codes and bounded HTTP statuses, never messages."""
+    allowed = {
+        "invalid_json_schema", "invalid_request_error", "invalid_value",
+        "unsupported_parameter", "model_not_found", "context_length_exceeded",
+        "rate_limit_exceeded", "insufficient_quota", "server_error",
+        "authentication_error", "permission_denied",
+    }
+    result = {}
+    sources = [event]
+    if isinstance(event.get("error"), dict):
+        sources.append(event["error"])
+    for source in sources:
+        code = source.get("code")
+        if isinstance(code, str) and code in allowed:
+            result["code"] = code
+        for key in ("status", "status_code", "http_status_code"):
+            status = source.get(key)
+            if type(status) is int and 400 <= status <= 599:
+                result["http_status_code"] = status
+    return result
 
 
 def _environment(raw_root: Path) -> dict[str, str]:
@@ -136,6 +214,8 @@ def _visible_capture(stdout: str | bytes | None) -> str:
         elif kind in ("thread.started", "turn.started", "turn.completed", "turn.failed", "error"):
             # Free-form error diagnostics are not guaranteed to be visible content.
             visible = {"type": kind}
+            if kind in ("turn.failed", "error"):
+                visible.update(_safe_error_fields(event))
             if isinstance(event.get("thread_id"), str):
                 visible["thread_id"] = event["thread_id"]
         else:
@@ -397,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     schema_path = args.raw_output_dir / "holdout-output.schema.json"
     schema_path.write_text(json.dumps(_schema(), indent=2) + "\n", encoding="utf-8")
     generated_message = args.raw_output_dir / "generated-candidate.private.json"
+    fixture_reference = json.dumps(fixture_schema_properties(), ensure_ascii=False, sort_keys=True)
     generation_prompt = f"""Create exactly eight private synthetic candidate scenarios that test the Skill below.
 
 <skill>
@@ -405,6 +486,11 @@ def main(argv: list[str] | None = None) -> int:
 
 Public scenario IDs already used:
 {json.dumps(public_ids)}
+
+Fixture DSL reference (applies to the decoded values, not to the transport strings):
+<fixture_schema_reference>
+{fixture_reference}
+</fixture_schema_reference>
 
 Requirements:
 - Use eight new case_id values beginning with holdout- and do not repeat public scenarios verbatim
@@ -415,6 +501,7 @@ Requirements:
 - A blocked scenario must not require the blocked write; use the exact terminal action as its stop point
 - Select one fixture_profile supported by the output schema and make the request consistent with that fixture state
 - Provide explicit fixture_setup, fixture_state, fixture_transitions and fixture_requirements; an empty object/list is permitted only when no corresponding preparation is needed
+- Encode each of those four fields as a JSON string containing exactly one value matching the reference: setup/state objects, transitions/requirements arrays; no duplicate keys or nonfinite numbers
 - Bind every environment premise to actual preparation or a supported requirement; requirements use at=initial or the id of a transition, and kind=exists, absent or equals
 - Use @base, @candidate, @remote_advanced or @remote_candidate for commit targets, or declare a custom alias to one of those roles; never invent commit hashes
 - Object profiles do not supply named objects: declare their real identities and related objects explicitly; unknown fields and unimplemented premises fail validation
@@ -443,7 +530,11 @@ Requirements:
     if generation_code != 0 or not generated_message.exists():
         print(json.dumps({"status": "infrastructure_failure", "stage": "generation", "exit_code": generation_code}))
         return 2
-    generated_fixture = json.loads(generated_message.read_text(encoding="utf-8"))
+    try:
+        generated_fixture = _load_candidate(generated_message)
+    except (ValueError, RecursionError):
+        print(json.dumps({"status": "invalid_generated_transport"}))
+        return 1
     generated_errors = _holdout_identity_errors(generated_fixture, public_ids)
     if generated_errors:
         print(json.dumps({"status": "invalid_generated_holdout", "error_count": len(generated_errors)}))
@@ -457,10 +548,16 @@ Requirements:
 </skill>
 
 <candidate_holdout>
-{generated_message.read_text(encoding="utf-8")}
+{json.dumps(generated_fixture, ensure_ascii=False)}
 </candidate_holdout>
 
+Fixture DSL reference (applies to decoded values):
+<fixture_schema_reference>
+{fixture_reference}
+</fixture_schema_reference>
+
 Return the same object, changing only fixture_setup, fixture_state, fixture_transitions and fixture_requirements to encode the existing task faithfully. All other fields, including requests, visible facts, profiles, identifiers, expected actions, allowed writes and stopping labels, are frozen. If the task is inconsistent or unsupported, preserve it so validation fails; do not repair it by changing the question or answer.
+For output transport only, encode those four fields as JSON strings matching the reference (setup/state objects, transitions/requirements arrays). Do not encode or change any other field; no duplicate keys or nonfinite numbers.
 
 Calibration rules:
 - Do not modify, reorder, deduplicate or relax any expected label, even if it appears wrong; retain original failures for independent adjudication
@@ -501,7 +598,11 @@ Required readback by write type:
             )
         )
         return 2
-    fixture = json.loads(calibrated_message.read_text(encoding="utf-8"))
+    try:
+        fixture = _load_candidate(calibrated_message)
+    except (ValueError, RecursionError):
+        print(json.dumps({"status": "invalid_calibrated_transport"}))
+        return 1
     generated_ids = [item["case_id"] for item in generated_fixture["scenarios"]]
     errors = (
         validate_fixture(fixture)
