@@ -75,8 +75,12 @@ class FixtureSchemaTests(unittest.TestCase):
     def test_generation_schema_and_validator_share_fields(self):
         generated = _schema()["properties"]["scenarios"]["items"]
         self.assertTrue(set(SPEC_FIELDS) <= set(generated["required"]))
+        self.assertIn("fixture_encoding", generated["required"])
+        self.assertEqual("native-v1", generated["properties"]["fixture_encoding"]["const"])
+        expected = {"fixture_setup": "object", "fixture_state": "object",
+                    "fixture_transitions": "array", "fixture_requirements": "array"}
         for key in fixture_schema_properties():
-            self.assertEqual("string", generated["properties"][key]["type"])
+            self.assertEqual(expected[key], generated["properties"][key]["type"])
         self.assertFalse(generated["additionalProperties"])
 
     def test_legacy_records_fail_without_being_filled_or_changed(self):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -38,6 +39,7 @@ FIXTURE_PROFILES = frozenset(PROFILES)
 
 
 def _schema() -> dict:
+    fixture_properties = fixture_schema_properties()
     scenario = {
         "type": "object",
         "additionalProperties": False,
@@ -78,17 +80,11 @@ def _schema() -> dict:
                 "type": "string",
                 "enum": sorted(FIXTURE_PROFILES),
             },
+            "fixture_encoding": {"type": "string", "const": "native-v1"},
         },
     }
-    # The executable DSL permits maps and optional properties. Keep it out of
-    # the API's strict schema; decode this lossless transport before validation.
-    scenario["properties"].update({
-        field: {"type": "string", "description": "JSON-encoded " + (
-            "object" if field in ("fixture_setup", "fixture_state") else "array"
-        ) + "; must conform to the fixture schema reference in the prompt"}
-        for field in SPEC_FIELDS
-    })
-    scenario["required"].extend(SPEC_FIELDS)
+    scenario["properties"].update({field: _transport_schema(fixture_properties[field]) for field in SPEC_FIELDS})
+    scenario["required"].extend(["fixture_encoding", *SPEC_FIELDS])
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -101,6 +97,38 @@ def _schema() -> dict:
             "scenarios": {"type": "array", "items": scenario},
         },
     }
+
+
+def _transport_schema(schema: dict) -> dict:
+    """Make the fixture DSL strict-output compatible without nesting JSON strings."""
+    if not schema:
+        return {"type": "string", "description": "JSON-encoded arbitrary value"}
+    if "anyOf" in schema:
+        return {"anyOf": [_transport_schema(option) for option in schema["anyOf"]]}
+    kind = schema.get("type")
+    if kind == "object":
+        properties = schema.get("properties")
+        additional = schema.get("additionalProperties")
+        if properties is None and isinstance(additional, dict):
+            return {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"key": {"type": "string"}, "value": _transport_schema(additional)},
+                    "required": ["key", "value"],
+                },
+            }
+        required = set(schema.get("required", []))
+        encoded = {}
+        for name, child in properties.items():
+            converted = _transport_schema(child)
+            encoded[name] = converted if name in required else {"anyOf": [converted, {"type": "null"}]}
+        return {"type": "object", "additionalProperties": False,
+                "properties": encoded, "required": list(encoded)}
+    if kind == "array":
+        return {**schema, "items": _transport_schema(schema["items"])}
+    return deepcopy(schema)
 
 
 def _strict_json_decoder() -> json.JSONDecoder:
@@ -143,6 +171,144 @@ def _decode_fixture_string(value: str):
         return decoded
 
 
+def _decode_native_transport(value, schema: dict):
+    if not schema:
+        if not isinstance(value, str):
+            raise ValueError("invalid_fixture_transport")
+        return _decode_fixture_string(value)
+    if "anyOf" in schema:
+        for option in schema["anyOf"]:
+            try:
+                return _decode_native_transport(value, option)
+            except ValueError:
+                continue
+        raise ValueError("invalid_fixture_transport")
+    kind = schema.get("type")
+    if isinstance(kind, list):
+        if value is None and "null" in kind:
+            return None
+        for option in kind:
+            if option != "null":
+                try:
+                    return _decode_native_transport(value, {**schema, "type": option})
+                except ValueError:
+                    continue
+        raise ValueError("invalid_fixture_transport")
+    if kind == "null":
+        if value is not None:
+            raise ValueError("invalid_fixture_transport")
+        return None
+    if kind == "object":
+        properties = schema.get("properties")
+        additional = schema.get("additionalProperties")
+        if properties is None and isinstance(additional, dict):
+            if not isinstance(value, list):
+                raise ValueError("invalid_fixture_transport")
+            result = {}
+            for entry in value:
+                if not isinstance(entry, dict) or set(entry) != {"key", "value"} or not isinstance(entry["key"], str):
+                    raise ValueError("invalid_fixture_transport")
+                if entry["key"] in result:
+                    raise ValueError("duplicate_fixture_map_key")
+                result[entry["key"]] = _decode_native_transport(entry["value"], additional)
+            return result
+        if not isinstance(value, dict) or set(value) != set(properties):
+            raise ValueError("invalid_fixture_transport")
+        required = set(schema.get("required", []))
+        result = {}
+        for name, child in properties.items():
+            if name not in required and value[name] is None:
+                continue
+            result[name] = _decode_native_transport(value[name], child)
+        return result
+    if kind == "array":
+        if not isinstance(value, list):
+            raise ValueError("invalid_fixture_transport")
+        return [_decode_native_transport(item, schema["items"]) for item in value]
+    predicates = {
+        "string": lambda item: isinstance(item, str),
+        "boolean": lambda item: type(item) is bool,
+        "integer": lambda item: type(item) is int,
+        "number": lambda item: type(item) in (int, float) and math.isfinite(item),
+    }
+    if kind not in predicates or not predicates[kind](value):
+        raise ValueError("invalid_fixture_transport")
+    return value
+
+
+def _encode_native_transport(value, schema: dict):
+    if not schema:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    if "anyOf" in schema:
+        for option in schema["anyOf"]:
+            try:
+                encoded = _encode_native_transport(value, option)
+                if _decode_native_transport(encoded, option) == value:
+                    return encoded
+            except (TypeError, ValueError):
+                continue
+        raise ValueError("invalid_fixture_transport")
+    kind = schema.get("type")
+    if isinstance(kind, list):
+        if value is None and "null" in kind:
+            return None
+        for option in kind:
+            if option != "null":
+                try:
+                    return _encode_native_transport(value, {**schema, "type": option})
+                except (TypeError, ValueError):
+                    continue
+        raise ValueError("invalid_fixture_transport")
+    if kind == "null":
+        if value is not None:
+            raise ValueError("invalid_fixture_transport")
+        return None
+    if kind == "object":
+        properties = schema.get("properties")
+        additional = schema.get("additionalProperties")
+        if properties is None and isinstance(additional, dict):
+            if not isinstance(value, dict):
+                raise ValueError("invalid_fixture_transport")
+            return [{"key": key, "value": _encode_native_transport(item, additional)}
+                    for key, item in sorted(value.items())]
+        if not isinstance(value, dict):
+            raise ValueError("invalid_fixture_transport")
+        required = set(schema.get("required", []))
+        if any(name not in properties for name in value) or any(name not in value for name in required):
+            raise ValueError("invalid_fixture_transport")
+        return {name: _encode_native_transport(value[name], child) if name in value else None
+                for name, child in properties.items()}
+    if kind == "array":
+        if not isinstance(value, list):
+            raise ValueError("invalid_fixture_transport")
+        return [_encode_native_transport(item, schema["items"]) for item in value]
+    predicates = {
+        "string": lambda item: isinstance(item, str),
+        "boolean": lambda item: type(item) is bool,
+        "integer": lambda item: type(item) is int,
+        "number": lambda item: type(item) in (int, float) and math.isfinite(item),
+    }
+    if kind not in predicates or not predicates[kind](value):
+        raise ValueError("invalid_fixture_transport")
+    return value
+
+
+def _encode_fixture_transport(payload: dict) -> dict:
+    if not isinstance(payload, dict) or not isinstance(payload.get("scenarios"), list):
+        raise ValueError("invalid_fixture_transport")
+    fixture_properties = fixture_schema_properties()
+    scenarios = []
+    for scenario in payload["scenarios"]:
+        if not isinstance(scenario, dict):
+            raise ValueError("invalid_fixture_transport")
+        encoded = {key: deepcopy(value) for key, value in scenario.items() if key not in SPEC_FIELDS}
+        encoded["fixture_encoding"] = "native-v1"
+        for field in SPEC_FIELDS:
+            encoded[field] = _encode_native_transport(scenario.get(field), fixture_properties[field])
+        scenarios.append(encoded)
+    return {**payload, "scenarios": scenarios}
+
+
 def _decode_fixture_transport(payload: dict) -> dict:
     """Accept encoded generation or canonical resume data; never mutate either."""
     if not isinstance(payload, dict) or not isinstance(payload.get("scenarios"), list):
@@ -152,12 +318,18 @@ def _decode_fixture_transport(payload: dict) -> dict:
         if not isinstance(scenario, dict):
             raise ValueError("invalid_fixture_transport")
         decoded = dict(scenario)
+        encoding = decoded.pop("fixture_encoding", None)
+        if encoding not in (None, "native-v1"):
+            raise ValueError("invalid_fixture_transport")
+        fixture_properties = fixture_schema_properties()
         for field in SPEC_FIELDS:
             value = decoded.get(field)
-            if isinstance(value, str):
+            if encoding == "native-v1":
+                value = _decode_native_transport(value, fixture_properties[field])
+            elif isinstance(value, str):
                 value = _decode_fixture_string(value)
-            expected = dict if field in ("fixture_setup", "fixture_state") else list
-            if not isinstance(value, expected):
+            expected_type = dict if field in ("fixture_setup", "fixture_state") else list
+            if not isinstance(value, expected_type):
                 raise ValueError("invalid_fixture_transport")
             decoded[field] = value
         scenarios.append(decoded)
@@ -518,9 +690,9 @@ Requirements:
 - A required remote write must be explicitly authorized, represented in allowed_writes, and followed by its required readback
 - A blocked scenario must not require the blocked write; use the exact terminal action as its stop point
 - Select one fixture_profile supported by the output schema and make the request consistent with that fixture state
-- Provide explicit fixture_setup, fixture_state, fixture_transitions and fixture_requirements; an empty object/list is permitted only when no corresponding preparation is needed
-- Encode each of those four fields as a JSON string containing exactly one value matching the reference: fixture_setup and fixture_state must decode to JSON objects; fixture_transitions and fixture_requirements must decode to JSON arrays; no duplicate keys or nonfinite numbers
-- Before returning, decode all 32 fixture strings and verify each decoded top-level type; do not return if any field is double-encoded, malformed, or has the wrong object/array shape
+- Provide explicit fixture_setup, fixture_state, fixture_transitions and fixture_requirements using the native-v1 transport required by the output schema
+- Fixed objects and arrays remain native JSON; optional object fields use null when absent; schema maps use arrays of unique key/value entries; only unconstrained leaf values are JSON-encoded strings
+- Before returning, verify the output against the supplied schema; do not add prose or a second value inside any transport field
 - Bind every environment premise to actual preparation or a supported requirement; requirements use at=initial or the id of a transition, and kind=exists, absent or equals
 - Use @base, @candidate, @remote_advanced or @remote_candidate for commit targets, or declare a custom alias to one of those roles; never invent commit hashes
 - Object profiles do not supply named objects: declare their real identities and related objects explicitly; unknown fields and unimplemented premises fail validation
@@ -558,6 +730,11 @@ Requirements:
     if generated_errors:
         print(json.dumps({"status": "invalid_generated_holdout", "error_count": len(generated_errors)}))
         return 1
+    try:
+        generated_transport = _encode_fixture_transport(generated_fixture)
+    except (TypeError, ValueError):
+        print(json.dumps({"status": "invalid_generated_holdout", "error_count": 1}))
+        return 1
 
     calibrated_message = args.raw_output_dir / "calibrated-candidate.private.json"
     calibration_prompt = f"""Act as an independent benchmark custodian. No evaluated model responses are available to you.
@@ -567,7 +744,7 @@ Requirements:
 </skill>
 
 <candidate_holdout>
-{json.dumps(generated_fixture, ensure_ascii=False)}
+{json.dumps(generated_transport, ensure_ascii=False)}
 </candidate_holdout>
 
 Fixture DSL reference (applies to decoded values):
@@ -576,7 +753,7 @@ Fixture DSL reference (applies to decoded values):
 </fixture_schema_reference>
 
 Return the same object, changing only fixture_setup, fixture_state, fixture_transitions and fixture_requirements to encode the existing task faithfully. All other fields, including requests, visible facts, profiles, identifiers, expected actions, allowed writes and stopping labels, are frozen. If the task is inconsistent or unsupported, preserve it so validation fails; do not repair it by changing the question or answer.
-For output transport only, encode those four fields as JSON strings matching the reference: fixture_setup and fixture_state must decode to JSON objects; fixture_transitions and fixture_requirements must decode to JSON arrays. Do not encode or change any other field; no duplicate keys or nonfinite numbers. Before returning, decode all 32 fixture strings and verify each decoded top-level type; do not return if any field is double-encoded, malformed, or has the wrong object/array shape.
+Keep the native-v1 transport required by the output schema: fixed objects and arrays remain native JSON, optional object fields use null when absent, schema maps use arrays of unique key/value entries, and only unconstrained leaf values are JSON-encoded strings. Do not add prose or a second value inside a transport field.
 
 Calibration rules:
 - Do not modify, reorder, deduplicate or relax any expected label, even if it appears wrong; retain original failures for independent adjudication

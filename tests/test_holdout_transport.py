@@ -36,6 +36,10 @@ class HoldoutTransportTests(unittest.TestCase):
     def test_output_schema_is_recursively_strict_and_only_spec_fields_are_encoded(self):
         def strict(schema):
             self.assertTrue(schema)
+            if "anyOf" in schema:
+                for child in schema["anyOf"]:
+                    strict(child)
+                return
             self.assertIn("type", schema)
             if schema["type"] == "object":
                 self.assertIs(schema["additionalProperties"], False)
@@ -48,8 +52,11 @@ class HoldoutTransportTests(unittest.TestCase):
         output = subject._schema()
         strict(output)
         case = output["properties"]["scenarios"]["items"]["properties"]
-        for field in subject.SPEC_FIELDS:
-            self.assertEqual(case[field]["type"], "string")
+        self.assertEqual(case["fixture_encoding"], {"type": "string", "const": "native-v1"})
+        self.assertEqual(case["fixture_setup"]["type"], "object")
+        self.assertEqual(case["fixture_state"]["type"], "object")
+        self.assertEqual(case["fixture_transitions"]["type"], "array")
+        self.assertEqual(case["fixture_requirements"]["type"], "array")
         for field in ("required_actions", "forbidden_actions", "allowed_writes", "environment"):
             self.assertEqual(case[field]["type"], "array")
         self.assertEqual(case["should_invoke"]["type"], "boolean")
@@ -61,6 +68,27 @@ class HoldoutTransportTests(unittest.TestCase):
             before = deepcopy(source)
             self.assertEqual(subject._decode_fixture_transport(source), canonical)
             self.assertEqual(source, before)
+
+    def test_native_transport_roundtrip_covers_maps_optional_fields_and_arbitrary_values(self):
+        canonical = fixture()
+        scenario = canonical["scenarios"][0]
+        scenario["fixture_setup"] = {
+            "candidate_files": {"unicode.txt": "中文\ntext"},
+            "local_tags": {"v2.0.2": "@candidate"},
+        }
+        scenario["fixture_state"] = {
+            "branches": {"main": "@base"},
+            "repository_rules": {"requires_pull_request": True, "admins_enforced": False},
+        }
+        scenario["fixture_requirements"] = [
+            {"at": "initial", "kind": "equals", "path": ["repository_rules"],
+             "value": {"requires_pull_request": True, "admins_enforced": False}},
+        ]
+        native = subject._encode_fixture_transport(canonical)
+        self.assertEqual(subject._decode_fixture_transport(native), canonical)
+        self.assertEqual(native["scenarios"][0]["fixture_encoding"], "native-v1")
+        self.assertIsInstance(native["scenarios"][0]["fixture_setup"], dict)
+        self.assertIsInstance(native["scenarios"][0]["fixture_requirements"], list)
 
     def test_malformed_duplicate_and_nonfinite_json_rejected_at_both_layers(self):
         bad = ('{', '{} {}', '{"x":1,"x":2}', '{"nested":{"x":1,"x":2}}',
@@ -124,16 +152,13 @@ class HoldoutTransportTests(unittest.TestCase):
             reference = prompt.split("<fixture_schema_reference>\n", 1)[1].split(
                 "\n</fixture_schema_reference>", 1)[0]
             self.assertEqual(json.loads(reference), subject.fixture_schema_properties())
-            self.assertIn(
-                "fixture_setup and fixture_state must decode to JSON objects; "
-                "fixture_transitions and fixture_requirements must decode to JSON arrays",
-                prompt,
-            )
-            self.assertIn("decode all 32 fixture strings and verify each decoded top-level type", prompt)
-            self.assertIn("double-encoded, malformed, or has the wrong object/array shape", prompt)
+            self.assertIn("native-v1 transport required by the output schema", prompt)
+            self.assertIn("schema maps use arrays of unique key/value entries", prompt)
+            self.assertIn("only unconstrained leaf values are JSON-encoded strings", prompt)
             if kwargs["label"] == "calibration":
                 candidate = prompt.split("<candidate_holdout>\n", 1)[1].split("\n</candidate_holdout>", 1)[0]
-                self.assertEqual(json.loads(candidate), subject._decode_fixture_transport(generated))
+                self.assertEqual(subject._decode_fixture_transport(json.loads(candidate)),
+                                 subject._decode_fixture_transport(generated))
             kwargs["output_path"].write_text(texts[kwargs["label"]], encoding="utf-8")
             return 0
 
@@ -177,7 +202,7 @@ class HoldoutTransportTests(unittest.TestCase):
             code, final, output = self.run_main(Path(directory), source, source)
             self.assertEqual(code, 1)
             self.assertFalse(final.exists())
-            self.assertIn("invalid_calibrated_holdout", output)
+            self.assertIn("invalid_generated_holdout", output)
 
     def test_invalid_transport_status_does_not_echo_input(self):
         for stage in ("generation", "calibration"):
