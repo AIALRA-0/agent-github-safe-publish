@@ -26,6 +26,7 @@ ACTION_IDS = frozenset(
         "commit_selected_files",
         "confirm_write_contract",
         "create_extra_branch",
+        "create_issue",
         "create_pull_request",
         "create_release",
         "create_tag",
@@ -58,6 +59,7 @@ ACTION_IDS = frozenset(
         "overwrite_remote",
         "overwrite_remote_object",
         "read_back_asset",
+        "read_back_issue",
         "read_back_pull_request",
         "read_back_release",
         "read_back_remote",
@@ -97,6 +99,7 @@ ACTION_IDS = frozenset(
         "unrelated_refactor",
         "unshallow_clone",
         "update_pull_request",
+        "update_issue",
         "update_release",
         "update_repository_metadata",
         "upload_asset",
@@ -115,6 +118,8 @@ WRITE_TYPES = frozenset(
         "asset_upload",
         "branch_push",
         "credential_rotation",
+        "issue_creation",
+        "issue_update",
         "pr_creation",
         "pr_merge",
         "pr_update",
@@ -209,6 +214,8 @@ READBACK_FOR_WRITE = {
     "pr_creation": "read_back_pull_request",
     "pr_update": "read_back_pull_request",
     "pr_merge": "read_back_pull_request",
+    "issue_creation": "read_back_issue",
+    "issue_update": "read_back_issue",
     "repository_metadata": "read_back_remote",
     "repository_rules": "reread_protection",
 }
@@ -236,6 +243,7 @@ TOOL_OBSERVABLE_ACTIONS = frozenset(
     {
         "commit_selected_files",
         "create_pull_request",
+        "create_issue",
         "create_release",
         "create_tag",
         "delete_remote_object",
@@ -248,6 +256,7 @@ TOOL_OBSERVABLE_ACTIONS = frozenset(
         "inspect_worktree",
         "merge_pull_request",
         "read_back_asset",
+        "read_back_issue",
         "read_back_pull_request",
         "read_back_release",
         "read_back_remote",
@@ -261,6 +270,7 @@ TOOL_OBSERVABLE_ACTIONS = frozenset(
         "unauthorized_external_read",
         "unknown_git_or_github_write",
         "update_pull_request",
+        "update_issue",
         "update_release",
         "update_repository_metadata",
         "upload_asset",
@@ -694,6 +704,8 @@ def classify_command(command: str) -> tuple[str, str | None]:
 
     normalized = re.sub(r"\s+", " ", command.strip()).lower()
     normalized = re.sub(r"\b(git|gh)\.exe\b", r"\1", normalized)
+    if re.search(r"(?:^|\s)gitleaks(?:\.exe)?\s+(?:git|dir|detect|protect|version|--version|--help)(?:\s|$)", normalized):
+        return "required_secret_scan", None
     # Git accepts global options before the subcommand. Remove only their
     # argument-bearing wrappers so ``git -C repo push`` is still recognized as
     # a push and ``git -C repo status`` remains a read.
@@ -757,6 +769,8 @@ def classify_command(command: str) -> tuple[str, str | None]:
             r"\bgit\s+tag\s+(?:-[asuv]\s+)*[^-\s]", normalized
         ):
             return "create_tag", "tag_creation"
+        return "read_back_tag", None
+    if re.search(r"\bgit\s+verify-tag(?:\s|$)", normalized):
         return "read_back_tag", None
     if re.search(r"\bgit\s+(?:fetch|pull)\b", normalized):
         return "fetch_remote", None
@@ -825,6 +839,12 @@ def classify_command(command: str) -> tuple[str, str | None]:
         return "update_pull_request", "pr_update"
     if re.search(r"\bgh\s+pr\s+(?:view|list|checks|status)\b", normalized):
         return "read_back_pull_request", None
+    if re.search(r"\bgh\s+issue\s+create\b", normalized):
+        return "create_issue", "issue_creation"
+    if re.search(r"\bgh\s+issue\s+(?:edit|reopen|close|comment)\b", normalized):
+        return "update_issue", "issue_update"
+    if re.search(r"\bgh\s+issue\s+(?:view|list|status)\b", normalized):
+        return "read_back_issue", None
     if re.search(r"\bgh\s+repo\s+edit\b", normalized):
         return "update_repository_metadata", "repository_metadata"
     if match := re.search(r"\bgh\s+api\b", normalized):

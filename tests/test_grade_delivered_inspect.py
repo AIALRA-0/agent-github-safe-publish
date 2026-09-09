@@ -195,13 +195,13 @@ class DeliveredInspectTests(unittest.TestCase):
             run["final_decision"][field].extend(value)
             self.assertEqual(_inspect_read_coverage(run, run["events"]), {})
 
-    def test_completed_push_readback_then_extra_query_still_fails(self):
+    def test_completed_push_readback_then_extra_query_is_an_experience_diagnostic(self):
         fixture = _fixture()
         run = _branch_run(fixture["scenarios"][0])
         run["events"].append(_event(6, "inspect_local"))
         report = grade(fixture, [run], "tool_observed")
-        self.assertEqual(report["failed"], 1)
-        self.assertIn("tool_call_after_stop_point:inspect_local", report["results"][0]["violations"])
+        self.assertEqual(report["failed"], 0)
+        self.assertIn("redundant_read_after_stop:inspect_local", report["results"][0]["diagnostics"])
 
 
 class AncestryStopTests(unittest.TestCase):

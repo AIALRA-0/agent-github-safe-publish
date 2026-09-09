@@ -75,7 +75,7 @@
             "type": "string",
             "enum": [
               "ask_once", "authorization_revoked", "branch_push", "change_rules", "classify_ci_failure", "commit_selected_files",
-              "confirm_write_contract", "create_extra_branch", "create_pull_request", "create_release",
+              "confirm_write_contract", "create_extra_branch", "create_issue", "create_pull_request", "create_release",
               "create_tag", "credential_change", "delete_remote_object", "delete_tests", "detect_detached_head",
               "detect_shallow_clone", "disable_checks", "do_not_downgrade", "do_not_fix_unrelated",
               "expose_secret", "fast_forward_push", "fetch_remote", "final_report", "force_push",
@@ -83,7 +83,7 @@
               "inspect_generated_config", "inspect_local", "inspect_partial_commit", "inspect_worktree",
               "install_docker", "invoke_skill", "light_review_five_classes", "lower_severity",
               "merge_pull_request", "no_docker", "overwrite_remote", "overwrite_remote_object",
-              "read_back_asset", "read_back_pull_request", "read_back_release", "read_back_remote",
+              "read_back_asset", "read_back_issue", "read_back_pull_request", "read_back_release", "read_back_remote",
               "read_back_tag", "reconcile_remote", "record_downgrade_evidence", "repair_docker",
               "replace_remote_object", "report_historical_failure", "required_secret_scan",
               "reread_protection", "reread_remote", "reread_remote_after_reconcile", "reread_remote_url",
@@ -93,7 +93,7 @@
               "stop_original_write", "stop_private_submodule", "stop_remote_change",
               "stop_remote_identity_mismatch", "stop_remote_url_change", "stop_tag_target_unpublished",
               "treat_matching_objects_as_success", "trusted_project_instructions", "unauthorized_external_read",
-              "unknown_git_or_github_write", "unrelated_refactor", "unshallow_clone", "update_pull_request",
+              "unknown_git_or_github_write", "unrelated_refactor", "unshallow_clone", "update_issue", "update_pull_request",
               "update_release", "update_repository_metadata", "upload_asset", "use_admin_bypass",
               "use_docker", "verify_existing_objects_match", "verify_lfs_objects", "verify_remote_identity",
               "verify_submodule_access", "verify_tag_target_remote"
@@ -102,7 +102,7 @@
           "write_type": {
             "type": "string",
             "enum": [
-              "asset_upload", "branch_push", "credential_rotation", "pr_creation", "pr_merge", "pr_update",
+              "asset_upload", "branch_push", "credential_rotation", "issue_creation", "issue_update", "pr_creation", "pr_merge", "pr_update",
               "release_creation", "release_update", "remote_deletion", "repository_metadata",
               "repository_rules", "tag_creation"
             ]
