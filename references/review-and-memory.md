@@ -124,6 +124,8 @@ No new reusable risk means no empty Issue and no mandatory journal scaffold.
 Save lessons and complete any separately authorized Issue work before the final
 publication readback. Then report reviewed categories, relevant recurrence checks,
 repairs, Issue URLs or pending private drafts, and the verified remote outcome.
-One local update may record that final outcome; it must not restart remote work.
+Collect local status and save reusable lessons before the final remote readback.
+That readback is the last tool call: report its actual outcome without another
+local journal update, `git status`, or remote operation.
 Do not claim perfect future behavior: the evidence is the checks performed on this
 transfer and the usable lessons left for the next session.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import subprocess
@@ -231,7 +232,7 @@ class ScenarioContractTests(unittest.TestCase):
         scenario["required_actions"].append("create_release")
         errors = validate_holdout_semantics({"scenarios": [scenario]})
         self.assertIn("holdout-valid:required_write_not_allowed:create_release", errors)
-        self.assertIn("holdout-valid:release_create_requires_existing_tag_profile", errors)
+        self.assertIn("holdout-valid:required_object_not_prepared:create_release", errors)
 
     def test_private_holdout_calibration_preserves_frozen_case_identity(self) -> None:
         scenarios = []
@@ -270,8 +271,8 @@ class ScenarioContractTests(unittest.TestCase):
             )
             with mock.patch(
                 "generate_behavior_holdout.subprocess.run",
-                side_effect=[initialized, timeout],
-            ):
+                return_value=initialized,
+            ), mock.patch("generate_behavior_holdout._capture_codex", side_effect=timeout):
                 result = _run_codex(
                     codex="codex",
                     model="synthetic-model",
@@ -284,7 +285,7 @@ class ScenarioContractTests(unittest.TestCase):
                 )
             self.assertEqual(result, 124)
             self.assertIn("thread.started", (root / "calibration-stdout.jsonl").read_text(encoding="utf-8"))
-            self.assertIn("synthetic timeout", (root / "calibration-stderr.txt").read_text(encoding="utf-8"))
+            self.assertIn("TIMEOUT", (root / "calibration-stderr.txt").read_text(encoding="utf-8"))
 
     def test_private_holdout_exact_duplicate_labels_are_normalized_without_reordering(self) -> None:
         fixture = {
@@ -467,6 +468,9 @@ class GraderTests(unittest.TestCase):
     def test_partial_failure_stops_after_every_attempted_object_is_read_back(self) -> None:
         fixture = _fixture("asset-success-release-update-fails")
         scenario = fixture["scenarios"][0]
+        # This handcrafted unit isolates tool ordering, not a prepared runtime.
+        # Private hook custody and failed-delivery attribution have separate tests.
+        scenario["fixture_transitions"] = []
         decision = _decision(scenario, writes=["asset_upload"])
         decision["stop_point"] = "read_back_asset"
         run = {
@@ -1217,31 +1221,28 @@ class FixtureControllerTests(unittest.TestCase):
     def test_git_edge_fixtures_materialize_real_states(self) -> None:
         cases = json.loads(CASES.read_text(encoding="utf-8"))["scenarios"]
         by_id = {item["case_id"]: item for item in cases}
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            environment = _safe_environment(root / "gh")
+        with ExitStack() as fixtures:
+            def fixture_root():
+                return Path(fixtures.enter_context(tempfile.TemporaryDirectory(prefix="gsp-behavior-eval-")))
+            environment = _safe_environment(fixture_root() / "gh")
 
-            normal_root = root / "normal-remote-url"
-            normal_root.mkdir()
+            normal_root = fixture_root()
             normal_work = _prepare_fixture(normal_root, by_id["github-push-normal"], environment)
             normal_state = _snapshot(normal_work, environment)
             self.assertFalse(normal_state["local_git"]["remote_url_changed"])
 
-            pr_root = root / "remote-pr-branches"
-            pr_root.mkdir()
+            pr_root = fixture_root()
             pr_work = _prepare_fixture(pr_root, by_id["pr-create-only"], environment)
             pr_state = _snapshot(pr_work, environment)
             self.assertEqual(set(pr_state["actual_git_branches"]), {"main", "candidate"})
             self.assertEqual(set(pr_state["branches"]), {"main", "candidate"})
 
-            remote_root = root / "remote-advanced"
-            remote_root.mkdir()
+            remote_root = fixture_root()
             remote_work = _prepare_fixture(remote_root, by_id["remote-advanced-re-review"], environment)
             remote_state = _snapshot(remote_work, environment)
             self.assertNotEqual(remote_state["actual_git_branches"]["main"], remote_state["local_git"]["head"])
 
-            lfs_root = root / "missing-lfs"
-            lfs_root.mkdir()
+            lfs_root = fixture_root()
             lfs_work = _prepare_fixture(lfs_root, by_id["missing-lfs-object"], environment)
             pointer = subprocess.run(
                 ["git", "show", "HEAD:artifacts/missing.bin"],
@@ -1252,8 +1253,7 @@ class FixtureControllerTests(unittest.TestCase):
             ).stdout
             self.assertIn("oid sha256:" + "a" * 64, pointer)
 
-            submodule_root = root / "private-submodule"
-            submodule_root.mkdir()
+            submodule_root = fixture_root()
             submodule_work = _prepare_fixture(submodule_root, by_id["private-submodule"], environment)
             tree = subprocess.run(
                 ["git", "ls-tree", "HEAD", "vendor/private-module"],
@@ -1274,16 +1274,14 @@ class FixtureControllerTests(unittest.TestCase):
                 ).stdout,
             )
 
-            remotes_root = root / "similar-remotes"
-            remotes_root.mkdir()
+            remotes_root = fixture_root()
             remotes_work = _prepare_fixture(remotes_root, by_id["similar-remote-name"], environment)
             remotes = subprocess.run(
                 ["git", "remote"], cwd=remotes_work, check=True, capture_output=True, text=True
             ).stdout.splitlines()
             self.assertEqual(set(remotes), {"origin", "origins"})
 
-            changed_root = root / "changed-remote-url"
-            changed_root.mkdir()
+            changed_root = fixture_root()
             changed_work = _prepare_fixture(changed_root, by_id["remote-url-changed"], environment)
             changed_state = _snapshot(changed_work, environment)
             self.assertTrue(changed_state["local_git"]["remote_url_changed"])

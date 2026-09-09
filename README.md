@@ -2,7 +2,7 @@
 
 <p align="center"><strong>面向 Codex 的 GitHub 安全发布指导 Skill</strong></p>
 <p align="center">帮助 Agent 审阅真实发布面、修复关键风险，并在用户明确授权内完成指定的远端结果</p>
-<p align="center"><strong>开发候选 v2.0.2 · 已发布稳定版 v2.0.1</strong> · <a href="README.en.md">English</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">最新 Release</a></p>
+<p align="center"><strong>v2.0.2</strong> · <a href="README.en.md">English</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">最新正式 Release</a></p>
 
 ## 1. 产品定位
 
@@ -19,21 +19,18 @@
 - GitHub 的 push、Tag、Release、Release 附件、开源更新、同步或镜像请求会触发
 - 单独上传普通文件、同步本地目录、镜像非 Git 数据、只读查看仓库或发布普通网页不会仅因动词相同而触发
 
-Mermaid 是用于表达流程关系的文本图表格式；下面的竖向图只表达三种秘密审核档位，并汇合到共同授权边界与停止点
+下面的图只展示三种审核档位；具体检查、修复与保护规则见后文
 
 ```mermaid
 flowchart TD
-    A[GitHub 或 Git 远端请求] --> B[确认仓库、远端、目标 ref 与允许的写入类型]
-    B --> C{选择秘密审核档位}
-    C -->|none：无外部传输| D[完成只读结果并停止]
-    C -->|auto：普通小改动| E[使用已有扫描器或五类轻量审核]
-    C -->|required：高风险传输| F[严格扫描或只询问一次所有者选择]
-    D --> J[回读结果并在指定终点停止]
-    E --> G[运行受影响范围的项目原生检查]
+    A[确认目标与写入授权] --> B{审核档位}
+    B -->|none| C[只读处理]
+    B -->|auto| D[轻量审核]
+    B -->|required| E[高风险审核]
+    D --> F[修复后执行授权写入]
+    E --> F
+    C --> G[回读结果并停止]
     F --> G
-    G --> H[重新读取保护规则与远端状态]
-    H --> I[只执行已授权的远端对象]
-    I --> J
 ```
 
 图 2.1 三种审核档位共享同一授权边界与停止点
@@ -108,7 +105,7 @@ CLI 的 `publish` 只把已认证候选提交发布到其配置的 Git 远端，
 在 Codex 中请求 Skill Installer 从 GitHub 安装稳定 Tag，并保持安装名称为 `github-safe-publish`
 
 ```text
-Use $skill-installer to install AIALRA-0/agent-github-safe-publish at ref v2.0.1 as github-safe-publish.
+Use $skill-installer to install AIALRA-0/agent-github-safe-publish from the verified Tag of its latest non-draft, non-prerelease GitHub Release, as github-safe-publish. Confirm the selected version before replacing an existing installation.
 ```
 
 安装后请求 Codex 使用 Skill Creator 的 `quick_validate.py` 检查安装目录；成功应确认名称、YAML Frontmatter、`agents/openai.yaml` 和结构均有效，且隐式调用仍为启用
@@ -184,7 +181,9 @@ After the remote commit is read back, stop and report the result.
 
 ## 7. 版本与边界
 
-当前产品候选版本为 `v2.0.2`；只有本轮工具级评测、受控 GitHub 验证和持续集成全部通过后才标记为稳定版
+此版本的产品标识为 `v2.0.2`，是否已正式发布，以 GitHub 上实际存在的正式 Release 和对应 Tag 为准
+
+正式发布要求工具级评测、受控 GitHub 验证和持续集成通过，版本号本身不证明这些结果
 
 - `github-safe-publish --version` 对应可选 Python 包版本 `2.0.2`
 - `python -X utf8 scripts/safe_publish.py --version` 继续返回 `github-safe-publish 1.1.7`，其中 `v1.1.7` 只属于旧兼容入口

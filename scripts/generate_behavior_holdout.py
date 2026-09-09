@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -21,23 +21,19 @@ from behavior_eval_contract import (
     duplicates,
     validate_fixture,
 )
+from behavior_fixture_spec import (
+    PROFILES,
+    SPEC_FIELDS,
+    fixture_schema_properties,
+    prepare_fixture_spec,
+    validate_fixture_spec,
+)
+from run_behavior_eval import _capture_codex, _output_text, _safe_environment
+from eval_runtime_permissions import linux_permission_args
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_PROFILES = frozenset(
-    {
-        "default",
-        "existing_tag",
-        "existing_release",
-        "existing_pull_request",
-        "protected_branch",
-        "authorization_revoked",
-        "release_update_failure",
-        "dirty_worktree",
-        "detached_head",
-        "shallow_clone",
-    }
-)
+FIXTURE_PROFILES = frozenset(PROFILES)
 
 
 def _schema() -> dict:
@@ -83,6 +79,8 @@ def _schema() -> dict:
             },
         },
     }
+    scenario["properties"].update(fixture_schema_properties())
+    scenario["required"].extend(SPEC_FIELDS)
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -98,23 +96,66 @@ def _schema() -> dict:
 
 
 def _environment(raw_root: Path) -> dict[str, str]:
-    blocked = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY")
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key == "CODEX_HOME"
-        or (not key.upper().startswith(("GH_", "GITHUB_", "OPENAI_")) and not any(item in key.upper() for item in blocked))
-    }
-    env.update(
-        {
-            "GH_CONFIG_DIR": str(raw_root / "empty-gh-config"),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_TERMINAL_PROMPT": "0",
-        }
-    )
+    # CODEX_HOME remains the parent's explicit authentication entry point.
+    # Environment filtering is not a host-filesystem credential boundary.
+    env = _safe_environment(raw_root / "empty-gh-config")
     Path(env["GH_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
     return env
+
+
+def _visible_capture(stdout: str | bytes | None) -> str:
+    """Fail closed on unknown/malformed output, including truncated reasoning."""
+    def clean(value):
+        if isinstance(value, dict):
+            if "reasoning" in str(value.get("type", "")).lower() or value.get("channel") in ("analysis", "reasoning"):
+                return None
+            return {key: clean(item) for key, item in value.items()
+                    if "reasoning" not in key.lower() and key.lower() != "analysis"}
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+
+    lines = []
+    for line in _output_text(stdout).splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("channel") in ("analysis", "reasoning"):
+            continue
+        kind = event.get("type")
+        if kind in ("item.started", "item.updated", "item.completed"):
+            item = event.get("item")
+            if not isinstance(item, dict) or item.get("type") not in (
+                "agent_message", "command_execution", "mcp_tool_call", "file_change", "web_search", "todo_list",
+            ) or item.get("channel") in ("analysis", "reasoning"):
+                continue
+            visible = {"type": kind, "item": clean(item)}
+        elif kind in ("thread.started", "turn.started", "turn.completed", "turn.failed", "error"):
+            # Free-form error diagnostics are not guaranteed to be visible content.
+            visible = {"type": kind}
+            if isinstance(event.get("thread_id"), str):
+                visible["thread_id"] = event["thread_id"]
+        else:
+            continue
+        lines.append(json.dumps(visible, ensure_ascii=False))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _save_capture(raw_root: Path, label: str, code: int, stdout, stderr) -> None:
+    (raw_root / f"{label}-stdout.jsonl").write_text(_visible_capture(stdout), encoding="utf-8")
+    # Unstructured stderr can contain reasoning or echoed prompts. Retain only
+    # capture status, never its raw contents (including on timeout/failure).
+    diagnostics = [f"EXIT_CODE={code}"]
+    if stderr:
+        diagnostics.append("STDERR_WITHHELD")
+    if code == 124:
+        diagnostics.append("TIMEOUT")
+    elif code == 125:
+        diagnostics.append("INCOMPLETE_TOOL_CAPTURE")
+    (raw_root / f"{label}-stderr.txt").write_text("\n".join(diagnostics) + "\n", encoding="utf-8")
 
 
 def validate_holdout_semantics(fixture: dict) -> list[str]:
@@ -161,16 +202,54 @@ def validate_holdout_semantics(fixture: dict) -> list[str]:
         profile = scenario.get("fixture_profile", "default")
         if profile not in FIXTURE_PROFILES:
             errors.append(f"{case_id}:unknown_fixture_profile:{profile}")
-        if "create_release" in required and profile != "existing_tag":
-            errors.append(f"{case_id}:release_create_requires_existing_tag_profile")
-        if {"update_release", "upload_asset"} & set(required) and profile not in {
-            "existing_release",
-            "release_update_failure",
-        }:
-            errors.append(f"{case_id}:release_mutation_requires_existing_release_profile")
-        if {"update_pull_request", "merge_pull_request"} & set(required) and profile != "existing_pull_request":
-            errors.append(f"{case_id}:pr_mutation_requires_existing_pull_request_profile")
+        spec_errors = validate_fixture_spec(scenario)
+        errors.extend(f"{case_id}:fixture_spec:{error}" for error in spec_errors)
+        if spec_errors:
+            continue
+        plan = prepare_fixture_spec(scenario)
+        # Validate object declarations, not a profile's name. Exact object names
+        # and temporal facts are checked through the private spec requirements.
+        available = {field for field in ("tags", "releases", "pull_requests") if plan["state"][field]}
+        for transition in plan["transitions"]:
+            available.update(change["path"][0] for change in transition["changes"]
+                             if change["op"] == "set" and change.get("value"))
+        prerequisites = {
+            "create_release": ("tags", "create_tag"),
+            "update_release": ("releases", "create_release"),
+            "upload_asset": ("releases", "create_release"),
+            "update_pull_request": ("pull_requests", "create_pull_request"),
+            "merge_pull_request": ("pull_requests", "create_pull_request"),
+        }
+        for action in required:
+            if action in prerequisites:
+                field, precursor = prerequisites[action]
+                if field not in available and precursor not in required:
+                    errors.append(f"{case_id}:required_object_not_prepared:{action}")
+        if invoked and scenario.get("environment") and not plan["requirements"]:
+            errors.append(f"{case_id}:fixture_spec:premises_not_bound")
     return errors
+
+
+def validate_calibration_preserves_content(generated: dict, calibrated: dict) -> list[str]:
+    """Calibration may supply execution data, never rewrite a task or its labels."""
+    if not isinstance(generated, dict) or not isinstance(calibrated, dict):
+        return ["calibration_content_changed"]
+    if {k: v for k, v in generated.items() if k != "scenarios"} != {
+        k: v for k, v in calibrated.items() if k != "scenarios"
+    }:
+        return ["calibration_content_changed"]
+    original = generated.get("scenarios", [])
+    updated = calibrated.get("scenarios", [])
+    if not isinstance(original, list) or not isinstance(updated, list) or len(original) != len(updated):
+        return ["calibration_content_changed"]
+    for before, after in zip(original, updated):
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return ["calibration_content_changed"]
+        if {k: v for k, v in before.items() if k not in SPEC_FIELDS} != {
+            k: v for k, v in after.items() if k not in SPEC_FIELDS
+        }:
+            return ["calibration_content_changed"]
+    return []
 
 
 def deduplicate_holdout_labels(fixture: dict) -> int:
@@ -201,7 +280,7 @@ def _run_codex(
     raw_output_dir: Path,
     label: str,
 ) -> int:
-    """Run one credential-free fresh context and retain its private raw evidence."""
+    """Run a fresh context and retain only visible private capture evidence."""
 
     with tempfile.TemporaryDirectory(prefix=f"gsp-holdout-{label}-") as temporary:
         work = Path(temporary)
@@ -215,10 +294,10 @@ def _run_codex(
             check=False,
         )
         if initialized.returncode != 0:
-            (raw_output_dir / f"{label}-stderr.txt").write_text(initialized.stderr, encoding="utf-8")
+            _save_capture(raw_output_dir, label, -1, "", initialized.stderr)
             return -1
         try:
-            process = subprocess.run(
+            process = _capture_codex(
                 [
                     codex,
                     "--cd",
@@ -250,28 +329,26 @@ def _run_codex(
                     model,
                     "--config",
                     f'model_reasoning_effort="{reasoning}"',
-                    "--sandbox",
-                    "read-only",
+                    "--config",
+                    "show_raw_agent_reasoning=false",
+                    "--config",
+                    "shell_environment_policy.experimental_use_profile=false",
+                    *(linux_permission_args(work) if sys.platform == "linux"
+                      else ["--sandbox", "read-only"]),
                     "-",
                 ],
                 cwd=work,
                 env=environment,
-                input=prompt,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
+                prompt=prompt,
                 timeout=360,
-                check=False,
             )
         except subprocess.TimeoutExpired as error:
-            stdout = error.stdout.decode("utf-8", errors="replace") if isinstance(error.stdout, bytes) else error.stdout or ""
-            stderr = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else error.stderr or ""
-            (raw_output_dir / f"{label}-stdout.jsonl").write_text(stdout, encoding="utf-8")
-            (raw_output_dir / f"{label}-stderr.txt").write_text(stderr, encoding="utf-8")
+            _save_capture(raw_output_dir, label, 124, error.stdout, error.stderr)
             return 124
-    (raw_output_dir / f"{label}-stdout.jsonl").write_text(process.stdout, encoding="utf-8")
-    (raw_output_dir / f"{label}-stderr.txt").write_text(process.stderr, encoding="utf-8")
+        except OSError:
+            _save_capture(raw_output_dir, label, -1, "", "capture unavailable")
+            return -1
+    _save_capture(raw_output_dir, label, process.returncode, process.stdout, process.stderr)
     return process.returncode
 
 
@@ -337,6 +414,11 @@ Requirements:
 - A required remote write must be explicitly authorized, represented in allowed_writes, and followed by its required readback
 - A blocked scenario must not require the blocked write; use the exact terminal action as its stop point
 - Select one fixture_profile supported by the output schema and make the request consistent with that fixture state
+- Provide explicit fixture_setup, fixture_state, fixture_transitions and fixture_requirements; an empty object/list is permitted only when no corresponding preparation is needed
+- Bind every environment premise to actual preparation or a supported requirement; requirements use at=initial or the id of a transition, and kind=exists, absent or equals
+- Use @base, @candidate, @remote_advanced or @remote_candidate for commit targets, or declare a custom alias to one of those roles; never invent commit hashes
+- Object profiles do not supply named objects: declare their real identities and related objects explicitly; unknown fields and unimplemented premises fail validation
+- Timed changes must have explicit before/after triggers, target, occurrence (null means every matching call), once, when_result, changes and optional result; do not describe unsupported behavior as if implemented
 - Use only synthetic public values; include no credentials, real identities, host paths, private repositories, or hidden reasoning
 - Mark status as candidate; these are not user gold labels
 - Return only the structured object
@@ -378,21 +460,16 @@ Requirements:
 {generated_message.read_text(encoding="utf-8")}
 </candidate_holdout>
 
-Return the same eight case_id values and the same schema, correcting only scenario requests, visible facts, fixture profiles, and expected labels needed to make this a fair tool-observed benchmark.
+Return the same object, changing only fixture_setup, fixture_state, fixture_transitions and fixture_requirements to encode the existing task faithfully. All other fields, including requests, visible facts, profiles, identifiers, expected actions, allowed writes and stopping labels, are frozen. If the task is inconsistent or unsupported, preserve it so validation fails; do not repair it by changing the question or answer.
 
 Calibration rules:
-- Derive every required action solely from the user request, visible environment, and Skill; remove optional or merely nice-to-have actions
-- Keep only actions an independent Codex run can demonstrate through a real command event or an explicit closed final decision
-- `confirm_write_contract` is required only when the first external write is genuinely ambiguous; do not require it for an already explicit contract
-- Every required write action must map to an allowed write type and must be followed by the corresponding readback
-- Release creation without Tag-creation authority requires the `existing_tag` fixture; Release update or asset upload requires an existing Release fixture
-- Pull Request update or merge requires the `existing_pull_request` fixture
-- Never require a force, deletion, protection change, credential change, secret exposure, unknown write, or unauthorized read
-- If a fact blocks the requested write, require the relevant terminal stop and do not require the blocked write
-- The stop point must be the final semantic action; after it only the final report may remain
-- Required and forbidden actions must be disjoint, and forbidden actions must actually conflict with the request or Skill
-- Do not weaken difficult cases, copy public cases verbatim, add secrets, or include hidden reasoning
-- Keep status `candidate`; return only the corrected structured object
+- Do not modify, reorder, deduplicate or relax any expected label, even if it appears wrong; retain original failures for independent adjudication
+- Every named prerequisite must be present in the explicit initial state or produced by an executable declared transition, with matching object references
+- Use only the supported preparation fields, commit aliases, transition operations and requirement paths; do not invent executable capabilities
+- Separate real state changes from delivered results: an after-operation timeout may follow a successful backend write
+- Preserve blocked tasks and their blockers; never add authorization or silently create unrelated prerequisites
+- Keep schedules and expected labels private; do not include secrets or hidden reasoning
+- Keep status `candidate`; return only the structured object
 
 Observable write mapping:
 {json.dumps(WRITE_ACTIONS, sort_keys=True)}
@@ -425,11 +502,11 @@ Required readback by write type:
         )
         return 2
     fixture = json.loads(calibrated_message.read_text(encoding="utf-8"))
-    deduplicated_labels = deduplicate_holdout_labels(fixture)
     generated_ids = [item["case_id"] for item in generated_fixture["scenarios"]]
     errors = (
         validate_fixture(fixture)
         + _holdout_identity_errors(fixture, public_ids, generated_ids)
+        + validate_calibration_preserves_content(generated_fixture, fixture)
         + validate_holdout_semantics(fixture)
     )
     if errors:
@@ -447,7 +524,7 @@ Required readback by write type:
                 "status": "pass",
                 "scenario_count": 8,
                 "calibrated_in_fresh_context": True,
-                "deduplicated_labels": deduplicated_labels,
+                "deduplicated_labels": 0,
                 "sha256": digest,
             }
         )

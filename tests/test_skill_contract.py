@@ -264,6 +264,15 @@ class SkillInvocationContractTests(unittest.TestCase):
 
 
 class DocumentationContractTests(unittest.TestCase):
+    def test_final_status_and_lessons_precede_terminal_remote_readback(self):
+        skill = (REPOSITORY_ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        memory = (REPOSITORY_ROOT / 'references/review-and-memory.md').read_text(encoding='utf-8')
+        self.assertIn('That readback is the last tool call', skill)
+        self.assertIn('before the last remote readback', skill)
+        self.assertIn('before the final remote readback', memory)
+        self.assertNotIn('one local outcome update is allowed', skill)
+        self.assertNotIn('One local update may record', memory)
+
     def _documents(self) -> list[Path]:
         return [
             REPOSITORY_ROOT / "README.md",

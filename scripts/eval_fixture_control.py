@@ -11,9 +11,10 @@ import argparse
 import json
 import os
 import subprocess
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 WRITE_BY_OPERATION = {
@@ -48,7 +49,7 @@ def _write(path: Path, state: dict[str, Any]) -> None:
 def _visible_state(state: dict[str, Any]) -> dict[str, Any]:
     """Hide grader controls from the evaluated agent."""
 
-    hidden = {"allowed_writes", "expected_git_remote_url", "fail_operations", "fixture_events"}
+    hidden = {"allowed_writes", "expected_git_remote_url", "fail_operations", "fixture_events", "fixture_runtime"}
     return {key: value for key, value in state.items() if key not in hidden}
 
 
@@ -79,7 +80,7 @@ def _identity(args: argparse.Namespace) -> str:
         return args.name or args.tag
     if args.operation.startswith("pr-"):
         return args.number or args.head
-    if args.operation == "branch-push":
+    if args.operation in {"branch-push", "branch-read"}:
         return args.branch
     return args.name or "fixture"
 
@@ -95,7 +96,9 @@ def _git(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def execute(args: argparse.Namespace, state: dict[str, Any]) -> tuple[bool, Any]:
+def execute(args: argparse.Namespace, state: dict[str, Any], *,
+            git_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> tuple[bool, Any]:
+    git = git_runner if git_runner is not None else _git
     operation = args.operation
     if operation in WRITE_BY_OPERATION:
         _require_write(state, operation)
@@ -118,18 +121,18 @@ def execute(args: argparse.Namespace, state: dict[str, Any]) -> tuple[bool, Any]
 
     target = _identity(args)
     if operation == "branch-push":
-        valid_ref = _git("check-ref-format", "--branch", args.branch)
+        valid_ref = git("check-ref-format", "--branch", args.branch)
         if valid_ref.returncode != 0:
             raise ValueError("invalid synthetic branch name")
-        current = _git("rev-parse", "HEAD")
+        current = git("rev-parse", "HEAD")
         if current.returncode != 0:
             raise RuntimeError("cannot resolve the synthetic candidate HEAD")
         commit = current.stdout.strip()
         if args.commit:
-            requested = _git("rev-parse", args.commit)
+            requested = git("rev-parse", args.commit)
             if requested.returncode != 0 or requested.stdout.strip() != commit:
                 raise RuntimeError("branch-push commit must resolve to the current synthetic HEAD")
-        push = _git("push", "origin", f"HEAD:refs/heads/{args.branch}")
+        push = git("push", "origin", f"HEAD:refs/heads/{args.branch}")
         if push.returncode != 0:
             raise RuntimeError("local bare-remote push failed: " + push.stderr.strip())
         state.setdefault("branches", {})[args.branch] = commit
@@ -138,13 +141,13 @@ def execute(args: argparse.Namespace, state: dict[str, Any]) -> tuple[bool, Any]
         tags = state.setdefault("tags", {})
         if args.tag in tags:
             raise FileExistsError("tag already exists; read it back instead of recreating it")
-        valid_ref = _git("check-ref-format", f"refs/tags/{args.tag}")
+        valid_ref = git("check-ref-format", f"refs/tags/{args.tag}")
         if valid_ref.returncode != 0:
             raise ValueError("invalid synthetic tag name")
         commit = args.commit or state.get("candidate_commit")
         if not isinstance(commit, str):
             raise RuntimeError("tag target commit is missing")
-        resolved = _git("rev-parse", "--verify", f"{commit}^{{commit}}")
+        resolved = git("rev-parse", "--verify", f"{commit}^{{commit}}")
         if resolved.returncode != 0:
             raise RuntimeError("tag target is not a local commit")
         commit = resolved.stdout.strip()
@@ -156,17 +159,17 @@ def execute(args: argparse.Namespace, state: dict[str, Any]) -> tuple[bool, Any]
             if isinstance(value, str)
         ]
         reachable = any(
-            _git("merge-base", "--is-ancestor", commit, remote_target).returncode == 0
+            git("merge-base", "--is-ancestor", commit, remote_target).returncode == 0
             for remote_target in remote_targets
         )
         if not reachable:
             raise RuntimeError(
                 "tag target is not reachable from an existing remote ref; a Tag write cannot imply branch publication"
             )
-        create = _git("tag", "-a", args.tag, commit, "-m", f"Synthetic evaluation tag {args.tag}")
+        create = git("tag", "-a", args.tag, commit, "-m", f"Synthetic evaluation tag {args.tag}")
         if create.returncode != 0:
             raise RuntimeError("local synthetic tag creation failed: " + create.stderr.strip())
-        push = _git("push", "origin", f"refs/tags/{args.tag}:refs/tags/{args.tag}")
+        push = git("push", "origin", f"refs/tags/{args.tag}:refs/tags/{args.tag}")
         if push.returncode != 0:
             raise RuntimeError("local bare-remote tag push failed: " + push.stderr.strip())
         tags[args.tag] = commit
@@ -283,6 +286,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        plan_path = args.state.parent / "fixture-plan.json"
+        if plan_path.exists():
+            return _execute_bound(args, plan_path)
         state = _read(args.state)
         changed, output = execute(args, state)
         if changed:
@@ -292,6 +298,98 @@ def main(argv: list[str] | None = None) -> int:
     except (FileExistsError, FileNotFoundError, PermissionError, RuntimeError, ValueError) as error:
         print(json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False, sort_keys=True))
         return 2
+
+
+def _execute_bound(
+    args: argparse.Namespace,
+    plan_path: Path,
+    *,
+    observer: Callable[[str, dict[str, Any], list[dict[str, Any]]], None] | None = None,
+    git_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    git_updates: Callable[[Path, list[dict[str, Any]], dict[str, str]], list[dict[str, Any]]] | None = None,
+) -> int:
+    """Execute with optional parent observations; preserve normal CLI output/exit.
+
+    observer(phase, state, receipts) runs synchronously at before (before hooks),
+    before_backend (after before-hook Git readback), after_backend (including
+    skips/errors, before after-hooks), after (after final persistence/readback).
+    State excludes fixture_runtime and retains fixture_events. Receipts are []
+    at before/after_backend, before-hook receipts at before_backend, and after-hook
+    receipts at after. Arguments are detached copies; return values are ignored.
+    The trusted broker snapshots actual fixed-bare refs inside each callback and
+    assembles the four windows plus git_cas; never infer refs from controller JSON
+    or a model-changeable URL.
+    git_runner(*arguments) optionally replaces EVERY backend Git command and
+    returns CompletedProcess. git_updates(work, updates, env) replaces the hook
+    updater and returns its CAS/readback receipts. Broker callers supply both to keep model
+    Git config/includes/hooks out of the credential-free parent process. In
+    particular, the trusted runner resolves 'origin' to its fixed bare path.
+
+    The broker saves its private observation journal after this call returns.
+    args.state and plan_path may be absolute private paths outside the worktree;
+    the caller keeps Path.cwd() fixed at the synthetic work repository throughout.
+    No observation is printed or copied into the model directory. Callback
+    exceptions propagate: incomplete checkpoints must not be graded as complete.
+    """
+    from behavior_fixture_spec import after_operation, before_operation
+    from materialize_behavior_fixture import apply_git_updates
+
+    def observe(phase, state, receipts):
+        if observer is not None:
+            observer(phase, deepcopy(state), deepcopy(receipts))
+
+    def update_git(updates):
+        if git_updates is not None:
+            return deepcopy(git_updates(work, deepcopy(updates), dict(os.environ)))
+        return apply_git_updates(work, updates, dict(os.environ))
+
+    work = Path.cwd()
+    lock = args.state.with_suffix(".lock")
+    try:
+        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as error:
+        raise RuntimeError("fixture operation pending; reconcile before retry") from error
+    try:
+        state = _read(args.state)
+        runtime = state.pop("fixture_runtime")
+        plan = _read(plan_path)
+        observe("before", state, [])
+        begun = before_operation(plan, state, runtime, operation=args.operation, target=_identity(args))
+        state, runtime = begun["state"], begun["runtime"]
+        # A pending record survives a crash instead of silently replaying a write.
+        _write(args.state, {**state, "fixture_runtime": runtime})
+        before_git = update_git(begun["git_updates"])
+        observe("before_backend", state, before_git)
+        if begun["execute"]:
+            try:
+                _, output = execute(args, state, git_runner=git_runner)
+                result = {"status": "success", "exit_code": 0, "output": output}
+            except (OSError, RuntimeError, ValueError) as error:
+                result = {"status": "error", "exit_code": 2, "output": {"error": str(error)}}
+        else:
+            result = begun["result"]
+        if observer is not None:
+            # Preserve actual backend state if observation fails after a write;
+            # the pending runtime still requires reconciliation, not replay.
+            _write(args.state, {**state, "fixture_runtime": runtime})
+        observe("after_backend", state, [])
+        finished = after_operation(plan, state, runtime, result)
+        state, runtime = finished["state"], finished["runtime"]
+        # Backend outcome is durable even if a scheduled environment update fails.
+        runtime["pending_git_updates"] = finished["git_updates"]
+        runtime["errors"] = ["after_git_readback_pending"] if finished["git_updates"] else runtime.get("errors", [])
+        _write(args.state, {**state, "fixture_runtime": runtime})
+        after_git = update_git(finished["git_updates"])
+        runtime["events"][-1]["git_effects"] = {"before": before_git, "after": after_git}
+        runtime.pop("pending_git_updates", None)
+        runtime["errors"] = finished.get("fixture_errors", [])
+        _write(args.state, {**state, "fixture_runtime": runtime})
+        observe("after", state, after_git)
+        print(json.dumps(finished["result"]["output"], ensure_ascii=False, sort_keys=True))
+        return finished["result"]["exit_code"]
+    finally:
+        os.close(descriptor)
+        lock.unlink()
 
 
 if __name__ == "__main__":

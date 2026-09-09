@@ -2,7 +2,7 @@
 
 <p align="center"><strong>A GitHub safe-publication guidance Skill for Codex</strong></p>
 <p align="center">Helps an agent review the real publication surface, repair critical risks, and complete the exact remote result within explicit user authority</p>
-<p align="center"><strong>Development candidate v2.0.2 · Published stable v2.0.1</strong> · <a href="README.md">简体中文</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">Latest Release</a></p>
+<p align="center"><strong>v2.0.2</strong> · <a href="README.md">简体中文</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">Latest stable Release</a></p>
 
 ## 1. Product role
 
@@ -19,21 +19,18 @@ Use this Skill only when the request includes GitHub repository or Git remote co
 - GitHub push, Tag, Release, release-asset, open-source update, sync, or mirror requests trigger it
 - A bare file upload, local-directory sync, non-Git mirror, read-only repository view, or ordinary web publication does not trigger it merely because the same verb appears
 
-Mermaid is a text diagram format for expressing process relationships. The vertical diagram below shows the three secret-review modes and joins them at the same authority boundary and stopping point
+The diagram shows only the three review modes; the checks, repairs, and protection rules are explained below
 
 ```mermaid
 flowchart TD
-    A[GitHub or Git remote request] --> B[Confirm repository, remote, target ref, and allowed writes]
-    B --> C{Select the secret-review mode}
-    C -->|none: no external transfer| D[Complete the read-only result and stop]
-    C -->|auto: ordinary small update| E[Use an available scanner or five-class light review]
-    C -->|required: high-risk transfer| F[Strict scan or ask once for the owner's choice]
-    D --> J[Read back the result and stop at the specified endpoint]
-    E --> G[Run affected project-native checks]
+    A[Confirm target and authority] --> B{Review mode}
+    B -->|none| C[Read only]
+    B -->|auto| D[Light review]
+    B -->|required| E[High-risk review]
+    D --> F[Repair, then authorized writes]
+    E --> F
+    C --> G[Read back and stop]
     F --> G
-    G --> H[Re-read protection rules and remote state]
-    H --> I[Perform only authorized remote-object writes]
-    I --> J
 ```
 
 Figure 2.1 Three review modes share the same authority boundary and stopping point
@@ -108,7 +105,7 @@ The CLI `publish` command publishes an already-certified candidate commit to its
 In Codex, ask Skill Installer to install the stable Tag from GitHub and keep the installed name `github-safe-publish`
 
 ```text
-Use $skill-installer to install AIALRA-0/agent-github-safe-publish at ref v2.0.1 as github-safe-publish.
+Use $skill-installer to install AIALRA-0/agent-github-safe-publish from the verified Tag of its latest non-draft, non-prerelease GitHub Release, as github-safe-publish. Confirm the selected version before replacing an existing installation.
 ```
 
 After installation, ask Codex to run Skill Creator's `quick_validate.py` against the installed directory. Success should confirm the name, YAML frontmatter, `agents/openai.yaml`, and structure, with implicit invocation still enabled
@@ -184,7 +181,7 @@ Raw model output remains outside the repository. Public summaries contain no hid
 
 ## 7. Version and limits
 
-The current product candidate is `v2.0.2`; it becomes stable only after the tool-level evaluation, controlled GitHub validation, and continuous integration for this release all pass
+This version identifies itself as `v2.0.2`; an actual non-draft, non-prerelease GitHub Release and its corresponding Tag determine publication status. A stable release requires passing tool-level evaluation, controlled GitHub validation, and continuous integration; a version number alone proves none of those results
 
 - `github-safe-publish --version` is the optional Python package version `2.0.2`
 - `python -X utf8 scripts/safe_publish.py --version` continues to return `github-safe-publish 1.1.7`; `v1.1.7` identifies only the legacy compatibility entrypoint

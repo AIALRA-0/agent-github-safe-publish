@@ -23,9 +23,22 @@ EVALUATED_INPUTS = {
     "references/review-and-memory.md",
     "scripts/publication_memory.py",
     "scripts/run_behavior_eval.py",
+    "scripts/eval_runtime_permissions.py",
     "scripts/eval_fixture_control.py",
+    "scripts/fixture_broker.py",
+    "scripts/fixture_broker_client.py",
+    "scripts/fixture_broker_runtime.py",
+    "scripts/fixture_event_attribution.py",
+    "scripts/behavior_fixture_spec.py",
+    "scripts/materialize_behavior_fixture.py",
+    "scripts/github_e2e_decisions.py",
+    "scripts/run_github_agent_e2e.py",
+    "scripts/run_github_e2e.py",
     "scripts/run_v202_matrix.py",
+    "scripts/generate_behavior_holdout.py",
     "evals/candidate/publication-behavior-v2.0.2.json",
+    "evals/schema/final-decision-v2.0.2.schema.json",
+    "evals/schema/behavior-run-v2.0.2.schema.json",
     "scripts/behavior_eval_contract.py",
     "scripts/grade_skill_behavior.py",
 }
@@ -205,6 +218,8 @@ def _public_event_errors(
         if not isinstance(record, dict):
             errors.append(f"public_events_run_{index}_not_object")
             continue
+        if not isinstance(record.get("fixture_evidence"), dict) or record["fixture_evidence"].get("source") != "isolated_parent_broker":
+            errors.append(f"public_events_run_{index}_missing_private_fixture_custody")
         groups[_configuration_signature(record)].append(record)
 
     expected_signatures = {

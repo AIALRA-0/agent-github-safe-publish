@@ -4,19 +4,30 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from contextlib import ExitStack
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from behavior_eval_contract import SCHEMA_VERSION, _split_shell_commands, classify_command_sequence, validate_fixture
+from behavior_eval_contract import (
+    SCHEMA_VERSION, _split_shell_commands, classify_command_sequence,
+    successful_posix_git_chain, validate_fixture,
+)
+from behavior_fixture_spec import SPEC_FIELDS, new_fixture_runtime, prepare_fixture_spec
+from materialize_behavior_fixture import materialize
+from eval_runtime_permissions import linux_permission_args
+from fixture_broker_runtime import PrivateFixtureRuntime, readonly_model_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +54,9 @@ def _read_json(path: Path) -> Any:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _output_text(value: str | bytes | None) -> str:
@@ -54,21 +67,81 @@ def _output_text(value: str | bytes | None) -> str:
 def _visible_jsonl(stdout: str) -> str:
     """Persist tool events and visible messages, not model reasoning events."""
     lines = []
-    for line in stdout.splitlines():
+    malformed = json.dumps({"type": "capture.error", "error": "malformed_jsonl"})
+    for line in stdout.split("\n"):
+        if not line.strip():
+            continue
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
-            lines.append(line)
+            # An incomplete event can contain hidden reasoning: never retain it.
+            lines.append(malformed)
             continue
-        item = payload.get("item", {}) if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            lines.append(malformed)
+            continue
+        item = payload.get("item", {})
         if isinstance(item, dict) and item.get("type") in {
             "reasoning", "agent_reasoning", "reasoning_text", "raw_reasoning",
         }:
             continue
-        if isinstance(payload, dict) and "reasoning" in str(payload.get("type", "")):
+        if "reasoning" in str(payload.get("type", "")):
             continue
         lines.append(line)
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _capture_codex(command: list[str], *, cwd: Path, env: dict[str, str], prompt: str,
+                   timeout: int) -> subprocess.CompletedProcess[str]:
+    """Collect visible events without a descendant keeping timeout pipes open."""
+    stdout: list[str] = []
+    stderr: list[str] = []
+    process = subprocess.Popen(
+        command, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        start_new_session=os.name != "nt",
+    )
+
+    def collect(stream: Any, destination: list[str], visible: bool) -> None:
+        try:
+            for line in stream:
+                destination.append(_visible_jsonl(line) if visible else line)
+        finally:
+            stream.close()
+
+    readers = [
+        threading.Thread(target=collect, args=(process.stdout, stdout, True), daemon=True),
+        threading.Thread(target=collect, args=(process.stderr, stderr, False), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(prompt)
+        except BrokenPipeError:
+            pass
+        finally:
+            process.stdin.close()
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Terminate only this freshly created process tree, never other sessions.
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           capture_output=True, timeout=10, check=False)
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        stderr.append("\nTIMEOUT\n")
+        return_code = 124
+    else:
+        return_code = process.returncode
+    for reader in readers:
+        reader.join(timeout=3)
+    if any(reader.is_alive() for reader in readers):
+        stderr.append("\nINCOMPLETE_TOOL_CAPTURE\n")
+        return_code = 125
+    return subprocess.CompletedProcess(command, return_code, "".join(stdout), "".join(stderr))
 
 
 def _stage_skill(work: Path, skill: Path, skill_text: str) -> dict[str, str]:
@@ -114,7 +187,7 @@ def _safe_environment(gh_config_dir: Path) -> dict[str, str]:
         if key == "CODEX_HOME":
             env[key] = value
             continue
-        if key.upper().startswith(("GH_", "GITHUB_", "OPENAI_", "GIT_")) or SENSITIVE_ENV.search(key):
+        if key.upper().startswith(("GH_", "GITHUB_", "OPENAI_", "GIT_", "CODEX_")) or SENSITIVE_ENV.search(key):
             continue
         env[key] = value
     env.update(
@@ -206,9 +279,13 @@ def _fixture_state(scenario: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) -> Path:
+    # Windows TEMP may use an 8.3 spelling of the same freshly allocated root.
+    root = root.resolve(strict=True)
     work = root / "work"
     bare = root / "remote.git"
-    setup = scenario.get("fixture_setup", {})
+    explicit = any(field in scenario for field in ("fixture_transitions", "fixture_requirements"))
+    plan = prepare_fixture_spec(scenario) if explicit else None
+    setup = plan["setup"] if plan is not None else scenario.get("fixture_setup", {})
     profile = scenario.get("fixture_profile", "default")
     if not isinstance(setup, dict):
         setup = {}
@@ -297,9 +374,9 @@ def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) 
         )
         if clone_submodule.returncode != 0:
             raise RuntimeError(f"fixture private submodule clone failed: {clone_submodule.stderr.strip()}")
-    needs_candidate = bool(setup.get("local_candidate")) or (
+    needs_candidate = bool(setup.get("local_candidate")) or (not explicit and (
         "branch_push" in scenario.get("allowed_writes", []) and not setup.get("dirty_files")
-    ) or any(setup.get(name) for name in ("missing_lfs", "private_submodule", "remote_advanced"))
+    )) or any(setup.get(name) for name in ("missing_lfs", "private_submodule", "remote_advanced"))
     if needs_candidate:
         if not candidate_files and not setup.get("missing_lfs") and not setup.get("private_submodule"):
             candidate = work / "candidate.txt"
@@ -396,6 +473,20 @@ def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) 
     fixture_state["remote_url"] = reviewed_remote.stdout.strip()
     fixture_state["expected_git_remote_url"] = reviewed_remote.stdout.strip()
     fixture_state["candidate_commit"] = current_commit
+    _write_json(eval_dir / "remote-state.json", fixture_state)
+    if plan is not None:
+        actual_commits = {"base": base_commit, "candidate": current_commit}
+        if setup.get("remote_advanced"):
+            actual_commits["remote_advanced"] = remote_commit
+        if remote_candidate_commit is not None:
+            actual_commits["remote_candidate"] = remote_candidate_commit
+        bound = materialize(plan, work, actual_commits, env)
+        _write_json(eval_dir / "fixture-plan.json", bound)
+        fixture_state = _read_json(eval_dir / "remote-state.json")
+        fixture_state.pop("fail_operations", None)
+        fixture_state["fixture_runtime"] = new_fixture_runtime()
+        for helper in ("behavior_fixture_spec.py", "materialize_behavior_fixture.py"):
+            shutil.copy2(ROOT / "scripts" / helper, eval_dir / helper)
     if setup.get("remote_url_changed"):
         changed_remote = root / "changed-remote.git"
         changed_init = _run(["git", "init", "--bare", str(changed_remote)], root, env)
@@ -405,11 +496,11 @@ def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) 
         if changed_url.returncode != 0:
             raise RuntimeError(f"fixture remote URL change failed: {changed_url.stderr.strip()}")
     _write_json(eval_dir / "remote-state.json", fixture_state)
-    if profile == "dirty_worktree":
+    if not explicit and profile == "dirty_worktree":
         setup.setdefault("dirty_files", ["README.md", "notes.txt"])
-    elif profile == "detached_head":
+    elif not explicit and profile == "detached_head":
         setup["detached_head"] = True
-    elif profile == "shallow_clone":
+    elif not explicit and profile == "shallow_clone":
         setup["shallow"] = True
     if isinstance(setup, dict):
         for relative in setup.get("dirty_files", []):
@@ -424,7 +515,9 @@ def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) 
             target = work / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("synthetic generated configuration\n", encoding="utf-8")
-            with (work / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+            info = work / '.git' / 'info'
+            info.mkdir(exist_ok=True)
+            with (info / "exclude").open("a", encoding="utf-8") as exclude:
                 exclude.write(relative.replace("\\", "/") + "\n")
         if setup.get("detached_head"):
             _run(["git", "checkout", "--detach"], work, env)
@@ -453,6 +546,7 @@ def _git_refs(work: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str
 def _snapshot(work: Path, env: dict[str, str]) -> dict[str, Any]:
     state = _read_json(work / ".eval" / "remote-state.json")
     state.pop("fixture_events", None)
+    state.pop("fixture_runtime", None)
     actual_branches, actual_tags = _git_refs(work, env)
     state["actual_git_branches"] = actual_branches
     state["actual_git_tags"] = actual_tags
@@ -588,6 +682,8 @@ def _normalize_events(stdout: str, roots: list[Path], allowed_root: Path) -> lis
                 "status": "unknown", "exit_code": None,
                 "shell_exit_code": event["exit_code"], "scope": "compound_shell",
             }
+            if successful_posix_git_chain(event["command"], event["exit_code"]):
+                result = {"status": "success", "exit_code": 0, "scope": "verified_posix_git_and_chain"}
         if _uses_external_absolute_path(event["command"], allowed_root):
             classifications.insert(0, ("unauthorized_external_read", None, "absolute path outside fixture"))
         for action_id, write_type, operation in classifications:
@@ -703,7 +799,7 @@ def _codex_command(
     model: str,
     reasoning: str,
 ) -> list[str]:
-    return [
+    command = [
         executable,
         "--cd",
         str(work),
@@ -734,17 +830,23 @@ def _codex_command(
         model,
         "--config",
         f'model_reasoning_effort="{reasoning}"',
-        "--add-dir",
-        str(work.parent / "remote.git"),
-        "--config",
-        "sandbox_workspace_write.network_access=false",
         "--config",
         "show_raw_agent_reasoning=false",
         "--config",
         "shell_environment_policy.experimental_use_profile=false",
-        "--approve-for-me",
-        "-",
     ]
+    if sys.platform == "linux":
+        bare = work.parent / "remote.git"
+        # Explicit visibility is needed below denied /tmp. In broker mode a
+        # parent mount enforces read-only access even with this inner grant.
+        command.extend(linux_permission_args(work, (bare,)))
+    else:
+        command.extend(["--add-dir", str(work.parent / "remote.git"), "--config",
+                        "sandbox_workspace_write.network_access=false", "--approve-for-me"])
+    command.append('-')
+    if sys.platform == 'linux' and (work / '.eval/broker-io').is_dir():
+        return readonly_model_command(command, work)
+    return command
 
 
 def _execute_case(
@@ -758,7 +860,7 @@ def _execute_case(
     raw_dir.mkdir(parents=True, exist_ok=False)
     started = datetime.now(UTC)
     infrastructure_ok = False
-    with tempfile.TemporaryDirectory(prefix="gsp-behavior-eval-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="gsp-behavior-eval-") as temporary, ExitStack() as lifecycle:
         root = Path(temporary)
         gh_config = root / "gh-config"
         gh_config.mkdir()
@@ -766,7 +868,10 @@ def _execute_case(
         work = _prepare_fixture(root, scenario, env)
         input_digests = _stage_skill(work, args.skill, skill_text)
         _write_json(raw_dir / "skill-inputs.json", input_digests)
-        pre_state = _snapshot(work, env)
+        broker = None
+        if sys.platform == 'linux' and (work / '.eval/fixture-plan.json').is_file():
+            broker = lifecycle.enter_context(PrivateFixtureRuntime(work, raw_dir.parent / 'control'))
+        pre_state = broker.pre if broker is not None else _snapshot(work, env)
         last_message = raw_dir / "final-message.json"
         case_schema = _read_json(args.output_schema)
         case_schema["properties"]["case_id"] = {"type": "string", "const": scenario["case_id"]}
@@ -782,17 +887,12 @@ def _execute_case(
         )
         prompt = _prompt(skill_text, scenario, args.language, args.context_profile)
         try:
-            process = subprocess.run(
+            process = _capture_codex(
                 command,
                 cwd=work,
                 env=env,
-                input=prompt,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
+                prompt=prompt,
                 timeout=args.timeout_seconds,
-                check=False,
             )
             stdout = process.stdout
             stderr = process.stderr
@@ -803,9 +903,12 @@ def _execute_case(
             stderr = _output_text(error.stderr) + "\nTIMEOUT"
             return_code = 124
         stdout = _visible_jsonl(stdout)
+        if any(json.loads(line).get("type") == "capture.error"
+               for line in stdout.split("\n") if line.strip()):
+            infrastructure_ok = False
         (raw_dir / "stdout.jsonl").write_text(stdout, encoding="utf-8")
         (raw_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
-        post_state = _snapshot(work, env)
+        post_state = broker.finish() if broker is not None else _snapshot(work, env)
         events = _normalize_events(stdout, [root, args.raw_output_dir, ROOT], work)
         allowed_writes = set(scenario.get("allowed_writes", []))
         if _authorized_write_was_not_executed(events, allowed_writes):
@@ -841,6 +944,8 @@ def _execute_case(
                 "redacted_summary": f"codex_exit={return_code}; observed_tool_events={len(events)}; repetition={repetition}",
             },
         }
+        if broker is not None:
+            record['fixture_evidence'] = _redact_value(broker.evidence(post_state), redaction_roots)
     return record, infrastructure_ok
 
 
@@ -865,6 +970,10 @@ def _canary(args: argparse.Namespace, skill_text: str) -> int:
         "environment": ["This is a local read-only canary with no GitHub publication request."],
         "allowed_writes": [],
         "fixture_id": "fixture-tool-event-canary",
+        "fixture_setup": {"local_candidate": False},
+        "fixture_state": {},
+        "fixture_transitions": [],
+        "fixture_requirements": [],
     }
     failures: list[str] = []
     for attempt in range(1, 3):
@@ -913,6 +1022,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.normalized_output.exists():
+        raise SystemExit("normalized output already exists; preserve it and choose a fresh run path")
     if args.runs < 1:
         raise SystemExit("--runs must be positive")
     if not 1 <= args.max_concurrency <= 4:
@@ -933,6 +1044,10 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             raise SystemExit("unknown --case-id: " + ", ".join(sorted(missing)))
         scenarios = [scenario for scenario in scenarios if scenario["case_id"] in selected]
+    for scenario in scenarios:
+        if not all(field in scenario for field in SPEC_FIELDS):
+            raise SystemExit("executable fixture specification missing; do not grade unprepared premises")
+        prepare_fixture_spec(scenario)
     jobs = [(scenario, repetition) for scenario in scenarios for repetition in range(1, args.runs + 1)]
     records: list[dict[str, Any]] = []
     infrastructure_failures = 0
@@ -946,6 +1061,12 @@ def main(argv: list[str] | None = None) -> int:
             records.append(record)
             if not infrastructure_ok:
                 infrastructure_failures += 1
+            _write_json(args.normalized_output, {
+                "schema_version": SCHEMA_VERSION, "evidence_level": "tool_observed",
+                "runs": sorted(records, key=lambda item: (item["case_id"], item["run_id"])),
+                "infrastructure_failures": infrastructure_failures,
+                "expected_runs": len(jobs), "completed_runs": len(records),
+            })
     records.sort(key=lambda item: (item["case_id"], item["run_id"]))
     _write_json(
         args.normalized_output,

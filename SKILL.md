@@ -9,7 +9,7 @@ Help Codex complete a safe GitHub publication within the user's actual authority
 
 This is operational guidance for the agent, not a Git hook, interceptor, mandatory gate, or separate release platform
 
-Candidate Skill version: `2.0.2` (published stable version: `2.0.1`)
+Skill version: `2.0.2`. Published versions are identified by their GitHub Release and verified Tag.
 
 ## 1. Trigger and role
 
@@ -23,8 +23,9 @@ Candidate Skill version: `2.0.2` (published stable version: `2.0.1`)
 
 Use one visible route: **identify and remember → cover the transfer → repair →
 check for missing risk types → record lessons and authorized Issues → publish and
-read back**. Finish local records before the final remote readback; if that readback
-reveals a new fact, one local outcome update is allowed, not another review loop.
+read back**. Finish local records and worktree-status checks before the final
+remote readback. After that readback, report its actual outcome without another
+tool call, local update, or review loop.
 
 For every publication, read [review-and-memory.md](references/review-and-memory.md).
 It is the default review checklist and recurrence protocol, not the advanced CLI.
@@ -183,5 +184,6 @@ Light review is not malware analysis, supply-chain certification, or legal/compl
 - A push-only request stops after the target remote commit is written and read back, subject to the user's stated check endpoint
 - A Tag or Release request continues only through the corresponding explicitly authorized object and its readback
 - After the exact authorized remote result is verified, stop and wait for the user's experience feedback
+- Collect final local status, checks, and lesson records before the last remote readback. That readback is the last tool call; use the collected facts in the final report, without running another `git status` or updating a journal afterward. If the readback fails or reveals a conflict, report that result without claiming completion.
 - Report the repository, remote, target, write contract, local and remote commit, checks, CI result, object readbacks, any explicit bypass used, remaining owner actions, and worktree status
 - If the same blocking cause appears twice without new actionable evidence, stop the loop and report it

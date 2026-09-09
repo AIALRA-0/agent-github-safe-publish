@@ -451,9 +451,11 @@ def validate_run_record(record: Any) -> list[str]:
     missing = sorted(required - record.keys())
     if missing:
         errors.append("run_missing_keys:" + ",".join(missing))
-    extra = sorted(set(record) - required)
+    extra = sorted(set(record) - required - {"fixture_evidence"})
     if extra:
         errors.append("run_extra_keys:" + ",".join(extra))
+    if "fixture_evidence" in record and not isinstance(record["fixture_evidence"], dict):
+        errors.append("run_fixture_evidence_not_object")
     if record.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"run_schema_version:{record.get('schema_version')}")
     string_fields = (
@@ -828,9 +830,60 @@ def classify_command(command: str) -> tuple[str, str | None]:
     return "inspect_local", None
 
 
+def successful_posix_git_chain(command: str, exit_code: int | None) -> bool:
+    """A zero-exit, literal Git-only POSIX && chain proves every term succeeded.
+
+    Do not generalize this to semicolons, pipelines, OR lists, substitutions,
+    control flow, other shells, or unsuccessful chains.
+    """
+    if exit_code != 0:
+        return False
+    try:
+        wrapper = shlex.split(command)
+    except ValueError:
+        return False
+    if not (len(wrapper) == 3 and wrapper[0].rsplit("/", 1)[-1] in {"bash", "sh", "dash", "zsh"}
+            and wrapper[1] in {"-c", "-lc"}):
+        return False
+    script = wrapper[2]
+    quote = None
+    count = index = 0
+    while index < len(script):
+        char = script[index]
+        if char in "`$\\":
+            return False
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "&":
+            if script[index:index + 2] != "&&":
+                return False
+            count += 1
+            index += 1
+        elif char in ";|\r\n!(){}<>#":
+            return False
+        index += 1
+    parts = _split_shell_commands(script)
+    if quote or count == 0 or len(parts) != count + 1:
+        return False
+    return all((args := _command_arguments(part)) and args[0] in {"git", "/usr/bin/git", "/bin/git"}
+               for part in parts)
+
+
 def _split_shell_commands(command: str) -> list[str]:
     """Split common shell separators without splitting separators inside quotes."""
 
+    # Linux Codex wraps the script in one literal bash/sh argument. Unwrap that
+    # layer before classifying commands or assigning per-command exit evidence.
+    try:
+        wrapper = shlex.split(command)
+    except ValueError:
+        wrapper = []
+    if (len(wrapper) == 3 and wrapper[0].rsplit("/", 1)[-1] in {"bash", "sh", "zsh", "dash"}
+            and wrapper[1] in {"-c", "-lc"}):
+        command = wrapper[2]
     if re.search(r"(?i)\b(?:pwsh|powershell)(?:\.exe)?\b", command):
         marker = re.search(r"(?is)\s-command(?:\s+|$)", command)
         if marker:

@@ -36,3 +36,17 @@ authority. A fixed lesson remains subject to relevant recurrence checks.
   cross-cutting metadata lessons remain relevant
 - Evidence: independent candidate review identified this conflict; the default
   contract, invocation policy and bilingual README now use the same relevance rule
+
+## 4. Check author identity in outgoing Git metadata
+
+- Cause: local Git identity can differ from the privacy-preserving identity used
+  in published history. A secret scanner may report no findings while new author
+  or committer fields still expose an owner's personal contact information.
+- Repair: use the owner's intended public identity for new commits. Ask before
+  publishing a newly exposed personal identity or changing frozen unpublished
+  commit identities; preserve the original evidence when redaction is authorized.
+- Recheck: compare author and committer identities across every outgoing commit
+  with the approved public identity before pushing. A clean file diff does not
+  satisfy this check, and existing publication does not itself establish consent.
+- Scope: do not change global Git identity or rewrite published history merely to
+  resolve a local configuration mismatch.

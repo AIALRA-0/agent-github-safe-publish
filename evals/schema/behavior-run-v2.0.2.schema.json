@@ -21,6 +21,29 @@
     "started_at": {"type": "string", "format": "date-time"},
     "finished_at": {"type": "string", "format": "date-time"},
     "pre_state": {"type": "object"},
+    "fixture_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "plan", "pre", "post", "runtime", "observations", "finalization"],
+      "properties": {
+        "source": {"type": "string", "const": "isolated_parent_broker"},
+        "plan": {"type": "object"},
+        "pre": {"type": "object"},
+        "post": {"type": "object"},
+        "runtime": {"type": "object"},
+        "observations": {"type": "array", "items": {"type": "object"}},
+        "finalization": {
+          "type": "object", "additionalProperties": false,
+          "required": ["version", "status", "accepted", "observable"],
+          "properties": {
+            "version": {"type": "integer", "const": 1},
+            "status": {"type": "string", "const": "quiescent"},
+            "accepted": {"type": "integer", "minimum": 0},
+            "observable": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
     "events": {
       "type": "array",
       "items": {

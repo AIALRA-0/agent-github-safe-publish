@@ -183,7 +183,7 @@ def _git_identity(repository: Path) -> None:
 def _commit_file(repository: Path, relative: str, content: str, message: str) -> str:
     target = repository / relative
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    target.write_text(content, encoding="utf-8", newline="\n")
     _run(["git", "add", "--", relative], repository)
     _run(["git", "commit", "-m", message], repository)
     return _run(["git", "rev-parse", "HEAD"], repository).stdout.strip()
@@ -374,7 +374,7 @@ permissions:
   contents: read
 jobs:
   pass:
-    name: pass
+    name: e2e / pass
     runs-on: ubuntu-latest
     steps:
       - run: echo synthetic-e2e-pass
