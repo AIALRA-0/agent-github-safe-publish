@@ -113,6 +113,13 @@ class HoldoutTransportTests(unittest.TestCase):
             reference = prompt.split("<fixture_schema_reference>\n", 1)[1].split(
                 "\n</fixture_schema_reference>", 1)[0]
             self.assertEqual(json.loads(reference), subject.fixture_schema_properties())
+            self.assertIn(
+                "fixture_setup and fixture_state must decode to JSON objects; "
+                "fixture_transitions and fixture_requirements must decode to JSON arrays",
+                prompt,
+            )
+            self.assertIn("decode all 32 fixture strings and verify each decoded top-level type", prompt)
+            self.assertIn("double-encoded, malformed, or has the wrong object/array shape", prompt)
             if kwargs["label"] == "calibration":
                 candidate = prompt.split("<candidate_holdout>\n", 1)[1].split("\n</candidate_holdout>", 1)[0]
                 self.assertEqual(json.loads(candidate), subject._decode_fixture_transport(generated))

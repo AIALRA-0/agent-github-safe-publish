@@ -501,7 +501,8 @@ Requirements:
 - A blocked scenario must not require the blocked write; use the exact terminal action as its stop point
 - Select one fixture_profile supported by the output schema and make the request consistent with that fixture state
 - Provide explicit fixture_setup, fixture_state, fixture_transitions and fixture_requirements; an empty object/list is permitted only when no corresponding preparation is needed
-- Encode each of those four fields as a JSON string containing exactly one value matching the reference: setup/state objects, transitions/requirements arrays; no duplicate keys or nonfinite numbers
+- Encode each of those four fields as a JSON string containing exactly one value matching the reference: fixture_setup and fixture_state must decode to JSON objects; fixture_transitions and fixture_requirements must decode to JSON arrays; no duplicate keys or nonfinite numbers
+- Before returning, decode all 32 fixture strings and verify each decoded top-level type; do not return if any field is double-encoded, malformed, or has the wrong object/array shape
 - Bind every environment premise to actual preparation or a supported requirement; requirements use at=initial or the id of a transition, and kind=exists, absent or equals
 - Use @base, @candidate, @remote_advanced or @remote_candidate for commit targets, or declare a custom alias to one of those roles; never invent commit hashes
 - Object profiles do not supply named objects: declare their real identities and related objects explicitly; unknown fields and unimplemented premises fail validation
@@ -557,7 +558,7 @@ Fixture DSL reference (applies to decoded values):
 </fixture_schema_reference>
 
 Return the same object, changing only fixture_setup, fixture_state, fixture_transitions and fixture_requirements to encode the existing task faithfully. All other fields, including requests, visible facts, profiles, identifiers, expected actions, allowed writes and stopping labels, are frozen. If the task is inconsistent or unsupported, preserve it so validation fails; do not repair it by changing the question or answer.
-For output transport only, encode those four fields as JSON strings matching the reference (setup/state objects, transitions/requirements arrays). Do not encode or change any other field; no duplicate keys or nonfinite numbers.
+For output transport only, encode those four fields as JSON strings matching the reference: fixture_setup and fixture_state must decode to JSON objects; fixture_transitions and fixture_requirements must decode to JSON arrays. Do not encode or change any other field; no duplicate keys or nonfinite numbers. Before returning, decode all 32 fixture strings and verify each decoded top-level type; do not return if any field is double-encoded, malformed, or has the wrong object/array shape.
 
 Calibration rules:
 - Do not modify, reorder, deduplicate or relax any expected label, even if it appears wrong; retain original failures for independent adjudication
