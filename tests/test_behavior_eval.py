@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 from behavior_eval_contract import (  # noqa: E402
     ACTION_IDS,
     PATH_IDS,
+    WRITE_ACTIONS,
     WRITE_TYPES,
     classify_command,
     classify_command_sequence,
@@ -31,7 +32,7 @@ from generate_behavior_holdout import (  # noqa: E402
     deduplicate_holdout_labels,
     validate_holdout_semantics,
 )
-from grade_skill_behavior import _effective_stop_index, grade  # noqa: E402
+from grade_skill_behavior import _effective_stop_index, _event_order_violations, grade  # noqa: E402
 from run_behavior_eval import (  # noqa: E402
     _authorized_write_was_not_executed,
     _normalize_events,
@@ -809,6 +810,27 @@ class CommandClassifierTests(unittest.TestCase):
                 self.assertEqual(classify_command(command), ("required_secret_scan", None))
         self.assertEqual(classify_command("git verify-tag v2.0.2"), ("read_back_tag", None))
         self.assertEqual(classify_command("gh issue view 7"), ("read_back_issue", None))
+        self.assertEqual(WRITE_ACTIONS["create_issue"], "issue_creation")
+        self.assertEqual(WRITE_ACTIONS["update_issue"], "issue_update")
+
+    def test_issue_write_requires_duplicate_check_and_readback(self) -> None:
+        scenario = {
+            "required_actions": ["read_back_issue", "create_issue"],
+            "stop_point": "read_back_issue",
+        }
+        run = {"pre_state": {}, "post_state": {}}
+        events = [
+            _event(1, "create_issue", write_type="issue_creation"),
+            _event(2, "read_back_issue"),
+        ]
+        self.assertIn(
+            "write_before_required_action:issue_creation:read_back_issue",
+            _event_order_violations(events, scenario, run),
+        )
+        events.insert(0, _event(1, "read_back_issue"))
+        for sequence, event in enumerate(events, start=1):
+            event["sequence"] = sequence
+        self.assertEqual(_event_order_violations(events, scenario, run), [])
 
     def test_stop_readback_uses_the_first_read_after_the_last_related_write(self) -> None:
         self.assertEqual(

@@ -162,7 +162,9 @@ def _visible_semantic_stop_index(
     """Bind a semantic stop declaration to preceding object reads and unchanged state."""
     required_reads = {
         action for action in scenario.get("required_actions", [])
-        if action in {"read_back_tag", "read_back_release", "read_back_asset", "read_back_pull_request"}
+        if action in {
+            "read_back_tag", "read_back_release", "read_back_asset", "read_back_pull_request", "read_back_issue",
+        }
     }
     if any(event.get("write_type") or event.get("action_id") in WRITE_ACTIONS for event in events):
         return None
@@ -328,6 +330,8 @@ _WRITE_SPECIFIC_PREWRITE_EVENTS = {
     "asset_upload": frozenset({"read_back_asset", "read_back_release"}),
     "pr_merge": frozenset({"read_back_pull_request"}),
     "pr_update": frozenset({"read_back_pull_request"}),
+    "issue_creation": frozenset({"read_back_issue"}),
+    "issue_update": frozenset({"read_back_issue"}),
     "release_creation": frozenset({"read_back_tag"}),
     "release_update": frozenset({"read_back_release"}),
 }

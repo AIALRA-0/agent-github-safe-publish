@@ -181,6 +181,8 @@ WRITE_ACTIONS = {
     "create_pull_request": "pr_creation",
     "update_pull_request": "pr_update",
     "merge_pull_request": "pr_merge",
+    "create_issue": "issue_creation",
+    "update_issue": "issue_update",
     "update_repository_metadata": "repository_metadata",
     "change_rules": "repository_rules",
     "credential_change": "credential_rotation",
@@ -233,6 +235,7 @@ OBSERVATION_ACTIONS = frozenset(
         "verify_remote_identity",
         "verify_tag_target_remote",
         "read_back_tag",
+        "read_back_issue",
     }
 )
 
