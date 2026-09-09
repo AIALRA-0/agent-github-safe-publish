@@ -2,7 +2,7 @@
 
 <p align="center"><strong>A GitHub safe-publication guidance Skill for Codex</strong></p>
 <p align="center">Helps an agent review the real publication surface, repair critical risks, and complete the exact remote result within explicit user authority</p>
-<p align="center"><strong>Stable v2.0.2</strong> · <a href="README.md">简体中文</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">Latest Release</a></p>
+<p align="center"><strong>Development candidate v2.0.2 · Published stable v2.0.1</strong> · <a href="README.md">简体中文</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">Latest Release</a></p>
 
 ## 1. Product role
 
@@ -42,13 +42,18 @@ Figure 2.1 Three review modes share the same authority boundary and stopping poi
 
 ### 3.1. Ordinary GitHub publication guidance
 
-This is the default path
+The default route has six steps; users do not need to learn the internal tools
 
-- Confirm the real repository, worktree, remote, target ref, current remote base, and allowed write set
-- Review the commits, Trees, metadata, generated artifacts, LFS, submodules, Tags, Releases, or assets that will actually transfer
-- Repair only problems with a verifiable connection to this request or change, then run affected project-native checks
-- Re-read protection rules and the remote before writing, then use an ordinary non-force fast-forward update
-- Read back every authorized object and stop at the specified endpoint
+- Confirm the destination and allowed writes, and read the project's previous risk lessons
+- Review the actual transfer against the checklist, recording evidence or a reason for non-applicability for each category; include secrets introduced in earlier outgoing commits even if later removed
+- Repair concrete risks safely, then verify the repair and necessary functionality
+- Follow data origins, transformations, and public destinations to find risks missing from the checklist
+- Save sanitized causes, repairs, and recurrence checks; with authority for the exact repository, file safely public new findings as GitHub Issues
+- Recheck remote state and protection, complete the authorized publication, read it back, and stop
+
+Local lessons live in Git metadata and are not pushed. Reusable sanitized lessons can also live in the project's security notes so a new clone can read them. Recheck only relevant old problems; missing notes are not evidence of a clean history
+
+An unavailable Issue service leaves a draft instead of delaying an otherwise safe publication. Secrets and sensitive vulnerability details stay private. See the [review and project-memory protocol](references/review-and-memory.md)
 
 Docker is not a dependency of this Skill. Loading or using the ordinary path must not start, install, repair, or wait for Docker
 
@@ -56,7 +61,7 @@ Docker is not a dependency of this Skill. Loading or using the ordinary path mus
 
 - `none` applies only to read-only work or a task with no external transfer
 - `auto` is the default for an ordinary low-risk small update; run an already available scanner, or perform the five-class review of the actual transfer surface and state the blind spots
-- `required` applies to first publication of a private repository, full-history or mirror migration, multiple refs, LFS, private submodules, sensitive configuration, databases, models, datasets, media, customer assets, a past credential incident, or an explicit strict-scan request
+- `required` applies when this transfer includes first publication of private history, full-history or mirror migration, multiple refs, LFS, private submodules, sensitive configuration, databases, models, datasets, media, customer assets, a relevant credential incident or unresolved exposure, or an explicit strict-scan request; a resolved incident unrelated to the current update does not permanently force heavyweight review
 
 If no suitable scanner is available in `required` mode, ask once for one owner choice
 
@@ -103,7 +108,7 @@ The CLI `publish` command publishes an already-certified candidate commit to its
 In Codex, ask Skill Installer to install the stable Tag from GitHub and keep the installed name `github-safe-publish`
 
 ```text
-Use $skill-installer to install AIALRA-0/agent-github-safe-publish at ref v2.0.2 as github-safe-publish.
+Use $skill-installer to install AIALRA-0/agent-github-safe-publish at ref v2.0.1 as github-safe-publish.
 ```
 
 After installation, ask Codex to run Skill Creator's `quick_validate.py` against the installed directory. Success should confirm the name, YAML frontmatter, `agents/openai.yaml`, and structure, with implicit invocation still enabled
@@ -138,6 +143,7 @@ Loading the Skill grants no external-write permission. The following objects are
 - GitHub Tag creation
 - GitHub Release creation
 - GitHub Release update
+- Issue creation and Issue update
 - Release-asset upload
 - Pull Request creation, update, and merge
 - repository-metadata modification

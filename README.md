@@ -2,7 +2,7 @@
 
 <p align="center"><strong>面向 Codex 的 GitHub 安全发布指导 Skill</strong></p>
 <p align="center">帮助 Agent 审阅真实发布面、修复关键风险，并在用户明确授权内完成指定的远端结果</p>
-<p align="center"><strong>稳定版 v2.0.2</strong> · <a href="README.en.md">English</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">最新 Release</a></p>
+<p align="center"><strong>开发候选 v2.0.2 · 已发布稳定版 v2.0.1</strong> · <a href="README.en.md">English</a> · <a href="https://github.com/AIALRA-0/agent-github-safe-publish/releases/latest">最新 Release</a></p>
 
 ## 1. 产品定位
 
@@ -42,13 +42,18 @@ flowchart TD
 
 ### 3.1. 普通 GitHub 发布指导
 
-这是默认路径
+默认按六步完成，不需要你理解内部工具
 
-- 确认真实仓库、工作树、远端、目标 ref、当前远端基线和允许的写入集合
-- 按操作审阅真正会传输的提交、Tree、元数据、生成物、LFS、子模块、Tag、Release 或附件
-- 只修复与本次请求或变更具有可验证因果关系的问题，并运行受影响的项目原生检查
-- 写入前重新读取保护规则和远端，使用普通非强制快进更新
-- 写入后回读每个被授权对象，到达指定终点后停止
+- 确认往哪里发布、允许发布什么，并读取这个项目以前发现的问题
+- 对照风险清单检查本次真正传输的内容，每类标明已检查的证据或不适用原因；前面提交里出现、后来删掉的秘密也要检查
+- 能安全修复的问题直接修复，再验证修复结果与必要功能
+- 沿着数据来源、加工过程和公开出口，寻找清单没有列出的风险
+- 保存脱敏后的原因、修复办法和下次检查方法；得到指定仓库的授权后，将可公开的新问题提交为 Issue，即 GitHub 上可追踪的问题记录
+- 重新确认远端与保护规则，完成已授权发布并回读结果，然后停止
+
+旧问题保存在 Git 的本地管理目录，不随代码推送；有实际复用价值的脱敏教训也可进入项目安全说明，让新克隆继续读得到；每次只重查相关旧问题，记录缺失不会被当成从未出过问题
+
+Issue 提交失败时保留草稿，不拖住已经满足安全要求的项目发布；真实秘密和敏感漏洞细节不公开；完整操作见[审核与项目记忆](references/review-and-memory.md)
 
 Docker 不是此 Skill 的依赖；加载或使用普通路径不得启动、安装、修复或等待 Docker
 
@@ -56,7 +61,7 @@ Docker 不是此 Skill 的依赖；加载或使用普通路径不得启动、安
 
 - `none` 只用于只读任务或没有外部传输的任务
 - `auto` 是普通低风险小改动的默认值；已有扫描器就使用，没有时只对实际传输面做五类轻量审核并说明盲区
-- `required` 用于私有仓库首次开源、全历史或镜像迁移、多 ref、LFS、私有子模块、敏感配置、数据库、模型、数据集、媒体、客户资产、过往凭据事故或用户明确要求严格扫描的任务
+- `required` 用于本次实际传输涉及私有仓库首次开源、全历史或镜像迁移、多 ref、LFS、私有子模块、敏感配置、数据库、模型、数据集、媒体、客户资产、相关凭据事故或未解决泄露，以及用户明确要求严格扫描的任务；已修复且不涉及本次修改的旧事故，不会让普通更新永久进入重检查
 
 `required` 模式缺少合适扫描器时，只询问一次所有者选择
 
@@ -103,7 +108,7 @@ CLI 的 `publish` 只把已认证候选提交发布到其配置的 Git 远端，
 在 Codex 中请求 Skill Installer 从 GitHub 安装稳定 Tag，并保持安装名称为 `github-safe-publish`
 
 ```text
-Use $skill-installer to install AIALRA-0/agent-github-safe-publish at ref v2.0.2 as github-safe-publish.
+Use $skill-installer to install AIALRA-0/agent-github-safe-publish at ref v2.0.1 as github-safe-publish.
 ```
 
 安装后请求 Codex 使用 Skill Creator 的 `quick_validate.py` 检查安装目录；成功应确认名称、YAML Frontmatter、`agents/openai.yaml` 和结构均有效，且隐式调用仍为启用
@@ -138,6 +143,7 @@ After the remote commit is read back, stop and report the result.
 - Tag 创建
 - GitHub Release 创建
 - GitHub Release 更新
+- Issue 创建与 Issue 更新
 - Release 附件上传
 - Pull Request 创建、更新和合并
 - 仓库元数据修改

@@ -64,6 +64,8 @@ class SkillInvocationContractTests(unittest.TestCase):
             "Pull Request creation",
             "Pull Request update",
             "Pull Request merge",
+            "Issue creation",
+            "Issue update",
             "repository metadata modification",
             "repository or protection-rule modification",
             "credential rotation",
@@ -245,6 +247,20 @@ class SkillInvocationContractTests(unittest.TestCase):
         self.assertIn("not steps every user must run", skill)
         self.assertIn("总计 119 次", contributing)
         self.assertIn("CI 只校验已提交的脱敏证据", contributing)
+
+    def test_default_review_routes_to_durable_recurrence_and_safe_issue_protocol(self) -> None:
+        skill = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        protocol = (REPOSITORY_ROOT / "references" / "review-and-memory.md").read_text(encoding="utf-8")
+        self.assertIn("references/review-and-memory.md", skill)
+        for category in ("Credentials", "People and real data", "Internal infrastructure",
+                         "Rights and confidential records", "Private assets", "Write integrity",
+                         "Previously found and unlisted risks"):
+            self.assertIn(category, protocol)
+        self.assertIn("never a permanent exemption", skill)
+        self.assertIn("does not permanently force strict", skill)
+        self.assertIn("Journal missing means history unavailable", protocol)
+        self.assertIn("search both open and closed Issues", protocol)
+        self.assertIn("never leak to satisfy an Issue quota", protocol)
 
 
 class DocumentationContractTests(unittest.TestCase):
