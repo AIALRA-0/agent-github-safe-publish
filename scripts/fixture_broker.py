@@ -302,6 +302,10 @@ class SafeGit:
             valid = len(values) == 1 and revision(values[0])
         elif args[:2] == ("merge-base", "--is-ancestor"):
             valid = len(args) == 4 and all(revision(value) for value in args[2:])
+        elif args[:3] == ("show-ref", "--verify", "--quiet"):
+            valid = len(args) == 4 and args[3].startswith("refs/tags/") and valid_ref(args[3])
+        elif args[:2] == ("cat-file", "-t"):
+            valid = len(args) == 3 and args[2].startswith("refs/tags/") and valid_ref(args[2])
         elif args[:1] == ("check-ref-format",):
             valid = (len(args) == 2 and valid_ref(args[1])) or (
                 len(args) == 3 and args[1] == "--branch" and valid_ref("refs/heads/" + args[2]))

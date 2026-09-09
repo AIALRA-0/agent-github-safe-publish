@@ -50,3 +50,14 @@ authority. A fixed lesson remains subject to relevant recurrence checks.
   satisfy this check, and existing publication does not itself establish consent.
 - Scope: do not change global Git identity or rewrite published history merely to
   resolve a local configuration mismatch.
+
+## 5. Verify the object named by its actual metadata
+
+- Cause: manually reconstructing an object digest can select the wrong file;
+  an unavailable reader can also be mistaken for evidence that content is absent.
+- Repair: derive the identifier and object path from the actual pointer or
+  manifest. Distinguish a tool-start failure from an object-validation result.
+- Recheck: use a synthetic full-length identifier and confirm the exact object
+  path, size and digest; a shortened identifier must not count as verification.
+- Status: guidance corrected; forward behavior validation remains pending.
+- Tracking: [Issue 9](https://github.com/AIALRA-0/agent-github-safe-publish/issues/9)

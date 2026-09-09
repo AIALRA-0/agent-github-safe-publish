@@ -289,6 +289,7 @@ def materialize(plan: dict, work: Path | str, actual_commits: dict[str, str], en
     if git.text(bare, "rev-parse", "--is-bare-repository") != "true":
         _fail("remote_is_not_bare")
     for prefix, refs in (("refs/heads/", bound["local_branches"]),
+                         ("refs/tags/", bound.get("local_tags", {})),
                          ("refs/heads/", bound["state"]["branches"]),
                          ("refs/tags/", bound["state"]["tags"])):
         for name in refs:
@@ -319,7 +320,8 @@ def materialize(plan: dict, work: Path | str, actual_commits: dict[str, str], en
         if not in_remote:
             _transfer_commit(git, git_dir, bare, oid)
     tags = bound["state"]["tags"]
-    local_tags = _tag_objects(git, git_dir, tags)
+    local_targets = bound.get("local_tags", tags)
+    local_tags = _tag_objects(git, git_dir, local_targets)
     remote_tags = _tag_objects(git, bare, tags)
     branches = bound["state"]["branches"]
     _sync_refs(git, bare, {"refs/heads/": branches, "refs/tags/": remote_tags})
@@ -335,9 +337,10 @@ def materialize(plan: dict, work: Path | str, actual_commits: dict[str, str], en
     # Verify Git before installing state used by the controller.
     facts = {"state": deepcopy(bound["state"]),
              "local_branches": _refs(git, git_dir, "refs/heads/"),
+             "local_tags": _peeled_tags(git, git_dir),
              "remote_branches": _refs(git, bare, "refs/heads/"),
              "remote_tags": _peeled_tags(git, bare)}
-    if _peeled_tags(git, git_dir) != tags:
+    if facts["local_tags"] != local_targets:
         _fail("local_tag_readback_mismatch")
     if _refs(git, git_dir, "refs/remotes/origin/") != branches:
         _fail("remote_tracking_readback_mismatch")

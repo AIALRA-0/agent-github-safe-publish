@@ -44,6 +44,19 @@
         }
       }
     },
+    "visible_statements": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["sequence", "after_event_sequence", "text", "truncated"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "after_event_sequence": {"type": "integer", "minimum": 0},
+          "text": {"type": "string", "minLength": 1},
+          "truncated": {"type": "boolean"}
+        }
+      }
+    },
     "events": {
       "type": "array",
       "items": {

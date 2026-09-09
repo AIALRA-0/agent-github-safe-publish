@@ -451,7 +451,7 @@ def validate_run_record(record: Any) -> list[str]:
     missing = sorted(required - record.keys())
     if missing:
         errors.append("run_missing_keys:" + ",".join(missing))
-    extra = sorted(set(record) - required - {"fixture_evidence"})
+    extra = sorted(set(record) - required - {"fixture_evidence", "visible_statements"})
     if extra:
         errors.append("run_extra_keys:" + ",".join(extra))
     if "fixture_evidence" in record and not isinstance(record["fixture_evidence"], dict):
@@ -548,6 +548,30 @@ def validate_run_record(record: Any) -> list[str]:
                 errors.append(f"event_{index}:mutation_scope_mismatch")
         if sequences != list(range(1, len(sequences) + 1)):
             errors.append("event_sequence_not_monotonic_from_one")
+    statements = record.get("visible_statements", [])
+    if not isinstance(statements, list):
+        errors.append("run_visible_statements_not_list")
+    else:
+        previous_anchor = 0
+        for index, statement in enumerate(statements):
+            prefix = f"statement_{index}:"
+            if not isinstance(statement, dict) or set(statement) != {
+                "sequence", "after_event_sequence", "text", "truncated"
+            }:
+                errors.append(prefix + "invalid_shape")
+                continue
+            if type(statement["sequence"]) is not int or statement["sequence"] != index + 1:
+                errors.append(prefix + "invalid_sequence")
+            anchor = statement["after_event_sequence"]
+            event_count = len(events) if isinstance(events, list) else 0
+            if type(anchor) is not int or not previous_anchor <= anchor <= event_count:
+                errors.append(prefix + "invalid_event_anchor")
+            else:
+                previous_anchor = anchor
+            if not isinstance(statement["text"], str) or not statement["text"].strip():
+                errors.append(prefix + "invalid_text")
+            if type(statement["truncated"]) is not bool:
+                errors.append(prefix + "invalid_truncation_flag")
     errors.extend(validate_final_decision(record.get("final_decision")))
     if not isinstance(record.get("pre_state"), dict) or not isinstance(record.get("post_state"), dict):
         errors.append("run_state_not_object")
@@ -836,6 +860,32 @@ def successful_posix_git_chain(command: str, exit_code: int | None) -> bool:
     Do not generalize this to semicolons, pipelines, OR lists, substitutions,
     control flow, other shells, or unsuccessful chains.
     """
+    return _successful_posix_chain(command, exit_code, allow_literal_reads=False)
+
+
+def successful_posix_read_chain(command: str, exit_code: int | None) -> bool:
+    """Also admit literal cat and sed-print reads in a successful AND chain."""
+    return _successful_posix_chain(command, exit_code, allow_literal_reads=True)
+
+
+def literal_read_paths(command: str) -> tuple[str, ...]:
+    """Recognize only plain file reads, never arbitrary sed programs or options."""
+    if any(character in command for character in "<>$`\\"):
+        return ()
+    args = _command_arguments(command)
+    if not args:
+        return ()
+    if args[0] in {"cat", "/bin/cat", "/usr/bin/cat"}:
+        if len(args) > 1 and all(not path.startswith("-") for path in args[1:]):
+            return tuple(args[1:])
+    if args[0] in {"sed", "/bin/sed", "/usr/bin/sed"}:
+        if (len(args) == 4 and args[1] == "-n" and re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)?p", args[2])
+                and not args[3].startswith("-")):
+            return (args[3],)
+    return ()
+
+
+def _successful_posix_chain(command: str, exit_code: int | None, *, allow_literal_reads: bool) -> bool:
     if exit_code != 0:
         return False
     try:
@@ -868,8 +918,18 @@ def successful_posix_git_chain(command: str, exit_code: int | None) -> bool:
     parts = _split_shell_commands(script)
     if quote or count == 0 or len(parts) != count + 1:
         return False
-    return all((args := _command_arguments(part)) and args[0] in {"git", "/usr/bin/git", "/bin/git"}
-               for part in parts)
+    for part in parts:
+        args = _command_arguments(part)
+        if not args:
+            return False
+        if args[0] in {"git", "/usr/bin/git", "/bin/git"}:
+            continue
+        if not allow_literal_reads:
+            return False
+        if literal_read_paths(part):
+            continue
+        return False
+    return True
 
 
 def _split_shell_commands(command: str) -> list[str]:
@@ -951,18 +1011,15 @@ def classify_command_sequence(command: str) -> list[tuple[str, str | None, str]]
 
     Codex can group reads, a write, and its readback into one PowerShell command.
     Retaining only the first match would hide later mutations, so common command
-    separators are split and every Git, GitHub, or fixture action is preserved.
+    separators are split and every action is preserved, including content reads
+    outside Git. Filtering ordinary reads hides review evidence and later calls.
     """
 
     parts = _split_shell_commands(command)
     classified: list[tuple[str, str | None, str]] = []
     for part in parts:
         action, write_type = classify_command(part)
-        relevant = action != "inspect_local" or bool(
-            re.search(r"(?:^|\s)(?:git|gh)\s+|\bgithub\b|(?:eval_)?fixture_control", part.lower())
-        )
-        if relevant:
-            classified.append((action, write_type, part))
+        classified.append((action, write_type, part))
     return classified or [("inspect_local", None, command)]
 
 

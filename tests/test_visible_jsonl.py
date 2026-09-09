@@ -100,9 +100,12 @@ class VisibleJsonlTests(unittest.TestCase):
                      mock.patch.object(runner, "_stage_skill", return_value={}), \
                      mock.patch.object(runner, "_snapshot", return_value={}), \
                      mock.patch.object(runner, "_prompt", return_value=""), \
-                     mock.patch.object(runner, "_codex_command", side_effect=lambda *a: [str(a[3])]), \
+                     mock.patch.object(runner, "_codex_command", side_effect=lambda *a, **kw: [str(a[3])]), \
                      mock.patch.object(runner, "_capture_codex", side_effect=fake_capture):
-                    record, ok = runner._execute_case({"case_id": "synthetic", "allowed_writes": []}, args, "", 1)
+                    scenario = {"case_id": "synthetic", "allowed_writes": [],
+                                "fixture_setup": {}, "fixture_state": {},
+                                "fixture_transitions": [], "fixture_requirements": []}
+                    record, ok = runner._execute_case(scenario, args, "", 1)
                 self.assertEqual(ok, not malformed)
                 self.assertEqual(len(record["events"]), 1)
                 self.assertIn("codex_exit=0", record["raw_output"]["redacted_summary"])

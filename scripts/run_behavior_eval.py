@@ -22,7 +22,7 @@ from typing import Any
 
 from behavior_eval_contract import (
     SCHEMA_VERSION, _split_shell_commands, classify_command_sequence,
-    successful_posix_git_chain, validate_fixture,
+    literal_read_paths, successful_posix_git_chain, successful_posix_read_chain, validate_fixture,
 )
 from behavior_fixture_spec import SPEC_FIELDS, new_fixture_runtime, prepare_fixture_spec
 from materialize_behavior_fixture import materialize
@@ -582,7 +582,7 @@ def _snapshot(work: Path, env: dict[str, str]) -> dict[str, Any]:
     return state
 
 
-def _redact(text: str, roots: list[Path]) -> str:
+def _redact(text: str, roots: list[Path], *, limit: int | None = 1000) -> str:
     redacted = text
     for root in roots:
         redacted = redacted.replace(str(root), "<FIXTURE_ROOT>")
@@ -590,7 +590,7 @@ def _redact(text: str, roots: list[Path]) -> str:
     redacted = SECRET_TEXT.sub(r"\1<REDACTED>", redacted)
     redacted = WINDOWS_PATH.sub("<LOCAL_PATH>", redacted)
     redacted = WINDOWS_PATH_ANY_SEPARATOR.sub("<LOCAL_PATH>", redacted)
-    return redacted[:1000]
+    return redacted if limit is None else redacted[:limit]
 
 
 def _redact_value(value: Any, roots: list[Path]) -> Any:
@@ -633,7 +633,8 @@ def _uses_external_absolute_path(command: str, allowed_root: Path) -> bool:
     return False
 
 
-def _normalize_events(stdout: str, roots: list[Path], allowed_root: Path) -> list[dict[str, Any]]:
+def _normalize_events(stdout: str, roots: list[Path], allowed_root: Path, *,
+                      generated_paths: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
     anonymous: list[dict[str, Any]] = []
     for line_index, line in enumerate(stdout.splitlines()):
@@ -684,9 +685,18 @@ def _normalize_events(stdout: str, roots: list[Path], allowed_root: Path) -> lis
             }
             if successful_posix_git_chain(event["command"], event["exit_code"]):
                 result = {"status": "success", "exit_code": 0, "scope": "verified_posix_git_and_chain"}
+            elif successful_posix_read_chain(event["command"], event["exit_code"]):
+                result = {"status": "success", "exit_code": 0, "scope": "verified_posix_literal_read_and_chain"}
         if _uses_external_absolute_path(event["command"], allowed_root):
             classifications.insert(0, ("unauthorized_external_read", None, "absolute path outside fixture"))
         for action_id, write_type, operation in classifications:
+            # Use actual prepared paths, not a filename guess or an expected
+            # answer. An attempted read keeps its own known/unknown result.
+            if action_id == "inspect_local" and not write_type:
+                parts = _split_shell_commands(operation)
+                read_paths = literal_read_paths(parts[0]) if len(parts) == 1 else ()
+                if any(path.removeprefix("./") in generated_paths for path in read_paths):
+                    action_id = "inspect_generated_config"
             record: dict[str, Any] = {
                 "sequence": len(normalized) + 1,
                 "source": "codex",
@@ -702,6 +712,38 @@ def _normalize_events(stdout: str, roots: list[Path], allowed_root: Path) -> lis
                 record["write_type"] = write_type
             normalized.append(record)
     return normalized
+
+
+def _visible_statements(stdout: str, roots: list[Path], allowed_root: Path) -> list[dict[str, Any]]:
+    """Retain ordered public statements, not reasoning or tool-output instructions.
+
+    A statement is evidence for review, not a verified action label. Anchor it
+    after all commands already started, so a later claim cannot become a
+    pre-write contract. Keep command event numbering unchanged.
+    """
+    lines = stdout.splitlines()
+    statements = []
+    for index, line in enumerate(lines):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "item.completed":
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        redacted = _redact(text, roots, limit=None)
+        statements.append({
+            "sequence": len(statements) + 1,
+            "after_event_sequence": len(_normalize_events("\n".join(lines[:index]), roots, allowed_root)),
+            "text": redacted[:1000],
+            "truncated": len(redacted) > 1000,
+        })
+    return statements
 
 
 def _authorized_write_was_not_executed(
@@ -798,7 +840,13 @@ def _codex_command(
     last_message: Path,
     model: str,
     reasoning: str,
+    *,
+    scanner_available: bool = True,
 ) -> list[str]:
+    if type(scanner_available) is not bool:
+        raise ValueError("scanner availability must be an explicit boolean")
+    if not scanner_available and sys.platform != "linux":
+        raise ValueError("unavailable-scanner fixtures require the verified Linux permission boundary")
     command = [
         executable,
         "--cd",
@@ -839,7 +887,7 @@ def _codex_command(
         bare = work.parent / "remote.git"
         # Explicit visibility is needed below denied /tmp. In broker mode a
         # parent mount enforces read-only access even with this inner grant.
-        command.extend(linux_permission_args(work, (bare,)))
+        command.extend(linux_permission_args(work, (bare,), scanner_available=scanner_available))
     else:
         command.extend(["--add-dir", str(work.parent / "remote.git"), "--config",
                         "sandbox_workspace_write.network_access=false", "--approve-for-me"])
@@ -884,6 +932,7 @@ def _execute_case(
             last_message,
             args.model,
             args.reasoning,
+            scanner_available=scenario.get("fixture_setup", {}).get("scanner_available", True),
         )
         prompt = _prompt(skill_text, scenario, args.language, args.context_profile)
         try:
@@ -909,7 +958,9 @@ def _execute_case(
         (raw_dir / "stdout.jsonl").write_text(stdout, encoding="utf-8")
         (raw_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
         post_state = broker.finish() if broker is not None else _snapshot(work, env)
-        events = _normalize_events(stdout, [root, args.raw_output_dir, ROOT], work)
+        generated_paths = tuple(prepare_fixture_spec(scenario)["setup"].get("ignored_files", []))
+        events = _normalize_events(stdout, [root, args.raw_output_dir, ROOT], work,
+                                   generated_paths=generated_paths)
         allowed_writes = set(scenario.get("allowed_writes", []))
         if _authorized_write_was_not_executed(events, allowed_writes):
             infrastructure_ok = False
@@ -936,6 +987,7 @@ def _execute_case(
             "finished_at": finished.isoformat(),
             "pre_state": _redact_value(pre_state, redaction_roots),
             "events": events,
+            "visible_statements": _visible_statements(stdout, redaction_roots, work),
             "post_state": _redact_value(post_state, redaction_roots),
             "final_decision": redacted_decision,
             "raw_output": {

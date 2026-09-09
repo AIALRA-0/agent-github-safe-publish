@@ -77,6 +77,8 @@ def _public_report_errors(report: Any, evaluated_commit: str) -> list[str]:
     if not isinstance(report, dict):
         return ["public_report_not_object"]
     errors: list[str] = []
+    if "audited_annotations" in report:
+        errors.append("public_report_annotations_must_be_per_configuration")
     if report.get("evaluated_commit") != evaluated_commit:
         errors.append("public_report_commit_mismatch")
     if report.get("total_runs") != 119:
@@ -152,6 +154,11 @@ def _public_report_errors(report: Any, evaluated_commit: str) -> list[str]:
         if not isinstance(item, dict):
             errors.append(f"public_report_configuration_{index}_not_object")
             continue
+        if "audited_annotations" in item:
+            if not isinstance(item["audited_annotations"], list):
+                errors.append(f"public_report_configuration_{index}_annotations_not_list")
+            if item.get("private_holdout") is not False:
+                errors.append(f"public_report_configuration_{index}_annotations_require_public_events")
         signature = (
             item.get("model"),
             item.get("reasoning"),
@@ -197,6 +204,7 @@ def _public_event_errors(
     bundle: Any,
     fixture: dict[str, Any],
     evaluated_commit: str,
+    public_report: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[tuple[str, str, str, str], dict[str, Any]]]:
     if not isinstance(bundle, dict):
         return ["public_events_not_object"], {}
@@ -236,6 +244,13 @@ def _public_event_errors(
         errors.append("public_events_configuration_matrix_mismatch")
 
     critical = set(CRITICAL_CASES)
+    # Only independently audited report annotations are inputs. Never consume
+    # alleged qualifications from evaluated-model records or the event bundle.
+    configurations = public_report.get("configurations", []) if isinstance(public_report, dict) else []
+    if not isinstance(configurations, list):
+        configurations = []  # Report shape validation records this failure.
+    public_configs = {_configuration_signature(item): item for item in configurations
+                     if isinstance(item, dict) and item.get("private_holdout") is False}
     summaries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for signature, records in groups.items():
         expected_count = expected_signatures.get(signature)
@@ -249,7 +264,15 @@ def _public_event_errors(
             "status": "candidate",
             "scenarios": selected,
         }
-        result = grade(selected_fixture, {"runs": records}, "tool_observed")
+        configuration = public_configs.get(signature, {})
+        try:
+            if "audited_annotations" in configuration and not isinstance(configuration["audited_annotations"], list):
+                raise ValueError("audited_annotations_not_list")
+            result = grade(selected_fixture, {"runs": records}, "tool_observed",
+                           audited_annotations=configuration.get("audited_annotations"))
+        except ValueError as error:
+            errors.append("public_events_annotation_error:" + "/".join(signature) + ":" + str(error))
+            result = grade(selected_fixture, {"runs": records}, "tool_observed")
         summaries[signature] = result
         if result.get("structural_failure_count"):
             errors.append("public_events_structural_failure:" + "/".join(signature))
@@ -295,6 +318,8 @@ def _public_config_consistency_errors(
         configured = by_signature[signature]
         if any(configured.get(field) != graded.get(field) for field in fields):
             errors.append("public_report_event_metrics_mismatch:" + "/".join(signature))
+        if configured.get("mechanical_grade") != graded.get("mechanical_grade"):
+            errors.append("public_report_mechanical_grade_mismatch:" + "/".join(signature))
     return errors
 
 
@@ -369,7 +394,7 @@ def verify(manifest_path: Path, required: bool = False) -> list[str]:
     if resolved_events is not None and resolved_events.is_file() and cases is not None and cases.is_file():
         event_bundle = json.loads(resolved_events.read_text(encoding="utf-8"))
         fixture = json.loads(cases.read_text(encoding="utf-8"))
-        event_errors, summaries = _public_event_errors(event_bundle, fixture, evaluated_commit)
+        event_errors, summaries = _public_event_errors(event_bundle, fixture, evaluated_commit, report)
         errors.extend(event_errors)
     else:
         errors.append("public_events_missing")

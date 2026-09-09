@@ -6,7 +6,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from grade_skill_behavior import _attributed_writes
-from test_fixture_attribution import evidence, advance, push, transition, TIMEOUT
+from behavior_eval_contract import observed_writes_from_events
+from test_fixture_attribution import evidence, advance, push, transition, ERROR, TIMEOUT
 
 
 def record(case):
@@ -48,6 +49,26 @@ class GradeFixtureCustodyTests(unittest.TestCase):
         event = {'action_id': 'fast_forward_push', 'write_type': 'branch_push', 'result': {'status': 'error'}}
         writes, backend, errors = _attributed_writes(record(case), {}, [event])
         self.assertEqual((writes, backend, errors), ({'branch_push'}, {'branch_push'}, []))
+
+    def test_suppressed_backend_none_preserves_attempt_without_success(self):
+        case = evidence([transition([], operation='branch-push', result=ERROR)], operation='branch-push')
+        self.assertIsNone(case['runtime']['events'][0]['backend_result'])
+        events = [{'action_id': 'fast_forward_push', 'write_type': 'branch_push', 'result': ERROR}]
+        original_events = deepcopy(events)
+        self.assertEqual(_attributed_writes(record(case), {}, events), (set(), set(), []))
+        self.assertEqual(observed_writes_from_events(events), {'branch_push'})
+        self.assertEqual(events, original_events)
+
+    def test_missing_backend_result_cannot_supply_success_or_erase_attempt(self):
+        case = evidence([transition([], operation='branch-push', result=ERROR)], operation='branch-push')
+        del case['runtime']['events'][0]['backend_result']
+        events = [{'action_id': 'fast_forward_push', 'write_type': 'branch_push', 'result': ERROR}]
+        original_events = deepcopy(events)
+        writes, backend, errors = _attributed_writes(record(case), {}, events)
+        self.assertEqual((writes, backend), (set(), set()))
+        self.assertTrue(errors)  # Missing journal data fails replay; it is not a successful write.
+        self.assertEqual(observed_writes_from_events(events), {'branch_push'})
+        self.assertEqual(events, original_events)
 
     def test_missing_receipt_and_endpoint_mismatch_fail(self):
         case = record(evidence([advance()]))

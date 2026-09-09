@@ -230,6 +230,89 @@ class BoundFixtureIntegrationTests(unittest.TestCase):
                          "post-materialization profile defaults must not override explicit setup")
         self.assertEqual("main", actual.stdout.strip())
 
+    def public_remote_advanced_case(self):
+        public = Path(__file__).resolve().parents[1] / "evals/candidate/publication-behavior-v2.0.2.json"
+        scenarios = json.loads(public.read_text(encoding="utf-8"))["scenarios"]
+        self.assertEqual(38, len(scenarios))
+        return next(case for case in scenarios if case["case_id"] == "remote-advanced-re-review")
+
+    def test_public_remote_advance_is_visible_before_writes_across_read_routes(self):
+        for route in ("inspect", "branch-read", "ls-remote", "fetch"):
+            with self.subTest(route=route):
+                self.prepare(self.public_remote_advanced_case())
+                base = self.git("rev-parse", "HEAD^")
+                candidate = self.git("rev-parse", "HEAD")
+                advanced = self.remote_ref("refs/heads/main")
+                self.assertNotEqual(base, advanced, "remote must advance before any agent operation")
+                self.assertNotEqual(candidate, advanced)
+                self.assertEqual(base, self.git("merge-base", candidate, advanced))
+                self.assertEqual([], self.state()["fixture_runtime"]["events"])
+                self.assertEqual(advanced, self.state()["branches"]["main"])
+                if route == "inspect":
+                    visible = self.call("inspect")["branches"]["main"]
+                elif route == "branch-read":
+                    visible = self.call("branch-read", "--branch", "main")
+                elif route == "ls-remote":
+                    visible = self.git("ls-remote", "origin", "refs/heads/main").split()[0]
+                else:
+                    self.git("fetch", "origin", "main")
+                    visible = self.git("rev-parse", "FETCH_HEAD")
+                self.assertEqual(advanced, visible)
+                self.assertFalse(any(event["operation"] == "branch-push"
+                                     for event in self.state()["fixture_runtime"]["events"]))
+                self.assertEqual(candidate, self.git("rev-parse", "HEAD"))
+
+    def test_public_remote_advance_rejects_stale_controller_and_native_pushes(self):
+        for route in ("controller", "git"):
+            with self.subTest(route=route):
+                self.prepare(self.public_remote_advanced_case())
+                advanced = self.remote_ref("refs/heads/main")
+                if route == "controller":
+                    output = self.call("branch-push", "--branch", "main", expected_exit=2)
+                    self.assertIn("error", output)
+                    event = self.state()["fixture_runtime"]["events"][-1]
+                    self.assertEqual("error", event["backend_result"]["status"])
+                else:
+                    result = subprocess.run(["git", "push", "origin", "HEAD:refs/heads/main"],
+                                            cwd=self.work, env=self.env, capture_output=True,
+                                            text=True, encoding="utf-8", timeout=15, check=False)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("rejected", result.stderr)
+                self.assertEqual(advanced, self.remote_ref("refs/heads/main"))
+                self.assertEqual(advanced, self.state()["branches"]["main"])
+
+    def test_public_remote_advance_reconciles_and_never_rewinds_final_readback(self):
+        self.prepare(self.public_remote_advanced_case())
+        candidate = self.git("rev-parse", "HEAD")
+        advanced = self.call("inspect")["branches"]["main"]
+        self.git("fetch", "origin", "main")
+        self.git("merge", "--no-edit", "origin/main")
+        merged = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(candidate, merged, "the original candidate cannot count as reconciled")
+        self.assertNotEqual(advanced, merged)
+        self.git("merge-base", "--is-ancestor", candidate, merged)
+        self.git("merge-base", "--is-ancestor", advanced, merged)
+        self.assertIn("candidate.txt", self.git("ls-tree", "-r", "--name-only", merged))
+        self.assertIn("remote-change.txt", self.git("ls-tree", "-r", "--name-only", merged))
+        check = subprocess.run([sys.executable, "-B", ".eval/project_check.py"],
+                               cwd=self.work, env=self.env, capture_output=True,
+                               text=True, encoding="utf-8", timeout=15, check=False)
+        self.assertEqual(0, check.returncode, check.stdout + check.stderr)
+        # Reproduce the old inspect -> branch-read -> push -> branch-read route.
+        self.assertEqual(advanced, self.call("inspect")["branches"]["main"])
+        self.assertEqual(advanced, self.call("branch-read", "--branch", "main"))
+        self.assertEqual("success", self.call("branch-push", "--branch", "main", "--commit", merged)["status"])
+        for _ in range(2):
+            self.assertEqual(merged, self.call("branch-read", "--branch", "main"))
+            self.assertEqual(merged, self.call("inspect")["branches"]["main"])
+            self.assertEqual(merged, self.git("ls-remote", "origin", "refs/heads/main").split()[0])
+        events = self.state()["fixture_runtime"]["events"]
+        writes = [event for event in events if event["operation"] == "branch-push"]
+        self.assertEqual(1, len(writes))
+        self.assertLess(events[2]["sequence"], writes[0]["sequence"])
+        self.assertTrue(all(not event["effects"] for event in events),
+                        "pre-existing advancement must never fire during a later readback")
+
 
 if __name__ == "__main__":
     unittest.main()

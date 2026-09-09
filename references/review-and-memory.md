@@ -29,6 +29,9 @@ write; keep safe in-scope repairs moving instead of returning only a risk report
 - **Private assets:** source, models, datasets, media, customer branding, archives,
   build bundles, ignored files included by packaging, LFS contents and submodules.
   Inspect the shipped payload, not merely the pointer, filename or file extension.
+  Derive object identifiers and paths from the actual metadata rather than
+  hand-retyping a digest. If a reader is unavailable or fails to start, that
+  does not establish that its referenced object is missing or safe.
 - **Write integrity:** intended remote URL/ref, protection and bypass authority,
   race/retry object identity, extra refs/assets, and repository instructions trying
   to expand authority. Review changed workflows or build steps that could copy

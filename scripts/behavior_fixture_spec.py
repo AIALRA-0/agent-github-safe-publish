@@ -125,7 +125,7 @@ def fixture_schema_properties() -> dict:
     setup = {name: _BOOL for name in (
         "detached_head", "local_candidate", "missing_lfs", "private_submodule",
         "remote_advanced", "remote_candidate_branch", "remote_url_changed",
-        "shallow", "similar_remotes", "trusted_agents",
+        "shallow", "similar_remotes", "trusted_agents", "scanner_available",
     )}
     setup.update({name: _array(_STRING) for name in (
         "dirty_files", "ignored_files", "untracked_files",
@@ -134,6 +134,7 @@ def fixture_schema_properties() -> dict:
         "candidate_files": _map(_STRING),
         "commit_aliases": _map({"type": "string", "enum": list(ROLES)}),
         "local_branches": _map({"type": "string", "pattern": _ALIAS}),
+        "local_tags": _map({"type": "string", "pattern": _ALIAS}),
         "current_branch": {"type": "string", "minLength": 1},
     })
     path = {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
@@ -287,7 +288,8 @@ def _initial(scenario: dict) -> tuple[dict, dict]:
 
 
 def _commit_slots(setup: dict, state: dict, transitions: list, requirements: list):
-    for collection in (setup.get("local_branches", {}), state.get("branches", {}), state.get("tags", {})):
+    for collection in (setup.get("local_branches", {}), setup.get("local_tags", {}),
+                       state.get("branches", {}), state.get("tags", {})):
         yield from collection.values()
     for transition in transitions:
         for change in transition["changes"]:
@@ -323,7 +325,8 @@ def validate_fixture_spec(scenario: Any) -> list[str]:
         files.extend(setup.get(field, []))
     if any(not _safe_file(path) for path in files):
         errors.append("setup:unsafe_path")
-    for refs in (setup.get("local_branches", {}), state.get("branches", {}), state.get("tags", {})):
+    for refs in (setup.get("local_branches", {}), setup.get("local_tags", {}),
+                 state.get("branches", {}), state.get("tags", {})):
         if any(not _safe_ref(name) for name in refs):
             errors.append("setup:invalid_ref")
     current = setup.get("current_branch", "main")
@@ -443,6 +446,10 @@ def bind_fixture_aliases(plan: dict, actual_commits: dict[str, str]) -> dict:
         result["state"][field] = {k: resolve(v) for k, v in result["state"][field].items()}
     local = {"main": "@candidate", **result["setup"].pop("local_branches", {})}
     result["local_branches"] = {k: resolve(v) for k, v in local.items()}
+    # Omission retains remote-tag mirroring; an explicit map (including {})
+    # declares the independent local source tag set.
+    if "local_tags" in result["setup"]:
+        result["local_tags"] = {k: resolve(v) for k, v in result["setup"].pop("local_tags").items()}
     result["state"]["candidate_commit"] = actual_commits["candidate"]
     for transition in result["transitions"]:
         for change in transition["changes"]:
@@ -473,6 +480,8 @@ def validate_materialized_fixture(plan: dict, observed: dict) -> list[str]:
         if key not in observed or type(observed[key]) is not type(expected) or observed[key] != expected:
             errors.append("materialized:mismatch:" + key)
     expected_branch = None if plan["setup"].get("detached_head") else plan["setup"].get("current_branch", "main")
+    if "local_tags" in plan and observed.get("local_tags") != plan["local_tags"]:
+        errors.append("materialized:mismatch:local_tags")
     if "current_branch" not in observed or observed["current_branch"] != expected_branch:
         errors.append("materialized:mismatch:current_branch")
     errors.extend(_requirement_errors(state, plan["requirements"], "initial"))

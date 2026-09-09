@@ -166,10 +166,26 @@ def execute(args: argparse.Namespace, state: dict[str, Any], *,
             raise RuntimeError(
                 "tag target is not reachable from an existing remote ref; a Tag write cannot imply branch publication"
             )
-        create = git("tag", "-a", args.tag, commit, "-m", f"Synthetic evaluation tag {args.tag}")
-        if create.returncode != 0:
-            raise RuntimeError("local synthetic tag creation failed: " + create.stderr.strip())
-        push = git("push", "origin", f"refs/tags/{args.tag}:refs/tags/{args.tag}")
+        tag_ref = f"refs/tags/{args.tag}"
+        existing = git("show-ref", "--verify", "--quiet", tag_ref)
+        if existing.returncode == 0:
+            kind = git("cat-file", "-t", tag_ref)
+            target_commit = git("rev-parse", "--verify", f"{tag_ref}^{{commit}}")
+            if kind.returncode != 0 or kind.stdout.strip() != "tag":
+                raise RuntimeError("existing local tag is not annotated; overwrite is not allowed")
+            if target_commit.returncode != 0 or target_commit.stdout.strip() != commit:
+                raise RuntimeError("existing local tag target mismatch; overwrite is not allowed")
+        elif existing.returncode == 1:
+            create = git("tag", "-a", args.tag, commit, "-m", f"Synthetic evaluation tag {args.tag}")
+            if create.returncode != 0:
+                raise RuntimeError("local synthetic tag creation failed: " + create.stderr.strip())
+        else:
+            raise RuntimeError("cannot inspect the existing local tag")
+        # Push the exact annotated object, retaining its annotation and identity.
+        tag_object = git("rev-parse", "--verify", tag_ref)
+        if tag_object.returncode != 0:
+            raise RuntimeError("cannot resolve the local annotated tag object")
+        push = git("push", "origin", f"{tag_object.stdout.strip()}:{tag_ref}")
         if push.returncode != 0:
             raise RuntimeError("local bare-remote tag push failed: " + push.stderr.strip())
         tags[args.tag] = commit

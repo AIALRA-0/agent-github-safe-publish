@@ -7,7 +7,10 @@ import json
 from pathlib import Path
 
 
-def linux_permission_args(work: Path, writable: tuple[Path, ...] = (), *, readonly: tuple[Path, ...] = ()) -> list[str]:
+def linux_permission_args(work: Path, writable: tuple[Path, ...] = (), *, readonly: tuple[Path, ...] = (),
+                          scanner_available: bool = True) -> list[str]:
+    if type(scanner_available) is not bool:
+        raise ValueError("scanner availability must be an explicit boolean")
     filesystem = {":root": "deny", ":minimal": "read", ":tmpdir": "deny", ":slash_tmp": "deny"}
     for root in (work, *writable):
         absolute = root.resolve()
@@ -26,6 +29,10 @@ def linux_permission_args(work: Path, writable: tuple[Path, ...] = (), *, readon
     # The dedicated outer runtime mounts only verified CLI executables here.
     if Path("/runtime").is_dir():
         filesystem["/runtime"] = "read"
+    if not scanner_available:
+        # A verified outer runtime has exactly this standalone scanner. Deny
+        # its real path, not just PATH lookup; this must pass a runtime canary.
+        filesystem["/runtime/gitleaks"] = "deny"
     helper = work.parent / ".fixture-no-hooks"
     if helper.is_dir():
         filesystem[str(helper.resolve())] = "read"

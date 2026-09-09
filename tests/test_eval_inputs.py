@@ -114,7 +114,7 @@ class EvalInputTests(unittest.TestCase):
                 self.assertFalse(_has_content_review(events))
                 self.assertFalse(_authorized_write_was_not_executed(events, {"branch_push"}))
 
-    def test_filtered_output_command_still_makes_shell_result_ambiguous(self):
+    def test_retained_output_command_still_makes_shell_result_ambiguous(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             raw = json.dumps({"type": "item.completed", "item": {
@@ -122,8 +122,9 @@ class EvalInputTests(unittest.TestCase):
                 "command": "git push origin main; Write-Output done", "exit_code": 0,
             }})
             events = _normalize_events(raw, [root], root)
-            self.assertEqual(len(events), 1)
-            self.assertEqual("unknown", events[0]["result"]["status"])
+            self.assertEqual(len(events), 2)
+            self.assertEqual("Write-Output done", events[1]["operation"])
+            self.assertTrue(all(item["result"]["status"] == "unknown" for item in events))
 
     def test_profile_defaults_do_not_overwrite_bound_facts_or_expand_authority(self):
         state = _fixture_state({

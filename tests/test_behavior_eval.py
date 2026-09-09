@@ -844,6 +844,7 @@ class CommandClassifierTests(unittest.TestCase):
         self.assertEqual(
             [(action, write) for action, write, _part in classified],
             [
+                ("inspect_local", None),
                 ("inspect_worktree", None),
                 ("verify_remote_identity", None),
                 ("inspect_worktree", None),
@@ -1111,6 +1112,11 @@ class FixtureControllerTests(unittest.TestCase):
             remote = root / "remote.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
             subprocess.run(["git", "init", "-b", "main", str(work)], check=True, capture_output=True)
+            # The controller creates annotated tags; never inherit host identity.
+            for key, value in (("user.name", "Synthetic Evaluator"),
+                               ("user.email", "evaluator@example.invalid")):
+                subprocess.run(["git", "config", "--local", key, value], cwd=work,
+                               check=True, capture_output=True)
             (work / "base.txt").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "base.txt"], cwd=work, check=True, capture_output=True)
             subprocess.run(
