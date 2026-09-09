@@ -66,7 +66,7 @@
       "type": "string",
       "enum": [
         "ask_once", "authorization_revoked", "no_skill_invocation",
-        "read_back_asset", "read_back_pull_request", "read_back_release", "read_back_remote",
+        "read_back_asset", "read_back_issue", "read_back_pull_request", "read_back_release", "read_back_remote",
         "read_back_tag", "report_historical_failure", "reread_protection", "retain_strict_review", "stop_missing_dependency",
         "stop_missing_lfs", "stop_missing_tag", "stop_original_write", "stop_private_submodule", "stop_remote_change",
         "stop_remote_identity_mismatch", "stop_remote_url_change", "stop_tag_target_unpublished",

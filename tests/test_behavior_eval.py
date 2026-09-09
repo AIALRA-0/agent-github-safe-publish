@@ -227,6 +227,7 @@ class ScenarioContractTests(unittest.TestCase):
             item["stop_point"] for item in json.loads(CASES.read_text(encoding="utf-8"))["scenarios"]
         }
         self.assertTrue(scenario_stops <= set(properties["stop_point"]["enum"]))
+        self.assertIn("read_back_issue", properties["stop_point"]["enum"])
         run_schema = json.loads(
             (ROOT / "evals" / "schema" / "behavior-run-v2.0.2.schema.json").read_text(encoding="utf-8")
         )
