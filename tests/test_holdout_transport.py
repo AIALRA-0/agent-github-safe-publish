@@ -91,6 +91,17 @@ class HoldoutTransportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 subject._decode_fixture_transport(bad)
 
+    def test_transport_recovers_only_redundant_trailing_structural_closers(self):
+        payload = encoded(fixture())
+        payload["scenarios"][0]["fixture_requirements"] += "}]}"
+        self.assertEqual(subject._decode_fixture_transport(payload), fixture())
+        for trailing in (" second", " []", " {}", ",", "]x", "]" * 9):
+            with self.subTest(trailing=trailing):
+                malformed = encoded(fixture())
+                malformed["scenarios"][0]["fixture_requirements"] += trailing
+                with self.assertRaises(ValueError):
+                    subject._decode_fixture_transport(malformed)
+
     def run_main(self, root, generated, calibrated, *, resume=False):
         public = root / "public.json"
         public.write_text('{"scenarios": []}', encoding="utf-8")

@@ -103,8 +103,7 @@ def _schema() -> dict:
     }
 
 
-def _strict_json_loads(text: str):
-    """Reject ambiguous JSON without including input values in diagnostics."""
+def _strict_json_decoder() -> json.JSONDecoder:
     def pairs(items):
         result = {}
         for key, value in items:
@@ -122,7 +121,26 @@ def _strict_json_loads(text: str):
             raise ValueError("nonfinite_json_number")
         return parsed
 
-    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+    return json.JSONDecoder(object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+
+
+def _strict_json_loads(text: str):
+    """Reject ambiguous JSON without including input values in diagnostics."""
+    return _strict_json_decoder().decode(text)
+
+
+def _decode_fixture_string(value: str):
+    """Decode one value, tolerating only redundant trailing structural closers."""
+    try:
+        return _strict_json_loads(value)
+    except json.JSONDecodeError as error:
+        if error.msg != "Extra data":
+            raise
+        decoded, end = _strict_json_decoder().raw_decode(value)
+        trailing = value[end:].strip()
+        if not trailing or len(trailing) > 8 or any(character not in "]}" for character in trailing):
+            raise
+        return decoded
 
 
 def _decode_fixture_transport(payload: dict) -> dict:
@@ -137,7 +155,7 @@ def _decode_fixture_transport(payload: dict) -> dict:
         for field in SPEC_FIELDS:
             value = decoded.get(field)
             if isinstance(value, str):
-                value = _strict_json_loads(value)
+                value = _decode_fixture_string(value)
             expected = dict if field in ("fixture_setup", "fixture_state") else list
             if not isinstance(value, expected):
                 raise ValueError("invalid_fixture_transport")
