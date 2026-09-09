@@ -20,6 +20,11 @@ LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/Users/|/home/|\\Users\\)")
 EVALUATED_INPUTS = {
     "SKILL.md",
     "agents/openai.yaml",
+    "references/review-and-memory.md",
+    "scripts/publication_memory.py",
+    "scripts/run_behavior_eval.py",
+    "scripts/eval_fixture_control.py",
+    "scripts/run_v202_matrix.py",
     "evals/candidate/publication-behavior-v2.0.2.json",
     "scripts/behavior_eval_contract.py",
     "scripts/grade_skill_behavior.py",

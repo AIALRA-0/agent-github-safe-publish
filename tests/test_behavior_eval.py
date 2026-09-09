@@ -376,6 +376,26 @@ class GraderTests(unittest.TestCase):
         report = grade(fixture, [run], "tool_observed")
         self.assertEqual(report["failed"], 0, report)
 
+    def test_safe_write_alias_does_not_require_a_duplicate_label(self) -> None:
+        fixture = _fixture("github-push-normal")
+        scenario = fixture["scenarios"][0]
+        scenario["required_actions"].append("branch_push")
+        run = _branch_run(scenario)
+        run["final_decision"]["actions"] = [a for a in run["final_decision"]["actions"] if a != "branch_push"]
+        self.assertEqual(grade(fixture, [run], "tool_observed")["failed"], 0)
+        run["events"][3]["action_id"] = "force_push"
+        self.assertGreater(grade(fixture, [run], "tool_observed")["failed"], 0)
+
+    def test_visible_report_does_not_excuse_unreported_writes(self) -> None:
+        fixture = _fixture("github-push-normal")
+        scenario = fixture["scenarios"][0]
+        scenario["required_actions"].append("final_report")
+        run = _branch_run(scenario)
+        run["final_decision"]["actions"] = [a for a in run["final_decision"]["actions"] if a != "final_report"]
+        self.assertEqual(grade(fixture, [run], "tool_observed")["failed"], 0)
+        run["final_decision"]["writes"] = []
+        self.assertGreater(grade(fixture, [run], "tool_observed")["failed"], 0)
+
     def test_complete_remote_snapshot_is_a_branch_push_readback(self) -> None:
         fixture = _fixture("github-push-normal")
         scenario = fixture["scenarios"][0]
