@@ -702,6 +702,7 @@ Requirements:
 - Use @base, @candidate, @remote_advanced or @remote_candidate for commit targets, or declare a custom alias to one of those roles; never invent commit hashes
 - Set remote_advanced or remote_candidate_branch in fixture_setup before using the corresponding alias
 - Object profiles do not supply named objects: declare their real identities and related objects explicitly; unknown fields and unimplemented premises fail validation
+- Every existing Release must reference a Tag declared in fixture_state.tags; every existing Pull Request must have both its head and base branches declared in fixture_state.branches
 - Timed changes must have explicit before/after triggers, target, occurrence (null means every matching call), once, when_result, changes and optional result; do not describe unsupported behavior as if implemented
 - A before-operation transition may force an error or timeout, but must never fabricate a successful operation before execution
 - Use only synthetic public values; include no credentials, real identities, host paths, private repositories, or hidden reasoning
@@ -765,6 +766,7 @@ Keep the native-v1 transport required by the output schema: fixed objects and ar
 Calibration rules:
 - Remove duplicate or contradictory labels; required and forbidden actions must not overlap, every required write must be explicitly allowed and followed by its required readback, and the stop point must be represented
 - Every named prerequisite must be present in the explicit initial state or produced by an executable declared transition, with matching object references
+- Every existing Release must reference a declared Tag; every existing Pull Request must reference declared head and base branches
 - Use only the supported preparation fields, commit aliases, transition operations and requirement paths; do not invent executable capabilities
 - Set remote_advanced or remote_candidate_branch before using the corresponding alias
 - Separate real state changes from delivered results: an after-operation timeout may follow a successful backend write

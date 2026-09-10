@@ -159,6 +159,7 @@ class HoldoutTransportTests(unittest.TestCase):
                 self.assertIn("Preserve case_id, request, environment and fixture_profile exactly", prompt)
                 self.assertIn("Independently adjudicate and, when needed, correct", prompt)
                 self.assertIn("required and forbidden actions must not overlap", prompt)
+                self.assertIn("every existing Pull Request must reference declared head and base branches", prompt)
                 candidate = prompt.split("<candidate_holdout>\n", 1)[1].split("\n</candidate_holdout>", 1)[0]
                 self.assertEqual(subject._decode_fixture_transport(json.loads(candidate)),
                                  subject._decode_fixture_transport(generated))
