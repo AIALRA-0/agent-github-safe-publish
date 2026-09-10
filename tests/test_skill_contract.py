@@ -245,7 +245,9 @@ class SkillInvocationContractTests(unittest.TestCase):
         contributing = (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
         self.assertIn("model's self-reported JSON alone is decision-only evidence", skill)
         self.assertIn("not steps every user must run", skill)
-        self.assertIn("总计 119 次", contributing)
+        self.assertIn("10 至 15 个", contributing)
+        self.assertIn("119 次多模型", contributing)
+        self.assertIn("不是 Release 前置条件", contributing)
         self.assertIn("CI 只校验已提交的脱敏证据", contributing)
 
     def test_default_review_routes_to_durable_recurrence_and_safe_issue_protocol(self) -> None:
@@ -286,14 +288,16 @@ class DocumentationContractTests(unittest.TestCase):
             *sorted((REPOSITORY_ROOT / "docs" / "security").glob("*.md")),
         ]
 
-    def test_numbered_markdown_sections_use_trailing_dots(self) -> None:
-        heading = re.compile(r"^(#{2,4})\s+(\d+(?:\.\d+)*)\.\s+\S")
+    def test_numbered_markdown_sections_omit_trailing_dots(self) -> None:
+        heading = re.compile(r"^(#{2,4})\s+(\d+(?:\.\d+)*)\s+\S")
+        trailing_dot = re.compile(r"^#{2,4}\s+\d+(?:\.\d+)*\.\s+")
         numeric_heading = re.compile(r"^#{2,4}\s+\d")
-        for document in self._documents():
+        for document in (REPOSITORY_ROOT / "README.md", REPOSITORY_ROOT / "README.en.md"):
             for line_number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
                 if numeric_heading.match(line):
                     with self.subTest(document=document.name, line=line_number):
                         self.assertRegex(line, heading)
+                        self.assertNotRegex(line, trailing_dot)
 
     def test_numbered_markdown_sections_match_heading_depth_and_parent(self) -> None:
         heading = re.compile(r"^(#{2,4})\s+(\d+(?:\.\d+)*)\.\s+\S")

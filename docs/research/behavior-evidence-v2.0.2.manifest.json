@@ -1,0 +1,37 @@
+{
+  "schema_version": "2.0.2",
+  "evaluated_commit": "28509be6b262370923da99c69dd2602026d5bd42",
+  "evaluated_inputs": {
+    "SKILL.md": "59bb719ebf30719171d64e88e0741e98717ed9b51c8783c030c6837e139fe7c8",
+    "agents/openai.yaml": "7d9588fa3206427dc40c1b93f302d807c2eb2e3bc8e1d05b96be65be10c4d54f",
+    "references/review-and-memory.md": "c0419e0d00a3a2122bfef5016bb62ca5fc909637b6cccb6dc491db332ac075f2",
+    "scripts/publication_memory.py": "90d0250ead95a70b1a100bb6ef7080c890365981e2cbd06873d5b5ade9e846ae",
+    "scripts/run_behavior_eval.py": "81a34184cfbecf006c1dacaf0f7c84d96505cc28e1ef463ebbdc7817284a04a3",
+    "scripts/eval_runtime_permissions.py": "4f7df6a80f0d32e3a61081edb67acc6056aa4a29e650ab71c75450959acfca48",
+    "scripts/eval_fixture_control.py": "979624a6958771518dfa61553aa7e2631cdec28d4103aea5a96339a903031cd8",
+    "scripts/fixture_broker.py": "6fc4459250fcce317f57d2b455cca5b88bdca01fa003d3a9afbabd80e32a4759",
+    "scripts/fixture_broker_client.py": "29b0bf7c025e4b86910ae5db2aece1037bcff9831bbcd9b04f0979c6796db05b",
+    "scripts/fixture_broker_runtime.py": "979696ff8bdcd64d8251ed642a7a2237935fbfd9a4840c1c6eb36b989b20a18f",
+    "scripts/fixture_event_attribution.py": "ebc753b8732138d90fdd1976b67318651867a26cd2fcb79c7da4c02fe2922adb",
+    "scripts/behavior_fixture_spec.py": "61eb09fed2200f05cbd13ca6a6a56bd830614cf4271c011e1b1a0ef9e73b387e",
+    "scripts/materialize_behavior_fixture.py": "adf621e73c3395bc1252c0a9bcaa49ffa0b472e028827d18e1adc2945c829910",
+    "scripts/github_e2e_decisions.py": "fe321546e812b94a8700c4da6a43e5d5660bdf7210cfd476f5ccda82d3044206",
+    "scripts/run_github_agent_e2e.py": "4de67df4558a5c63482feed9b5dc9e434321cc636ebba648ffdacf65038b00bf",
+    "scripts/run_github_e2e.py": "45ddcabc3dfed717fa823a3ad81aae9c9406f4fba25651d5c511423fee8850e4",
+    "scripts/run_v202_matrix.py": "d4b354e74578cecb588d6cc218067e66d5e1bfb38450816d5279a0887a865d4a",
+    "scripts/generate_behavior_holdout.py": "3348021120b5214b9c9c7baa6c63c4334d850bc06c9f0ea6d9ddbb860b3f6fa0",
+    "evals/candidate/publication-behavior-v2.0.2.json": "2db917d4ef74ccdbf59b0c921bdd0b82c7a2cdf635ed4d808a78105d0a2cc810",
+    "evals/schema/final-decision-v2.0.2.schema.json": "a047e90ca59bc21224f54f4eeb536ba2f499a75da3b589fe65e963c96be7d428",
+    "evals/schema/behavior-run-v2.0.2.schema.json": "2128775d5b39b3973ee34f4c2a3ef75899e24abb648db3387123df923bab26d8",
+    "scripts/behavior_eval_contract.py": "5419163ae9331c41c88109c1c11bbb944401fa49bec4529d6913891fa7e191a0",
+    "scripts/grade_skill_behavior.py": "34d08497ff8eafda2a2b9f142d3cc3b8acc3aa0d0bdfc4d57a5e577cdef58e06"
+  },
+  "evidence_outputs": {
+    "docs/research/behavior-eval-v2.0.2.public.json": "bf300e7a7c9c18952ff59fc4ac253b3ad1fea01e04e4e131255c0a465bf4d506",
+    "docs/research/behavior-events-v2.0.2.public.json": "6f2d3e3a28f52d8542648a4090e03c8519e9c4daaf0c8417eff5a22546191172"
+  },
+  "public_report": "docs/research/behavior-eval-v2.0.2.public.json",
+  "public_events": "docs/research/behavior-events-v2.0.2.public.json",
+  "scope": "selected behavior inputs and sanitized public outputs only",
+  "raw_output_storage": "repository-external"
+}
