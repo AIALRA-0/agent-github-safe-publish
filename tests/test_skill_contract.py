@@ -374,7 +374,7 @@ class DocumentationContractTests(unittest.TestCase):
         diagram = match.group(1)
         self.assertIn("flowchart TD", diagram)
         self.assertGreaterEqual(diagram.count("-->"), 3)
-        self.assertIn("图 2.1", readme[match.end():])
+        self.assertIn("图 3.1", readme[match.end():])
 
     def test_stable_release_documents_and_license_exist(self) -> None:
         for name in ("LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md"):
