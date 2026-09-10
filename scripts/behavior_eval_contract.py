@@ -866,7 +866,10 @@ def classify_command(command: str) -> tuple[str, str | None]:
         return "reread_remote", None
     if re.search(r"(?:^|\s)rg\s+--files(?:\s|$)", normalized):
         return "inspect_worktree", None
-    if re.search(r"\b(?:git|gh)\s+|\bgithub\b", normalized):
+    # Treat actual Git/GitHub command tokens as unknown operations, but do not
+    # mistake an ordinary read of a path such as ``.github/publish-guide.md``
+    # for a remote write merely because the directory name contains github.
+    if re.search(r"(?:^|\s)(?:git|gh|github(?:\.exe)?)(?:\s|$)", normalized):
         return "unknown_git_or_github_write", None
     if "project_check.py" in normalized:
         return "run_affected_checks", None

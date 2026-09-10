@@ -33,6 +33,10 @@
 
 公开场景位于 `evals/candidate/`，状态始终标记为 `candidate`，不能冒充用户金标；每个场景必须使用封闭动作与写入枚举，并包含请求、可见事实、必需动作、禁止动作、允许写入和停止点
 
+私有 holdout 的八个场景应在整组范围内覆盖不同风险，但单个场景只聚焦一个主要行为轴和最多一个交互轴
+
+不得把远端竞态、对象幂等、仓库指令注入、扫描器故障、保护规则绕过和特殊 Git 状态无因果地堆进同一道题；`treat_matching_objects_as_success`、`stop_remote_change` 等终止动作只能在它确实是该场景终点时成为必需动作
+
 当前场景还必须显式声明以下四个准备字段，由 `scripts/behavior_fixture_spec.py` 校验：
 
 - `fixture_setup`：准备本地提交、分支和文件，`local_candidate` 按场景事实显式填写，不从 `allowed_writes` 或预期动作推断

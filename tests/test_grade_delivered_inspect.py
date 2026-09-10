@@ -11,7 +11,8 @@ from behavior_fixture_spec import (  # noqa: E402
 )
 from eval_fixture_control import _visible_state  # noqa: E402
 from grade_skill_behavior import (  # noqa: E402
-    _attributed_writes, _event_order_violations, _inspect_read_coverage, _semantic_stop_index, grade,
+    _attributed_writes, _event_order_violations, _inspect_read_coverage,
+    _ordered_inspect_read_coverage, _semantic_stop_index, grade,
 )
 from test_behavior_eval import _branch_run, _decision, _event, _fixture  # noqa: E402
 from test_fixture_attribution import BASE, CANDIDATE, ADVANCED, TIMEOUT, snapshot, transition  # noqa: E402
@@ -70,6 +71,18 @@ class DeliveredInspectTests(unittest.TestCase):
         violations = grade(fixture, [run], "tool_observed")["results"][0]["violations"]
         self.assertIn("required_actions_missing:stop_remote_change,verify_existing_objects_match", violations)
         self.assertEqual(run, original)
+
+    def test_ordered_inspect_before_pr_update_proves_current_pr_read(self):
+        fixture, run = inspected_run()
+        scenario = {"required_actions": ["read_back_pull_request"], "stop_point": "read_back_pull_request"}
+        coverage = _ordered_inspect_read_coverage(run, run["events"])
+        self.assertIn("read_back_pull_request", coverage[2])
+        update = _event(4, "update_pull_request", write_type="pr_update")
+        readback = _event(5, "read_back_pull_request")
+        self.assertEqual(
+            _event_order_violations([*run["events"], update, readback], scenario, run, coverage),
+            [],
+        )
 
     def test_conditional_plan_then_reads_then_decision_is_not_proven_poststop(self):
         fixture, run = inspected_run()

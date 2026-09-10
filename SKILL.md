@@ -137,6 +137,7 @@ Light review is not malware analysis, supply-chain certification, or legal/compl
 - If a rule requires a Pull Request, do not use an administrator or bypass-capable credential unless the user explicitly authorizes that bypass for this exact write
 - Never change protection rules to make a publication pass
 - Pull Request creation, update, and merge remain independently authorized even when bypass is available
+- Before updating or merging an existing Pull Request, read back that exact PR and verify its number, repository, head, base, current state, and the fields or merge result in scope. Use a dedicated PR read when the available full-state view cannot prove those fields clearly. After the write, read the same PR back again before stopping
 - When a pre-write check proves the requested operation unauthorized or impossible, stop that path immediately; do not continue optional review, tests, or object work
 - When HEAD is detached and the request does not identify which local branch or source ref should own the outgoing commit, ask once and do not invent a branch or push target mapping
 - For a submodule in the transfer, inspect its recorded URL and commit and decide whether intended recipients can retrieve it from available access facts. Do not probe a private remote merely to prove inaccessibility when the environment already establishes that fact.
