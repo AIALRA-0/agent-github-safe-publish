@@ -24,7 +24,9 @@ from behavior_eval_contract import (
     SCHEMA_VERSION, _split_shell_commands, classify_command_sequence,
     literal_read_paths, successful_posix_git_chain, successful_posix_read_chain, validate_fixture,
 )
-from behavior_fixture_spec import SPEC_FIELDS, new_fixture_runtime, prepare_fixture_spec
+from behavior_fixture_spec import (
+    SPEC_FIELDS, bind_fixture_aliases, new_fixture_runtime, prepare_fixture_spec,
+)
 from materialize_behavior_fixture import materialize
 from eval_runtime_permissions import linux_permission_args
 from fixture_broker_runtime import PrivateFixtureRuntime, readonly_model_command
@@ -279,6 +281,34 @@ def _fixture_state(scenario: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def _prepare_materializer_head(
+    work: Path, plan: dict[str, Any], actual_commits: dict[str, str], env: dict[str, str],
+) -> None:
+    """Place the temporary checkout at the exact HEAD the bound plan requires."""
+    bound = bind_fixture_aliases(plan, actual_commits)
+    if bound["setup"].get("detached_head"):
+        command = ["git", "checkout", "--detach", actual_commits["candidate"]]
+        expected_branch = ""
+        expected_head = actual_commits["candidate"]
+    else:
+        current = bound["setup"].get("current_branch", "main")
+        command = ["git", "checkout", "-B", current, bound["local_branches"][current]]
+        expected_branch = current
+        expected_head = bound["local_branches"][current]
+    checkout = _run(command, work, env)
+    if checkout.returncode != 0:
+        raise RuntimeError("fixture parent HEAD preparation failed")
+    branch = _run(["git", "branch", "--show-current"], work, env)
+    head = _run(["git", "rev-parse", "HEAD"], work, env)
+    if (
+        branch.returncode != 0
+        or head.returncode != 0
+        or branch.stdout.strip() != expected_branch
+        or head.stdout.strip() != expected_head
+    ):
+        raise RuntimeError("fixture parent HEAD preparation readback failed")
+
+
 def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) -> Path:
     # Windows TEMP may use an 8.3 spelling of the same freshly allocated root.
     root = root.resolve(strict=True)
@@ -481,6 +511,7 @@ def _prepare_fixture(root: Path, scenario: dict[str, Any], env: dict[str, str]) 
             actual_commits["remote_advanced"] = remote_commit
         if remote_candidate_commit is not None:
             actual_commits["remote_candidate"] = remote_candidate_commit
+        _prepare_materializer_head(work, plan, actual_commits, env)
         bound = materialize(plan, work, actual_commits, env)
         _write_json(eval_dir / "fixture-plan.json", bound)
         fixture_state = _read_json(eval_dir / "remote-state.json")

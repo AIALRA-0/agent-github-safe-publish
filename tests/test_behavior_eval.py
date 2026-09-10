@@ -1674,6 +1674,26 @@ class FixtureControllerTests(unittest.TestCase):
                 changed_state["expected_git_remote_url"],
             )
 
+    def test_parent_prepares_non_candidate_current_branch_before_materialization(self) -> None:
+        case = copy.deepcopy(_fixture("github-push-normal")["scenarios"][0])
+        case["fixture_setup"]["local_branches"] = {"review-base": "@base"}
+        case["fixture_setup"]["current_branch"] = "review-base"
+        with tempfile.TemporaryDirectory(prefix="gsp-behavior-eval-") as directory:
+            root = Path(directory)
+            environment = _safe_environment(root / "gh")
+            work = _prepare_fixture(root, case, environment)
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"], cwd=work, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=work, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            remote = subprocess.run(
+                ["git", "rev-parse", "origin/main"], cwd=work, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            self.assertEqual("review-base", branch)
+            self.assertEqual(remote, head)
+
     def test_normalized_run_schema_rejects_non_monotonic_events(self) -> None:
         scenario = _fixture("github-push-normal")["scenarios"][0]
         run = _branch_run(scenario)
