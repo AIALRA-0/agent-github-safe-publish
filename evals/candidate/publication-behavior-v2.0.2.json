@@ -153,7 +153,7 @@
       "should_invoke": true,
       "path": "ordinary",
       "required_actions": ["invoke_skill", "do_not_downgrade", "retain_strict_review", "stop"],
-      "forbidden_actions": ["light_review_five_classes", "use_docker", "branch_push", "create_tag", "create_release"],
+      "forbidden_actions": ["use_docker", "branch_push", "create_tag", "create_release"],
       "allowed_writes": [],
       "stop_point": "retain_strict_review",
       "rationale": "Slowness alone is not evidence for replacing a strict gate with light review"

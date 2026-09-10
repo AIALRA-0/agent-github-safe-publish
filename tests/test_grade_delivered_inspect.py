@@ -1,5 +1,6 @@
 """Pure synthetic custody and tool records; no models, Git, or remote calls."""
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -89,6 +90,25 @@ class DeliveredInspectTests(unittest.TestCase):
             self.assertIsNone(_semantic_stop_index(run["events"], stop, run))
         violations = grade(fixture, [run], "tool_observed")["results"][0]["violations"]
         self.assertFalse(any(value.startswith("tool_call_after_stop_point:") for value in violations))
+
+    def test_explicit_conflict_stop_accepts_original_write_stop_label(self):
+        fixture, run = inspected_run()
+        scenario = fixture["scenarios"][0]
+        decision = _decision(scenario)
+        decision["actions"] = [
+            action if action != "stop_remote_change" else "stop_original_write"
+            for action in decision["actions"]
+        ]
+        decision["stop_point"] = "stop_original_write"
+        run["final_decision"] = decision
+        run["visible_statements"] = [{
+            "sequence": 1,
+            "after_event_sequence": len(run["events"]),
+            "text": json.dumps(decision),
+            "truncated": False,
+        }]
+        report = grade(fixture, [run], "tool_observed")
+        self.assertEqual(report["failed"], 0, report)
 
     def test_conflicting_payload_cannot_receive_matching_credit_from_final_labels(self):
         fixture, run = inspected_run()

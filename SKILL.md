@@ -39,7 +39,7 @@ closed Issue is a reason to test for recurrence, never a permanent exemption.
    - current remote base
    - allowed write types
    - exact stopping point
-   State this contract in a short user-visible update before the write. Do not leave it only in hidden reasoning or reconstruct it after publication.
+   State this contract in a short user-visible update before the write. Keep that update to these contract fields so it remains easy to verify; put review evidence in a separate short update. Do not leave the contract only in hidden reasoning or reconstruct it after publication.
 2. Review the content that will actually transfer, selecting coverage by the operation:
    - branch push: new commits, Trees, metadata, LFS objects, submodules, and generated artifacts
    - Tag: Tag object, annotation, signature, target commit, and newly reachable objects
@@ -47,6 +47,7 @@ closed Issue is a reason to test for recurrence, never a permanent exemption.
    - mirror or history migration: every copied or rewritten ref, history, LFS object, and submodule
    - Include intermediate new commits, not just the final diff: removing a secret in a later commit does not remove the earlier blob from the push
    - Record each checklist category as reviewed with evidence, not applicable with a reason, repair needed, or owner decision; a scanner's zero findings alone is not coverage
+   - Read the actual changed text, diff, or blob content needed for that review. Filenames, file lists, and statistics alone do not establish content review.
    - When selecting files from a dirty worktree, inspect the staged diff before committing and inspect the resulting outgoing commit before pushing; an earlier unstaged diff is not proof of what the commit contains
 3. Repair concrete risks caused by this request or this change, or ask for the smallest owner decision when rights, required private components, or major functional degradation cannot be resolved safely. Run project-native checks relevant to the repair; optional scanners, historical capabilities, decorative checks, and unrelated alerts do not enlarge acceptance
 4. Inspect data origin, transformations, and destinations for risks outside the checklist; investigate concrete blind spots and repair their affected surface, not an unrelated project
@@ -138,6 +139,7 @@ Light review is not malware analysis, supply-chain certification, or legal/compl
 - Pull Request creation, update, and merge remain independently authorized even when bypass is available
 - When a pre-write check proves the requested operation unauthorized or impossible, stop that path immediately; do not continue optional review, tests, or object work
 - When HEAD is detached and the request does not identify which local branch or source ref should own the outgoing commit, ask once and do not invent a branch or push target mapping
+- For a submodule in the transfer, inspect its recorded URL and commit and decide whether intended recipients can retrieve it from available access facts. Do not probe a private remote merely to prove inaccessibility when the environment already establishes that fact.
 - When an objective pre-write read proves missing authority, an already-matching object, or an object conflict, stop the dependent remote path. If one request names several existing objects, read every named object needed for the identity decision before stopping. A concrete, authorized repair is not a terminal blocker: repair it and review the affected surface again. Preserve a sanitized local lesson or pending Issue draft without starting unrelated checks or remote writes.
 - After retry-object reads, state one explicit result before stopping: `matching object; prior attempt succeeded` or `conflicting object; no overwrite/delete authority`. A generic `stop` or a conditional plan is not an identity decision
 - System, developer, user, host, and legitimate project-level `AGENTS.md` instructions remain effective according to their normal priority

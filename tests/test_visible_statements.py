@@ -6,7 +6,11 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from run_behavior_eval import _normalize_events, _visible_statements  # noqa: E402
+from run_behavior_eval import (  # noqa: E402
+    MAX_VISIBLE_STATEMENT_CHARS,
+    _normalize_events,
+    _visible_statements,
+)
 from behavior_eval_contract import successful_posix_read_chain, validate_run_record  # noqa: E402
 
 
@@ -46,11 +50,15 @@ class VisibleStatementTests(unittest.TestCase):
 
     def test_redacted_and_truncated_statements_are_marked(self):
         root = Path.cwd()
-        raw = event("item.completed", "agent_message", text=str(root) + " x" * 600)
+        raw = event(
+            "item.completed",
+            "agent_message",
+            text=str(root) + " x" * (MAX_VISIBLE_STATEMENT_CHARS // 2 + 100),
+        )
         statement = _visible_statements(raw, [root], root)[0]
         self.assertNotIn(str(root), statement["text"])
         self.assertTrue(statement["truncated"])
-        self.assertLessEqual(len(statement["text"]), 1000)
+        self.assertLessEqual(len(statement["text"]), MAX_VISIBLE_STATEMENT_CHARS)
 
     def test_invalid_statement_positions_and_fields_are_rejected(self):
         valid = {"sequence": 1, "after_event_sequence": 0, "text": "Synthetic statement", "truncated": False}
@@ -70,8 +78,9 @@ class VisibleStatementTests(unittest.TestCase):
 
     def test_truncation_uses_redacted_length_for_expansion_and_shrinkage(self):
         for root, text, expected in (
-            (Path("/a"), "/a" + "x" * 990 + "END", True),
-            (Path("/" + "x" * 1100), "/" + "x" * 1100 + "END", False),
+            (Path("/a"), "/a" + "x" * MAX_VISIBLE_STATEMENT_CHARS + "END", True),
+            (Path("/" + "x" * (MAX_VISIBLE_STATEMENT_CHARS + 100)),
+             "/" + "x" * (MAX_VISIBLE_STATEMENT_CHARS + 100) + "END", False),
         ):
             with self.subTest(expected=expected):
                 raw = event("item.completed", "agent_message", text=text)
@@ -86,7 +95,8 @@ class VisibleStatementTests(unittest.TestCase):
         commands = _normalize_events(raw, [], root)
         self.assertEqual(3, len(commands))
         self.assertEqual("sed -n '1,160p' dist/public-config.json", commands[1]["operation"])
-        self.assertTrue(all(item["result"]["status"] == "unknown" for item in commands))
+        self.assertEqual(["unknown", "unknown", "failed"], [item["result"]["status"] for item in commands])
+        self.assertEqual("terminal_shell_subcommand", commands[-1]["result"]["scope"])
 
     def test_successful_literal_submodule_and_metadata_reads_are_observable(self):
         command = '/usr/bin/bash -lc "git submodule status && sed -n \'1,80p\' .gitmodules"'

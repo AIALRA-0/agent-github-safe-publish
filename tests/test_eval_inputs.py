@@ -57,14 +57,18 @@ class EvalInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for script, expected in (("git show --patch HEAD", "success"),
-                                     ("git show --patch HEAD; git push origin main", "unknown")):
+                                     ("git show --patch HEAD; git push origin main", "mixed")):
                 raw = json.dumps({"type": "item.completed", "item": {
                     "id": "linux-1", "type": "command_execution",
                     "command": f"/usr/bin/bash -lc '{script}'", "exit_code": 0,
                 }})
                 events = _normalize_events(raw, [root], root)
                 self.assertTrue(events)
-                self.assertTrue(all(event["result"]["status"] == expected for event in events))
+                if expected == "mixed":
+                    self.assertEqual(["unknown", "success"], [event["result"]["status"] for event in events])
+                    self.assertEqual("terminal_shell_subcommand", events[-1]["result"]["scope"])
+                else:
+                    self.assertTrue(all(event["result"]["status"] == expected for event in events))
                 self.assertEqual(_has_content_review(events), expected == "success")
 
     def test_timeout_retains_visible_output_and_terminates_its_child(self):
@@ -108,9 +112,11 @@ class EvalInputTests(unittest.TestCase):
                 }})
                 events = _normalize_events(stdout, [root], root)
                 self.assertEqual(len(events), 2)
-                for event in events:
-                    self.assertEqual("unknown", event["result"]["status"])
-                    self.assertEqual(exit_code, event["result"]["shell_exit_code"])
+                self.assertEqual("unknown", events[0]["result"]["status"])
+                self.assertEqual(exit_code, events[0]["result"]["shell_exit_code"])
+                self.assertEqual("success" if exit_code == 0 else "failed", events[1]["result"]["status"])
+                self.assertEqual(exit_code, events[1]["result"]["exit_code"])
+                self.assertEqual("terminal_shell_subcommand", events[1]["result"]["scope"])
                 self.assertFalse(_has_content_review(events))
                 self.assertFalse(_authorized_write_was_not_executed(events, {"branch_push"}))
 
@@ -124,7 +130,7 @@ class EvalInputTests(unittest.TestCase):
             events = _normalize_events(raw, [root], root)
             self.assertEqual(len(events), 2)
             self.assertEqual("Write-Output done", events[1]["operation"])
-            self.assertTrue(all(item["result"]["status"] == "unknown" for item in events))
+            self.assertEqual(["unknown", "success"], [item["result"]["status"] for item in events])
 
     def test_profile_defaults_do_not_overwrite_bound_facts_or_expand_authority(self):
         state = _fixture_state({
